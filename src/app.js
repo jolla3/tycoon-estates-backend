@@ -88,6 +88,14 @@ export function createApp() {
   });
 
   app.use(issueCsrfCookie);
+
+  // Auth/session JSON must never be cached by the browser or a CDN.
+  // A 304 on /auth/me can leave the SPA thinking the session is still invalid.
+  app.use('/api/v1', (_req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    next();
+  });
   app.use('/api/v1', generalApiRateLimiter);
   app.use('/api/v1/webhooks', webhookRoutes); // no CSRF — bank auth handles this
   app.use('/api/v1', csrfProtection, apiRoutes);
