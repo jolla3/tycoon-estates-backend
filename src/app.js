@@ -9,7 +9,7 @@ import MongoStore from 'connect-mongo';
 import cookieParser from 'cookie-parser';
 import swaggerUi from 'swagger-ui-express';
 
-import { env, isProduction } from './config/environment.js';
+import { env, isProduction, isCrossSiteFrontend } from './config/environment.js';
 import { helmetMiddleware, corsMiddleware } from './config/security.js';
 import { isDatabaseReady, supportsMongoTransactions } from './config/database.js';
 import { checkRedisHealth } from './config/redis.js';
@@ -55,17 +55,22 @@ export function createApp() {
 
   // Shared session store (MongoDB-backed) so any API instance behind the
   // load balancer can serve any request — section 26.
+  // Cross-site SPA (Vercel) talking to API (Render) needs SameSite=None + Secure
+  // so the browser stores and re-sends the session cookie on credentialed fetches.
+  const crossSite = isCrossSiteFrontend();
   app.use(
     session({
       name: 'connect.sid',
       secret: sessionSecret,
       resave: false,
       saveUninitialized: false,
+      proxy: true, // trust X-Forwarded-* from Render so secure cookies work
       store: MongoStore.create({ mongoUrl: env.MONGODB_URI }),
       cookie: {
         httpOnly: true,
-        secure: isProduction,
-        sameSite: 'strict',
+        secure: crossSite || isProduction,
+        sameSite: crossSite || isProduction ? 'none' : 'lax',
+        path: '/',
         maxAge: 8 * 60 * 60 * 1000,
       },
     })

@@ -15,7 +15,11 @@ export const authController = {
   async login(req, res, next) {
     try {
       const user = await authService.login(req.body.email, req.body.password);
-      req.session.userId = user._id;
+      req.session.userId = String(user._id);
+      // Persist before responding so a fast follow-up /auth/me sees the session.
+      await new Promise((resolve, reject) => {
+        req.session.save((err) => (err ? reject(err) : resolve()));
+      });
       await audit({ clientId: user.clientId, userId: user._id, action: 'LOGIN', ipAddress: req.ip, userAgent: req.headers['user-agent'] });
       apiResponse.success(res, { userId: user._id, role: user.role }, 'Logged in');
     } catch (err) {

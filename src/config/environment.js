@@ -72,7 +72,11 @@ function requiredEncryptionKey() {
 export const env = {
   NODE_ENV,
   PORT: parseInt(process.env.PORT || '4000', 10),
-  FRONTEND_URL: optional('FRONTEND_URL') || 'http://localhost:5173',
+  // Browser Origin(s) allowed for CORS + credentialed cookies.
+  // Set in env only — never hardcode production hosts in source.
+  // One origin, or comma-separated list. Trailing slashes are stripped.
+  // Local default is for development only.
+  FRONTEND_URL: (optional('FRONTEND_URL') || 'http://localhost:5173').replace(/\/+$/, ''),
   TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS || '1', 10),
 
   // Infrastructure — from .env only
@@ -99,5 +103,24 @@ export const env = {
   CELCOM_API_KEY: optional('CELCOM_API_KEY'),
   CELCOM_SENDER_ID: optional('CELCOM_SENDER_ID'),
 };
+
+/**
+ * True when at least one configured FRONTEND_URL host is not loopback.
+ * Drives SameSite=None + Secure for credentialed cross-origin cookies.
+ * All hosts come from env — no production URLs in source.
+ */
+export function isCrossSiteFrontend() {
+  const raw = String(env.FRONTEND_URL || '');
+  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) return isProd;
+  try {
+    return parts.some((p) => {
+      const host = new URL(p).hostname;
+      return host !== 'localhost' && host !== '127.0.0.1';
+    });
+  } catch {
+    return isProd;
+  }
+}
 
 export const isProduction = isProd;

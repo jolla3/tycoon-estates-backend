@@ -19,7 +19,7 @@
 //     apply to signup at all since it creates a brand-new account.)
 
 import crypto from 'crypto';
-import { isProduction } from '../config/environment.js';
+import { isProduction, isCrossSiteFrontend } from '../config/environment.js';
 import { apiResponse } from '../utils/apiResponse.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -27,10 +27,12 @@ const CSRF_EXEMPT_PATHS = new Set(['/auth/signup', '/auth/login']);
 
 export function issueCsrfCookie(req, res, next) {
   if (!req.cookies['csrf-token']) {
+    const crossSite = isCrossSiteFrontend();
     res.cookie('csrf-token', crypto.randomBytes(24).toString('hex'), {
       httpOnly: false, // must be readable by JS so it can be echoed back in a header
-      secure: isProduction,
-      sameSite: 'strict',
+      secure: crossSite || isProduction,
+      sameSite: crossSite || isProduction ? 'none' : 'lax',
+      path: '/',
     });
   }
   next();
