@@ -87,6 +87,15 @@ export function createApp() {
     next();
   });
 
+  // Liveness probes BEFORE session/CSRF side-effects so responses never Set-Cookie.
+  // SPA uses GET /api/v1/health; load balancers may use GET /health.
+  const healthHandler = (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ status: 'ok' });
+  };
+  app.get('/health', healthHandler);
+  app.get('/api/v1/health', healthHandler);
+
   app.use(issueCsrfCookie);
 
   // Auth/session JSON must never be cached by the browser or a CDN.
@@ -102,10 +111,7 @@ export function createApp() {
 
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
-  // Section 27: liveness vs readiness.
-  // /health = process is up (no dependency checks).
-  // /ready  = Mongo + Redis are actually usable (real PING for Redis).
-  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+  // Section 27: readiness (liveness /health is registered earlier, before /api/v1).
   app.get('/ready', async (_req, res) => {
     const mongo = isDatabaseReady();
     const redisResult = await checkRedisHealth(400);

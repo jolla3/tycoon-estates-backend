@@ -38,6 +38,12 @@ function ensureCsrfToken(req, res) {
 }
 
 export function issueCsrfCookie(req, res, next) {
+  // Public probes must not Set-Cookie — Chrome Tracking Prevention can
+  // block third-party fetches whose responses try to set cookies (blocked:other).
+  const p = req.path || '';
+  if (p === '/health' || p === '/ready' || p.endsWith('/health') || p.endsWith('/ready')) {
+    return next();
+  }
   ensureCsrfToken(req, res);
   next();
 }
