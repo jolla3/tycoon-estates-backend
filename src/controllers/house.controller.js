@@ -92,7 +92,7 @@ export const houseController = {
       const doc = await houseBillingConfigService.deactivate(
         req.clientId,
         req.params.id,
-        req.params.chargeType,
+        req.params.configId,
         req.estateFilter
       );
       await audit({

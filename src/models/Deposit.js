@@ -1,5 +1,4 @@
-// Security deposit — separate from rent revenue.
-// Ledger entries: DEPOSIT_RECEIVED (+ liability), DEPOSIT_DEDUCTION, DEPOSIT_REFUND
+// src/models/Deposit.js — per-Tenancy (legacy may lack tenancyId)
 import mongoose from 'mongoose';
 const { Schema } = mongoose;
 
@@ -20,6 +19,7 @@ const DepositSchema = new Schema(
     estateId: { type: Schema.Types.ObjectId, ref: 'Estate', required: true, index: true },
     houseId: { type: Schema.Types.ObjectId, ref: 'House', required: true, index: true },
     tenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', required: true, index: true },
+    tenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null, index: true },
     requiredCents: { type: Number, required: true, min: 0 },
     paidCents: { type: Number, default: 0, min: 0 },
     heldCents: { type: Number, default: 0, min: 0 },
@@ -36,7 +36,11 @@ const DepositSchema = new Schema(
   { timestamps: true }
 );
 
-DepositSchema.index({ clientId: 1, tenantId: 1 }, { unique: true });
+DepositSchema.index(
+  { tenancyId: 1 },
+  { unique: true, partialFilterExpression: { tenancyId: { $type: 'objectId' } }, name: 'uniq_deposit_per_tenancy' }
+);
+DepositSchema.index({ clientId: 1, tenantId: 1 });
 DepositSchema.index({ clientId: 1, houseId: 1 });
 
 export const Deposit = mongoose.model('Deposit', DepositSchema);

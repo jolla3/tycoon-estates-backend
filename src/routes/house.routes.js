@@ -23,6 +23,10 @@ const billingConfigSchema = z.object({
     (v) => (v === '' || v === null ? undefined : v),
     z.string().optional()
   ),
+  effectiveTo: z.preprocess(
+    (v) => (v === '' || v === null ? undefined : v),
+    z.string().optional()
+  ),
 });
 
 router.get('/', authenticate, clientContext, houseController.list);
@@ -54,7 +58,7 @@ router.put(
   houseController.upsertBillingConfig
 );
 router.post(
-  '/:id/billing-config/:chargeType/deactivate',
+  '/:id/billing-config/:configId/deactivate',
   authenticate,
   clientContext,
   authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),

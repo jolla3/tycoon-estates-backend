@@ -3,3 +3,4 @@ process.env.NODE_ENV = 'test';
 process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
 process.env.COOKIE_SECRET = process.env.COOKIE_SECRET || 'test-cookie-secret';
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-session-secret';
+process.env.COOP_INS_BASIC_SECRET = 'test-ins-secret';

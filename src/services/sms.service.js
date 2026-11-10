@@ -10,6 +10,7 @@ import { Tenant } from '../models/Tenant.js';
 import { House } from '../models/House.js';
 import { Estate } from '../models/Estate.js';
 import { ledgerService } from './ledger.service.js';
+import { tenancyService } from './tenancy.service.js';
 import { RentCharge } from '../models/RentCharge.js';
 import { getSmsProvider } from './sms/sms.factory.js';
 import { withIdempotency } from '../utils/idempotency.js';
@@ -65,6 +66,7 @@ export function previewSms(type, templateData) {
 function buildIdempotencyKey({
   clientId,
   tenantId,
+  to,
   period,
   type,
   notificationVersion,
@@ -78,6 +80,7 @@ function buildIdempotencyKey({
   const raw = [
     String(clientId),
     String(tenantId || 'na'),
+    String(to || '').trim().replace(/\s+/g, ''),
     String(period || 'none'),
     String(type),
     String(notificationVersion || NOTIFICATION_VERSIONS[type] || type),
@@ -119,6 +122,7 @@ export const smsService = {
       buildIdempotencyKey({
         clientId,
         tenantId,
+        to,
         period,
         type,
         notificationVersion: version,
@@ -424,8 +428,20 @@ export const smsService = {
       for (const tenant of candidates) {
         if (!tenant.houseId) continue;
         try {
-          const bal = await ledgerService.balanceForHouse(clientId, tenant.houseId, estateFilter);
-          if ((bal?.balanceCents ?? bal ?? 0) > 0) withBalance.push(tenant);
+          const activeT = tenant.houseId ? await tenancyService.getActiveForHouse(clientId, tenant.houseId) : null;
+          const bal = activeT
+            ? await ledgerService.balanceForTenancy(clientId, activeT._id)
+            : await ledgerService.balanceForHouse(clientId, tenant.houseId, estateFilter);
+          const knownArrearsCents = Number.isSafeInteger(bal?.knownArrearsCents)
+            ? bal.knownArrearsCents
+            : null;
+          if (
+            bal?.verifiedFullObligation === true
+            && knownArrearsCents !== null
+            && knownArrearsCents > 0
+          ) {
+            withBalance.push(tenant);
+          }
         } catch {
           // compatibility: open RentCharge balances
           const open = await RentCharge.find({

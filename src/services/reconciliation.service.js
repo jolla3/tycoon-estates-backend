@@ -24,16 +24,16 @@ import mongoose from 'mongoose';
 import { House } from '../models/House.js';
 import { Tenant } from '../models/Tenant.js';
 import { Payment } from '../models/Payment.js';
-import { PaymentAllocation } from '../models/PaymentAllocation.js';
 import { rentService } from './rent.service.js';
-import { ledgerService } from './ledger.service.js';
 import { smsService } from './sms.service.js';
 import { dateUtil } from '../utils/date.js';
-import { money } from '../utils/money.js';
-import { planAllocation, statusAfterPayment } from '../utils/allocation.js';
 import { escapeRegex } from '../utils/regex.js';
 import { logger } from '../config/logger.js';
 import { audit } from './audit.service.js';
+import { tenancyContains, tenancyService } from './tenancy.service.js';
+import { accountingPostingService } from './accountingPosting.service.js';
+import { Tenancy } from '../models/Tenancy.js';
+import { Errors } from '../utils/errors.js';
 
 /**
  * Matching hierarchy — exact matches only, in this order, never a fuzzy
@@ -48,66 +48,178 @@ import { audit } from './audit.service.js';
  * happens to also match some OTHER client's house number can never be
  * matched to it. Read-only, so it runs outside any transaction.
  */
-async function findHouseByReference(clientId, reference) {
+async function findHouseByReference(clientId, estateId, reference) {
   if (!reference) return null;
   const pattern = new RegExp(`^${escapeRegex(reference)}$`, 'i');
-
-  const byHouseNumber = await House.findOne({ clientId, houseNumber: pattern, isActive: true });
+  const scope = { clientId, isActive: true };
+  if (estateId) scope.estateId = estateId;
+  const byHouseNumber = await House.findOne({ ...scope, houseNumber: pattern });
   if (byHouseNumber) return byHouseNumber;
-
-  return House.findOne({ clientId, paymentReferences: pattern, isActive: true });
+  return House.findOne({ ...scope, paymentReferences: pattern });
 }
+
+const sameId = (a, b) => a != null && b != null && String(a) === String(b);
 
 export const reconciliationService = {
   async reconcile(bankTransaction) {
-    // Already matched → no second Payment / allocation / Ledger effect
+    if (bankTransaction.eventType !== 'CREDIT') {
+      if (bankTransaction.matchStatus === 'MATCHED') {
+        throw Errors.Conflict('MATCHED BankTransaction is not a CREDIT; manual financial review required');
+      }
+      bankTransaction.matchStatus = 'UNMATCHED';
+      bankTransaction.processingState = 'MANUAL_REVIEW';
+      bankTransaction.lastProcessingError = 'Only CREDIT bank transactions can be applied as payments';
+      await bankTransaction.save();
+      return { matched: false, bankTransaction, reason: 'not_a_credit' };
+    }
+    if (!Number.isSafeInteger(bankTransaction.amountCents) || bankTransaction.amountCents <= 0) {
+      throw Errors.InvalidRequest('Bank transaction amountCents must be a positive safe integer');
+    }
+
+    // A previously MATCHED row is not trusted as proof that all financial
+    // side-effects are intact. Re-enter the canonical idempotent posting path
+    // so a missing PAYMENT Ledger row can be repaired and scope drift rejected.
     if (bankTransaction.matchStatus === 'MATCHED') {
       const existingPayment = await Payment.findOne({
+        clientId: bankTransaction.clientId,
+        origin: 'BANK',
         bankTransactionId: bankTransaction._id,
         status: 'CONFIRMED',
       }).lean();
-      const allocations = existingPayment
-        ? await PaymentAllocation.find({ paymentId: existingPayment._id }).lean()
-        : [];
+      if (!existingPayment) {
+        throw Errors.Conflict('MATCHED BankTransaction has no confirmed linked Payment; manual financial review required');
+      }
+      if (!bankTransaction.matchedHouseId || !bankTransaction.matchedTenancyId) {
+        throw Errors.Conflict('MATCHED BankTransaction is missing its House/Tenancy identity; automatic attribution is unsafe');
+      }
+      const tenancy = await Tenancy.findOne({
+        _id: bankTransaction.matchedTenancyId,
+        clientId: bankTransaction.clientId,
+        estateId: bankTransaction.estateId,
+        houseId: bankTransaction.matchedHouseId,
+        ...(bankTransaction.matchedTenantId ? { tenantId: bankTransaction.matchedTenantId } : {}),
+      }).lean();
+      if (!tenancy || !bankTransaction.matchedTenantId
+        || !sameId(tenancy.tenantId, bankTransaction.matchedTenantId)) {
+        throw Errors.Conflict('MATCHED BankTransaction Tenancy ownership does not match its stored match identity');
+      }
+      const tenancyAtPaymentDate = await tenancyService.findUniqueForHouseAt(
+        bankTransaction.clientId, bankTransaction.matchedHouseId, bankTransaction.transactionDate
+      );
+      if (!tenancyAtPaymentDate || !sameId(tenancyAtPaymentDate._id, tenancy._id)) {
+        throw Errors.Conflict('MATCHED BankTransaction date no longer resolves to its stored Tenancy');
+      }
+      const tenant = await Tenant.findOne({
+        _id: tenancy.tenantId,
+        clientId: bankTransaction.clientId,
+      }).lean();
+      if (!tenant) throw Errors.Conflict('MATCHED BankTransaction references a missing or out-of-scope Tenant');
+
+      const session = await mongoose.startSession();
+      let repaired;
+      try {
+        await session.withTransaction(async () => {
+          // Serialize against close/move operations and revalidate the historical
+          // occupancy interval inside the same transaction as the retry repair.
+          const tenancyLock = await Tenancy.updateOne(
+            {
+              _id: tenancy._id,
+              clientId: bankTransaction.clientId,
+              estateId: bankTransaction.estateId,
+              houseId: bankTransaction.matchedHouseId,
+              tenantId: bankTransaction.matchedTenantId,
+            },
+            { $inc: { ledgerRev: 1 } },
+            { session }
+          );
+          if (tenancyLock.matchedCount !== 1) {
+            throw Errors.Conflict('MATCHED BankTransaction Tenancy changed during retry');
+          }
+          const tenancyInTransaction = await Tenancy.findOne({
+            _id: tenancy._id,
+            clientId: bankTransaction.clientId,
+            estateId: bankTransaction.estateId,
+            houseId: bankTransaction.matchedHouseId,
+            tenantId: bankTransaction.matchedTenantId,
+          }).session(session).lean();
+          if (!tenancyInTransaction || !tenancyContains(tenancyInTransaction, bankTransaction.transactionDate)) {
+            throw Errors.Conflict('MATCHED BankTransaction date is outside its historical Tenancy');
+          }
+          repaired = await accountingPostingService.postConfirmedPayment({
+            clientId: bankTransaction.clientId,
+            estateId: bankTransaction.estateId,
+            houseId: bankTransaction.matchedHouseId,
+            tenantId: tenancy.tenantId,
+            tenancyId: tenancy._id,
+            amountCents: bankTransaction.amountCents,
+            paymentDate: bankTransaction.transactionDate,
+            paymentReference: bankTransaction.paymentReference || null,
+            period: dateUtil.periodOf(bankTransaction.transactionDate),
+            origin: 'BANK',
+            bankTransactionId: bankTransaction._id,
+            charges: [],
+          }, { session });
+          bankTransaction.processingState = 'POSTED';
+          bankTransaction.lastProcessingError = null;
+          await bankTransaction.save({ session });
+        });
+      } finally {
+        await session.endSession();
+      }
       return {
         matched: true,
         reused: true,
         bankTransaction,
-        payment: existingPayment || null,
-        allocations,
+        payment: repaired.payment,
+        allocations: repaired.allocations,
       };
     }
 
     const reference = (bankTransaction.paymentReference || bankTransaction.narration || '').trim();
     const clientId = bankTransaction.clientId;
+    const estateId = bankTransaction.estateId;
 
-    const house = await findHouseByReference(clientId, reference);
-
+    const house = await findHouseByReference(clientId, estateId, reference);
     if (!house) {
       bankTransaction.matchStatus = 'UNMATCHED';
+      bankTransaction.processingState = 'MANUAL_REVIEW';
       await bankTransaction.save();
       logger.warn({ clientId: String(clientId), reference, transactionId: bankTransaction.providerTransactionId }, 'Bank transaction could not be matched to a house');
       return { matched: false, bankTransaction };
     }
 
-    const tenant = house.tenantId ? await Tenant.findById(house.tenantId) : null;
+    const tenancy = await tenancyService.findUniqueForHouseAt(clientId, house._id, bankTransaction.transactionDate);
+    if (!tenancy) {
+      bankTransaction.matchStatus = 'UNMATCHED';
+      bankTransaction.matchedHouseId = house._id;
+      bankTransaction.processingState = 'MANUAL_REVIEW';
+      await bankTransaction.save();
+      return { matched: false, bankTransaction, reason: 'no_unique_tenancy' };
+    }
+
+    if (!sameId(tenancy.estateId, house.estateId) || !sameId(tenancy.houseId, house._id)) {
+      throw Errors.Conflict('Resolved Tenancy does not belong to the matched House/Estate');
+    }
+    // Tenant.houseId/estateId are mutable current-location fields. Historical
+    // ownership is established by the immutable Tenancy resolved above.
+    const tenant = await Tenant.findOne({
+      _id: tenancy.tenantId,
+      clientId,
+    });
+    if (!tenant) throw Errors.TenantNotFound();
     const period = dateUtil.periodOf(bankTransaction.transactionDate);
 
     const session = await mongoose.startSession();
     let payment, allocations, remainingBalanceCents;
     try {
       await session.withTransaction(async () => {
-        // Ensure current-period charges exist, then allocate across ALL
-        // outstanding charges (older periods first) for cumulative arrears.
-        await rentService.ensureChargesForHouse(clientId, house, tenant, period, { session });
-        const outstanding = await rentService.outstandingChargesForHouse(clientId, house._id, { session });
         const result = await this.applyPayment({
           bankTransaction,
           house,
           tenant,
-          charges: outstanding,
           period,
           session,
+          tenancyId: tenancy._id,
         });
         payment = result.payment;
         allocations = result.allocations;
@@ -115,7 +227,10 @@ export const reconciliationService = {
 
         bankTransaction.matchedHouseId = house._id;
         bankTransaction.matchedTenantId = tenant?._id || null;
+        bankTransaction.matchedTenancyId = tenancy._id;
         bankTransaction.matchStatus = 'MATCHED';
+        bankTransaction.processingState = 'POSTED';
+        bankTransaction.lastProcessingError = null;
         await bankTransaction.save({ session });
       });
     } finally {
@@ -183,150 +298,77 @@ export const reconciliationService = {
    * Atomic payment + multi-charge allocation (oldest outstanding first).
    * Accepts either `charges` (preferred) or a single `rentCharge` (legacy).
    */
-  async applyPayment({ bankTransaction, house, tenant, charges, rentCharge, period, session }) {
-    // Explicit idempotency: same bankTransactionId must never create a second Payment/Ledger
-    const existingPayment = await Payment.findOne({
+  async applyPayment({ bankTransaction, house, tenant, period, session, tenancyId = null }) {
+    if (!session) {
+      throw new Error('applyPayment requires a MongoDB session from the caller');
+    }
+    if (!tenancyId) {
+      throw Errors.InvalidRequest('tenancyId is required for bank payment application');
+    }
+    if (bankTransaction?.eventType !== 'CREDIT') {
+      throw Errors.InvalidRequest('Only CREDIT bank transactions can be applied as payments');
+    }
+    if (!Number.isSafeInteger(bankTransaction.amountCents) || bankTransaction.amountCents <= 0) {
+      throw Errors.InvalidRequest('Bank transaction amountCents must be a positive safe integer');
+    }
+    if (!sameId(bankTransaction.clientId, house?.clientId)
+      || !sameId(bankTransaction.estateId, house?.estateId)) {
+      throw Errors.Conflict('BankTransaction and House client/estate scope mismatch');
+    }
+    const tenancyScope = {
+      _id: tenancyId,
+      clientId: bankTransaction.clientId,
+      estateId: house.estateId,
+      houseId: house._id,
+      tenantId: tenant?._id,
+    };
+    // This shared write point conflicts with concurrent tenancy close/move
+    // transactions. The interval is then checked against the bank's value date.
+    const tenancyLock = await Tenancy.updateOne(
+      tenancyScope,
+      { $inc: { ledgerRev: 1 } },
+      { session }
+    );
+    if (tenancyLock.matchedCount !== 1) {
+      throw Errors.Conflict('Bank payment Tenant does not match the exact Tenancy');
+    }
+    const tenancy = await Tenancy.findOne(tenancyScope).session(session).lean();
+    if (!tenancy || !tenancyContains(tenancy, bankTransaction.transactionDate)) {
+      throw Errors.Conflict('Bank transaction date is outside the exact historical Tenancy');
+    }
+    // Ensure current-period charges for THIS tenancy only (never house-wide personal fallback)
+    await rentService.ensureChargesForHouse(
+      bankTransaction.clientId,
+      house,
+      tenant,
+      period,
+      { session, tenancyId }
+    );
+    const outstanding = await rentService.outstandingChargesForTenancy(
+      bankTransaction.clientId,
+      tenancyId,
+      { session }
+    );
+    const posted = await accountingPostingService.postConfirmedPayment({
+      clientId: bankTransaction.clientId,
+      estateId: house.estateId,
+      houseId: house._id,
+      tenantId: tenant?._id || null,
+      tenancyId,
+      amountCents: bankTransaction.amountCents,
+      paymentDate: bankTransaction.transactionDate,
+      paymentReference: bankTransaction.paymentReference || null,
+      period: period || null,
+      origin: 'BANK',
       bankTransactionId: bankTransaction._id,
-      status: 'CONFIRMED',
-    })
-      .session(session || null)
-      .lean();
-    if (existingPayment) {
-      const allocations = await PaymentAllocation.find({ paymentId: existingPayment._id })
-        .session(session || null)
-        .lean();
-      const bal = await ledgerService.balanceForHouse(
-        bankTransaction.clientId,
-        house._id
-      );
-      return {
-        payment: existingPayment,
-        allocations,
-        remainingBalanceCents: Math.max(bal.balanceCents, 0),
-        reused: true,
-      };
-    }
-
-    let chargeList = charges;
-    if (!chargeList?.length && rentCharge) chargeList = [rentCharge];
-    if (!chargeList?.length) {
-      chargeList = await rentService.ensureChargesForHouse(
-        bankTransaction.clientId,
-        house,
-        tenant,
-        period || dateUtil.periodOf(bankTransaction.transactionDate),
-        { session }
-      );
-    }
-
-    // Include any older outstanding not already in the list
-    const older = await rentService.outstandingChargesForHouse(
-      bankTransaction.clientId,
-      house._id,
-      { session }
-    );
-    const byId = new Map();
-    for (const c of [...older, ...chargeList]) byId.set(String(c._id), c);
-    chargeList = [...byId.values()];
-
-    const plan = planAllocation(chargeList, bankTransaction.amountCents);
-    const primaryPeriod =
-      plan[0]?.charge.period || period || dateUtil.periodOf(bankTransaction.transactionDate);
-
-    let payment;
-    try {
-      const created = await Payment.create(
-        [
-          {
-            clientId: bankTransaction.clientId,
-            estateId: house.estateId,
-            houseId: house._id,
-            tenantId: tenant?._id,
-            bankTransactionId: bankTransaction._id,
-            amountCents: bankTransaction.amountCents,
-            paymentDate: bankTransaction.transactionDate,
-            paymentReference: bankTransaction.paymentReference,
-            period: primaryPeriod,
-          },
-        ],
-        { session }
-      );
-      payment = created[0];
-    } catch (err) {
-      // Unique bankTransactionId race — return existing, do not allocate again
-      if (err?.code === 11000) {
-        const again = await Payment.findOne({ bankTransactionId: bankTransaction._id })
-          .session(session || null)
-          .lean();
-        if (again) {
-          const allocations = await PaymentAllocation.find({ paymentId: again._id })
-            .session(session || null)
-            .lean();
-          const bal = await ledgerService.balanceForHouse(
-            bankTransaction.clientId,
-            house._id
-          );
-          return {
-            payment: again,
-            allocations,
-            remainingBalanceCents: Math.max(bal.balanceCents, 0),
-            reused: true,
-          };
-        }
-      }
-      throw err;
-    }
-
-    const allocationDocs = [];
-    for (const slice of plan) {
-      const charge = slice.charge;
-      // Operational cache only — not authoritative account balance
-      charge.amountPaidCents = money.add(charge.amountPaidCents || 0, slice.amountCents);
-      charge.balanceCents = money.subtract(charge.amountDueCents, charge.amountPaidCents);
-      charge.status = statusAfterPayment(charge.amountDueCents, charge.amountPaidCents);
-      await charge.save({ session });
-
-      allocationDocs.push({
-        clientId: bankTransaction.clientId,
-        estateId: house.estateId,
-        paymentId: payment._id,
-        rentChargeId: charge._id,
-        amountCents: slice.amountCents,
-        chargeType: charge.chargeType || 'RENT',
-        period: charge.period,
-      });
-    }
-
-    if (allocationDocs.length) {
-      await PaymentAllocation.create(allocationDocs, { session });
-    }
-
-    // Authoritative financial movement (idempotent on Payment reference)
-    await ledgerService.postEntry(
-      {
-        clientId: bankTransaction.clientId,
-        estateId: house.estateId,
-        houseId: house._id,
-        tenantId: tenant?._id || null,
-        entryType: 'PAYMENT',
-        amountCents: bankTransaction.amountCents,
-        referenceType: 'Payment',
-        referenceId: payment._id,
-        description: bankTransaction.paymentReference
-          ? `Bank payment ${bankTransaction.paymentReference}`
-          : 'Bank payment',
-        period: primaryPeriod,
-      },
-      { session }
-    );
-
-    const bal = await ledgerService.currentBalanceForHouse(
-      bankTransaction.clientId,
-      house._id,
-      { session }
-    );
-    const remainingBalanceCents = Math.max(bal, 0);
-
-    return { payment, allocations: allocationDocs, remainingBalanceCents, reused: false };
+      charges: outstanding,
+    }, { session });
+    return {
+      payment: posted.payment,
+      allocations: posted.allocations,
+      remainingBalanceCents: posted.remainingBalanceCents,
+      reused: posted.reused,
+    };
   },
+
 };

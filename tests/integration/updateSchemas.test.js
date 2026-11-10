@@ -4,6 +4,7 @@ import { Client } from '../../src/models/Client.js';
 import { Estate } from '../../src/models/Estate.js';
 import { House } from '../../src/models/House.js';
 import { Tenant } from '../../src/models/Tenant.js';
+import { tenancyService } from '../../src/services/tenancy.service.js';
 import { schemas } from '../../src/utils/validators.js';
 import { houseService } from '../../src/services/house.service.js';
 import { tenantService } from '../../src/services/tenant.service.js';
@@ -19,8 +20,10 @@ describeWithMongo('Update schemas cannot be used to corrupt relationships', () =
     houseA = await House.create({ clientId: client._id, estateId: estateA._id, houseNumber: 'A01', monthlyRent: 10000, status: 'occupied' });
     houseB = await House.create({ clientId: client._id, estateId: estateB._id, houseNumber: 'B01', monthlyRent: 20000 });
     tenant = await Tenant.create({ clientId: client._id, estateId: estateA._id, houseId: houseA._id, name: 'Tenant One', phone: '+254700000001' });
-    houseA.tenantId = tenant._id;
-    await houseA.save();
+    await tenancyService.open({
+      clientId: client._id, estateId: estateA._id, houseId: houseA._id,
+      tenantId: tenant._id, startAt: new Date('2026-01-01'),
+    });
   });
   afterEach(clearTestDb);
   afterAll(disconnectTestDb);

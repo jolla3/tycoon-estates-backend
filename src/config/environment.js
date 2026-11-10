@@ -23,6 +23,7 @@ const dotenvResult = dotenv.config({ path: envPath });
 
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const isProd = NODE_ENV === 'production';
+const isTest = NODE_ENV === 'test';
 
 /**
  * Required string from process.env. Empty / whitespace-only = missing.
@@ -80,8 +81,16 @@ export const env = {
   TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS || '1', 10),
 
   // Infrastructure — from .env only
-  MONGODB_URI: required('MONGODB_URI'),
-  REDIS_URL: required('REDIS_URL'),
+  // Test-only sentinels allow unit tests to import infrastructure consumers without opening a connection. Integration helpers still require the raw
+  // process.env.MONGODB_URI and validate a dedicated disposable replica set.
+  MONGODB_URI: isTest
+    ? (optional('MONGODB_URI') || 'mongodb://127.0.0.1:1/tycoon_test_config_only')
+    : required('MONGODB_URI'),
+  // REDIS_TEST_URL is accepted only in test mode. The port-1 sentinel keeps
+  // accidental unit-test connections fail-closed when no test Redis is set.
+  REDIS_URL: isTest
+    ? (optional('REDIS_URL') || optional('REDIS_TEST_URL') || 'redis://127.0.0.1:1')
+    : required('REDIS_URL'),
 
   // Secrets — from .env only, never hardcoded in this file
   COOKIE_SECRET: required('COOKIE_SECRET'),

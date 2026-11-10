@@ -2,7 +2,6 @@
 import { BankTransaction } from '../models/BankTransaction.js';
 import { House } from '../models/House.js';
 import { Tenant } from '../models/Tenant.js';
-import { rentService } from './rent.service.js';
 import { reconciliationService } from './reconciliation.service.js';
 import { smsService } from './sms.service.js';
 import { paginationParams, paginatedResponse } from '../utils/pagination.js';
@@ -10,6 +9,7 @@ import { dateUtil } from '../utils/date.js';
 import { Errors } from '../utils/errors.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import mongoose from 'mongoose';
+import { tenancyService } from './tenancy.service.js';
 
 export const transactionService = {
   async list(clientId, estateFilter, query) {
@@ -46,50 +46,61 @@ export const transactionService = {
     });
     if (!bankTransaction) throw Errors.PaymentNotFound('Transaction not found');
     if (bankTransaction.matchStatus === 'MATCHED') throw Errors.TransactionAlreadyProcessed('Transaction already matched');
+    if (bankTransaction.eventType !== 'CREDIT') {
+      throw Errors.InvalidRequest('Only CREDIT bank transactions can be assigned as payments');
+    }
+    if (!Number.isSafeInteger(bankTransaction.amountCents) || bankTransaction.amountCents <= 0) {
+      throw Errors.InvalidRequest('Bank transaction amountCents must be a positive safe integer');
+    }
 
     const house = await House.findOne({
       _id: houseId,
       clientId,
+      estateId: bankTransaction.estateId,
       ...estateFilterClause(estateFilter),
     });
     if (!house) throw Errors.HouseNotFound();
 
-    const tenant = house.tenantId
-      ? await Tenant.findOne({ _id: house.tenantId, clientId, ...estateFilterClause(estateFilter) })
-      : null;
     const period = dateUtil.periodOf(bankTransaction.transactionDate);
 
+    const tenancy = await tenancyService.findUniqueForHouseAt(
+      clientId, house._id, bankTransaction.transactionDate
+    );
+    if (!tenancy || String(tenancy.estateId) !== String(bankTransaction.estateId)
+      || String(tenancy.houseId) !== String(house._id)) {
+      throw Errors.InvalidRequest('No unique tenancy for this house/estate at the transaction date');
+    }
+    // Tenant estateId is its current location and may differ from a closed
+    // historical Tenancy after a transfer. Trust the Tenancy's immutable scope.
+    const tenant = await Tenant.findOne({ _id: tenancy.tenantId, clientId });
+    if (!tenant) throw Errors.TenantNotFound();
     const session = await mongoose.startSession();
-    let rentCharge;
+    let remainingBalanceCents = 0;
     try {
       await session.withTransaction(async () => {
-        await rentService.ensureChargesForHouse(clientId, house, tenant, period, { session });
-        await reconciliationService.applyPayment({ bankTransaction, house, tenant, period, session });
-
+        const result = await reconciliationService.applyPayment({
+          bankTransaction, house, tenant, period, session, tenancyId: tenancy._id,
+        });
+        remainingBalanceCents = result.remainingBalanceCents ?? 0;
         bankTransaction.matchedHouseId = house._id;
         bankTransaction.matchedTenantId = tenant?._id || null;
+        bankTransaction.matchedTenancyId = tenancy._id;
         bankTransaction.matchStatus = 'MATCHED';
+        bankTransaction.processingState = 'POSTED';
+        bankTransaction.lastProcessingError = null;
         await bankTransaction.save({ session });
       });
     } finally {
       await session.endSession();
     }
-
-    // Post-commit only — see reconciliationService.reconcile() for why.
     if (tenant?.phone) {
       await smsService.sendPaymentConfirmation({
-        clientId,
-        estateId: house.estateId,
-        tenantId: tenant._id,
-        houseId: house._id,
-        phone: tenant.phone,
-        tenantName: tenant.name,
-        houseNumber: house.houseNumber,
+        clientId, estateId: house.estateId, tenantId: tenant._id, houseId: house._id,
+        phone: tenant.phone, tenantName: tenant.name, houseNumber: house.houseNumber,
         amountCents: bankTransaction.amountCents,
-        balanceCents: Math.max(rentCharge.balanceCents, 0),
+        balanceCents: Math.max(remainingBalanceCents, 0),
       });
     }
-
     return bankTransaction;
   },
 };

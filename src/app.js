@@ -22,6 +22,25 @@ import apiRoutes from './routes/index.js';
 import webhookRoutes from './routes/webhook.routes.js';
 import { openApiSpec } from './docs/openapi.js';
 
+// Track per-app Mongo-backed session stores so their owning process can
+// close every MongoClient during orderly shutdown (including Jest teardown).
+const appSessionStores = new Set();
+
+export async function closeAppSessionStores() {
+  const failures = [];
+  for (const store of [...appSessionStores]) {
+    try {
+      await store.close();
+      appSessionStores.delete(store);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length) {
+    throw new AggregateError(failures, 'Failed to close one or more app session stores');
+  }
+}
+
 export function createApp() {
   const app = express();
 
@@ -58,6 +77,9 @@ export function createApp() {
   // Cross-site SPA (Vercel) talking to API (Render) needs SameSite=None + Secure
   // so the browser stores and re-sends the session cookie on credentialed fetches.
   const crossSite = isCrossSiteFrontend();
+  const sessionStore = MongoStore.create({ mongoUrl: env.MONGODB_URI });
+  appSessionStores.add(sessionStore);
+  app.locals.sessionStore = sessionStore;
   app.use(
     session({
       name: 'connect.sid',
@@ -65,7 +87,7 @@ export function createApp() {
       resave: false,
       saveUninitialized: false,
       proxy: true, // trust X-Forwarded-* from Render so secure cookies work
-      store: MongoStore.create({ mongoUrl: env.MONGODB_URI }),
+      store: sessionStore,
       cookie: {
         httpOnly: true,
         secure: crossSite || isProduction,

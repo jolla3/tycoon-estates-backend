@@ -1,18 +1,23 @@
 // src/services/rent.service.js
-//
-// Generalized billing charges (RENT | WATER | ELECTRICITY | OTHER) stored
-// on the existing RentCharge model via chargeType. Integer cents only.
+// G3: Tenancy-aware charge generation. HouseType is the shared plan source.
+// Eligible monthly tenancy: startAt <= periodStart AND (endAt == null OR endAt >= nextPeriodStart).
 
+import mongoose from 'mongoose';
 import { House } from '../models/House.js';
 import { Estate } from '../models/Estate.js';
 import { RentCharge } from '../models/RentCharge.js';
 import { HouseBillingConfig } from '../models/HouseBillingConfig.js';
+import { HouseType, assertUniquePlanLines } from '../models/HouseType.js';
+import { resolveHouseTypePlanVersion } from './houseTypePlanVersion.service.js';
+import { Tenancy } from '../models/Tenancy.js';
 import { dateUtil } from '../utils/date.js';
 import { money } from '../utils/money.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import { audit } from './audit.service.js';
-
-const DEFAULT_CHARGE_TYPES = ['RENT', 'WATER', 'ELECTRICITY', 'OTHER'];
+import { assertBillingIndexesAligned } from '../utils/billingIndexReadiness.js';
+import { supportsMongoTransactions } from '../config/database.js';
+import { Errors } from '../utils/errors.js';
+import { isTenancyEligibleForPeriod } from '../utils/tenancyEligibility.js';
 
 function resolveDueDay(house, estate, configDueDay) {
   if (configDueDay != null) return configDueDay;
@@ -21,117 +26,359 @@ function resolveDueDay(house, estate, configDueDay) {
   return 5;
 }
 
-/**
- * Active billing lines for a house. If no HouseBillingConfig rows exist,
- * falls back to a single RENT line from house.monthlyRent (backward compatible).
- */
-async function billingLinesForHouse(house) {
-  const configs = await HouseBillingConfig.find({
-    houseId: house._id,
-    clientId: house.clientId,
-    isActive: true,
-  }).lean();
-
-  if (configs.length) {
-    return configs.map((c) => ({
-      chargeType: c.chargeType,
-      description: c.description || c.chargeType,
-      amountCents: c.amountCents,
-      dueDay: c.dueDay,
-    }));
-  }
-
-  return [
-    {
-      chargeType: 'RENT',
-      description: 'Rent',
-      amountCents: money.toCents(house.monthlyRent),
-      dueDay: house.dueDay,
-    },
-  ];
+function sameId(a, b) {
+  return a != null && b != null && String(a) === String(b);
 }
 
+function sameNullableId(a, b) {
+  if (a == null && b == null) return true;
+  return sameId(a, b);
+}
+
+function assertTenancyHouseScope({ clientId, estateId, house, tenancy }) {
+  if (!sameId(house.clientId, clientId)
+    || !sameId(house.estateId, estateId)
+    || !sameId(tenancy.clientId, clientId)
+    || !sameId(tenancy.estateId, estateId)
+    || !sameId(tenancy.houseId, house._id)) {
+    throw Errors.Conflict(
+      'RentCharge generation scope does not match the supplied House and Tenancy'
+    );
+  }
+}
+
+function assertExistingChargeIdentity(charge, expected) {
+  const matches =
+    sameId(charge.clientId, expected.clientId)
+    && sameId(charge.estateId, expected.estateId)
+    && sameId(charge.houseId, expected.houseId)
+    && sameNullableId(charge.tenantId, expected.tenantId)
+    && sameId(charge.tenancyId, expected.tenancyId)
+    && charge.period === expected.period
+    && charge.chargeType === expected.chargeType
+    && charge.description === expected.description;
+
+  if (!matches) {
+    throw Errors.Conflict(
+      'Existing RentCharge identity matches the key but its ownership or scope does not'
+    );
+  }
+
+  return charge;
+}
+
+function isRentChargeIdentityDuplicate(error) {
+  if (Number(error?.code) !== 11000 || !error?.keyPattern) return false;
+
+  const keys = Object.entries(error.keyPattern);
+  const expected = [
+    ['tenancyId', 1],
+    ['period', 1],
+    ['chargeType', 1],
+    ['description', 1],
+  ];
+
+  return keys.length === expected.length
+    && expected.every(([key, direction], index) =>
+      keys[index]?.[0] === key && keys[index]?.[1] === direction
+    );
+}
+
+function periodBounds(period) {
+  const periodStart = dateUtil.startOfMonth(period).toDate();
+  const nextPeriodStart = dateUtil.startOfMonth(period).add(1, 'month').toDate();
+  return { periodStart, nextPeriodStart };
+}
+
+/**
+ * Resolve one explicit billing source. No implicit HouseType -> HouseBillingConfig
+ * -> monthlyRent fallback is permitted.
+ */
+async function planLinesForHouse(house, period, { session } = {}) {
+  const estateQuery = Estate.findOne({ _id: house.estateId, clientId: house.clientId });
+  if (session) estateQuery.session(session);
+  const estate = await estateQuery.lean();
+  if (!estate) throw Errors.Conflict('House Estate ownership could not be verified for billing');
+  const source = house.billingSource || 'LEGACY_UNCLASSIFIED';
+  const emptyMeta = { planId: null, planVersionId: null, planVersion: null };
+
+  if (source === 'UNCONFIGURED') return { lines: [], planMeta: emptyMeta, estate, source };
+  if (source === 'LEGACY_UNCLASSIFIED') {
+    throw Errors.Conflict(`House ${house._id} has unclassified legacy billing source; generation is blocked.`);
+  }
+
+  if (source === 'HOUSE_TYPE') {
+    if (!house.houseTypeId) throw Errors.Conflict('HOUSE_TYPE billing requires houseTypeId');
+    const typeQuery = HouseType.findOne({ _id: house.houseTypeId, clientId: house.clientId, estateId: house.estateId });
+    if (session) typeQuery.session(session);
+    const type = await typeQuery.lean();
+    if (!type) throw Errors.Conflict('HouseType does not belong to this House Estate');
+    const version = await resolveHouseTypePlanVersion({
+      clientId: house.clientId, estateId: house.estateId, houseTypeId: type._id, period, session,
+    });
+    if (!version) return { lines: [], planMeta: { ...emptyMeta, planId: type._id }, estate, source };
+    const lines = (version.lines || []).map((line) => ({
+      chargeType: line.chargeType,
+      description: String(line.description || line.chargeType || '').trim(),
+      amountCents: line.amountCents,
+      dueDay: line.dueDay,
+      planLineId: line.lineId,
+    }));
+    assertUniquePlanLines(lines);
+    return {
+      lines,
+      planMeta: { planId: type._id, planVersionId: version._id, planVersion: version.version },
+      estate,
+      source,
+    };
+  }
+
+  if (source === 'HOUSE_CONFIG') {
+    const at = dateUtil.startOfMonth(period).toDate();
+    const configQuery = HouseBillingConfig.find({
+      clientId: house.clientId, estateId: house.estateId, houseId: house._id,
+      effectiveFrom: { $lte: at },
+      $or: [
+        { isActive: true, $or: [{ effectiveTo: null }, { effectiveTo: { $gt: at } }] },
+        { isActive: false, effectiveTo: { $gt: at } },
+      ],
+    });
+    if (session) configQuery.session(session);
+    const configs = await configQuery.lean();
+    const lines = configs.map((config) => ({
+      chargeType: config.chargeType,
+      description: String(config.description || config.chargeType || '').trim(),
+      amountCents: config.amountCents,
+      dueDay: config.dueDay,
+      planLineId: `HOUSE_CONFIG:${config._id}`,
+      billingConfigId: config._id,
+    }));
+    assertUniquePlanLines(lines);
+    return { lines, planMeta: emptyMeta, estate, source };
+  }
+
+  if (source === 'MONTHLY_RENT') {
+    const amountCents = money.toCents(house.monthlyRent);
+    const lines = amountCents > 0 ? [{
+      chargeType: 'RENT', description: 'Rent', amountCents,
+      dueDay: house.dueDay, planLineId: `MONTHLY_RENT:${house._id}`,
+    }] : [];
+    return { lines, planMeta: emptyMeta, estate, source };
+  }
+  throw Errors.InvalidRequest(`Unsupported House billing source: ${source}`);
+}
+
+async function ensureChargeAndLedger({
+  clientId,
+  estateId,
+  house,
+  tenancy,
+  period,
+  line,
+  planMeta,
+  estate,
+  session,
+}) {
+  const description = (line.description || line.chargeType || '').trim() || line.chargeType;
+  const dueDay = resolveDueDay(house, estate, line.dueDay);
+  const amountDueCents = line.amountCents;
+
+  if (!tenancy?._id) {
+    throw Errors.InvalidRequest('tenancyId is required for new RentCharges');
+  }
+
+  assertTenancyHouseScope({ clientId, estateId, house, tenancy });
+
+  if (!Number.isInteger(amountDueCents) || amountDueCents <= 0) {
+    return { charge: null, created: false };
+  }
+
+  const expectedIdentity = {
+    clientId,
+    estateId,
+    houseId: house._id,
+    tenantId: tenancy.tenantId ?? null,
+    tenancyId: tenancy._id,
+    period,
+    chargeType: line.chargeType,
+    description,
+  };
+
+  let charge = await RentCharge.findOne({
+    tenancyId: tenancy._id,
+    period,
+    chargeType: line.chargeType,
+    description,
+  }).session(session);
+
+  let created = false;
+
+  if (charge) {
+    // A matching identity key is not permission to reuse a row owned by
+    // a different client, estate, House or Tenant.
+    assertExistingChargeIdentity(charge, expectedIdentity);
+  } else {
+    try {
+      const [doc] = await RentCharge.create(
+        [
+          {
+            ...expectedIdentity,
+            amountDueCents,
+            amountPaidCents: 0,
+            balanceCents: amountDueCents,
+            status: 'UNPAID',
+            dueDate: dateUtil.dueDateFor(period, dueDay),
+            billingConfigId: line.billingConfigId || null,
+            planId: planMeta.planId,
+            planVersionId: planMeta.planVersionId || null,
+            planVersion: planMeta.planVersion,
+            planLineId: line.planLineId || null,
+            billingSource: house.billingSource,
+            allocationRev: 0,
+          },
+        ],
+        { session }
+      );
+
+      charge = doc;
+      created = true;
+    } catch (error) {
+      // A duplicate-key write inside a transaction must not be followed by
+      // another query using that same session. The transaction owner must
+      // abort and, where supported, retry the complete unit in a fresh session.
+      if (isRentChargeIdentityDuplicate(error)) {
+        error.g3RentChargeIdentityConflict = true;
+      }
+      throw error;
+    }
+  }
+
+  // Ensure CHARGE Ledger exists (insert or repair) — never swallow errors
+  const { ledgerService } = await import('./ledger.service.js');
+  await ledgerService.postEntry(
+    {
+      clientId,
+      estateId,
+      houseId: house._id,
+      tenantId: tenancy.tenantId || null,
+      tenancyId: tenancy._id,
+      accountCategory: 'RENT',
+      entryType: 'CHARGE',
+      amountCents: -Math.abs(charge.amountDueCents),
+      referenceType: 'RentCharge',
+      referenceId: charge._id,
+      description: `${charge.chargeType} ${period}`,
+      period,
+    },
+    { session }
+  );
+
+  return { charge, created };
+}
+
+export { isTenancyEligibleForPeriod };
+
 export const rentService = {
+  isTenancyEligibleForPeriod,
+
   /**
-   * Generates period charges for every occupied house under an estate.
-   * One RentCharge per (house, period, chargeType). Idempotent via unique index.
+   * Generate period charges for every full-period eligible Tenancy under an estate.
    */
   async generateChargesForEstate(clientId, estateId, period = dateUtil.currentPeriod()) {
-    const estate = await Estate.findOne({ _id: estateId, clientId }).lean();
-    const houses = await House.find({ clientId, estateId, isActive: true, status: 'occupied' });
-    let created = 0;
-
-    for (const house of houses) {
-      const lines = await billingLinesForHouse(house);
-      for (const line of lines) {
-        if (!line.amountCents || line.amountCents <= 0) continue;
-
-        // Atomic upsert only (no read-then-create). Unique index:
-        // { clientId, houseId, period, chargeType }
-        const dueDay = resolveDueDay(house, estate, line.dueDay);
-        try {
-          const desc = line.description || line.chargeType;
-          const result = await RentCharge.findOneAndUpdate(
-            {
-              clientId,
-              houseId: house._id,
-              period,
-              chargeType: line.chargeType,
-              description: desc,
-            },
-            {
-              $setOnInsert: {
-                clientId,
-                estateId,
-                houseId: house._id,
-                tenantId: house.tenantId,
-                period,
-                chargeType: line.chargeType,
-                description: desc,
-                amountDueCents: line.amountCents,
-                amountPaidCents: 0,
-                balanceCents: line.amountCents,
-                status: 'UNPAID',
-                dueDate: dateUtil.dueDateFor(period, dueDay),
-              },
-            },
-            { upsert: true, new: true, rawResult: true }
-          );
-          // lastErrorObject.updatedExisting === false means insert
-          const wasInsert =
-            result?.lastErrorObject?.upserted != null ||
-            result?.lastErrorObject?.updatedExisting === false;
-          if (wasInsert) {
-            created += 1;
-            // Post CHARGE to Ledger so running balance reflects new billing
-            try {
-              const { ledgerService } = await import('./ledger.service.js');
-              const chargeDoc = result.value || result;
-              if (chargeDoc?._id) {
-                await ledgerService.postEntry({
-                  clientId,
-                  estateId,
-                  houseId: house._id,
-                  tenantId: house.tenantId || null,
-                  entryType: 'CHARGE',
-                  amountCents: -line.amountCents,
-                  referenceType: 'RentCharge',
-                  referenceId: chargeDoc._id,
-                  description: `${line.chargeType} ${period}`,
-                  period,
-                });
-              }
-            } catch {
-              // Unique index / race: billing row remains source for billed amount
-            }
-          }
-        } catch (err) {
-          // Any duplicate-key (current or legacy unique index) is idempotent success.
-          if (err?.code === 11000 || err?.codeName === 'DuplicateKey') continue;
-          throw err;
-        }
-      }
+    await assertBillingIndexesAligned();
+    if (supportsMongoTransactions() !== true) {
+      throw Errors.ServiceUnavailable(
+        'MongoDB transactions required for charge generation'
+      );
     }
+
+    const estate = await Estate.findOne({ _id: estateId, clientId }).lean();
+    if (!estate) throw Errors.EstateNotFound?.() || Errors.NotFound('Estate not found');
+
+    const { periodStart, nextPeriodStart } = periodBounds(period);
+
+    // Eligible tenancies: full period coverage (interim G3 rule)
+    const tenancies = await Tenancy.find({
+      clientId,
+      estateId,
+      status: { $in: ['ACTIVE', 'CLOSED'] },
+      startAt: { $lte: periodStart },
+      $or: [{ endAt: null }, { endAt: { $gte: nextPeriodStart } }],
+    }).lean();
+
+    // Partial-period tenancies (reported, not billed)
+    const partial = await Tenancy.find({
+      clientId,
+      estateId,
+      status: { $in: ['ACTIVE', 'CLOSED'] },
+      $or: [
+        { startAt: { $gt: periodStart, $lt: nextPeriodStart } },
+        { endAt: { $gt: periodStart, $lt: nextPeriodStart } },
+      ],
+    })
+      .select('_id houseId startAt endAt status')
+      .lean();
+
+    let created = 0;
+    const session = await mongoose.startSession();
+    try {
+      for (const candidateTenancy of tenancies) {
+        let committedCreated = 0;
+        await session.withTransaction(async () => {
+          // Re-read current ownership inside the transaction; a move/close racing
+          // with scheduled billing must not use a stale Tenancy or House snapshot.
+          const tenancy = await Tenancy.findOne({
+            _id: candidateTenancy._id, clientId, estateId,
+            status: { $in: ['ACTIVE', 'CLOSED'] },
+          }).session(session).lean();
+          if (!tenancy || !isTenancyEligibleForPeriod(tenancy, period)) {
+            committedCreated = 0;
+            return;
+          }
+
+          const lock = await House.updateOne(
+            { _id: tenancy.houseId, clientId, estateId, isActive: true },
+            { $inc: { billingConfigRev: 1 } },
+            { session }
+          );
+          if (lock.matchedCount !== 1) {
+            committedCreated = 0;
+            return;
+          }
+          const house = await House.findOne({
+            _id: tenancy.houseId, clientId, estateId, isActive: true,
+          }).session(session).lean();
+          if (!house) {
+            committedCreated = 0;
+            return;
+          }
+
+          const { lines, planMeta, estate: est } = await planLinesForHouse(house, period, { session });
+          let attemptCreated = 0;
+          for (const line of lines) {
+            if (!line.amountCents || line.amountCents <= 0) continue;
+            const result = await ensureChargeAndLedger({
+              clientId,
+              estateId,
+              house,
+              tenancy,
+              period,
+              line,
+              planMeta,
+              estate: est || estate,
+              session,
+            });
+            if (result.created) attemptCreated += 1;
+          }
+          // withTransaction may replay its callback; overwrite rather than += outside it.
+          committedCreated = attemptCreated;
+        });
+        created += committedCreated;
+      }
+    } finally {
+      session.endSession();
+    }
+
     if (created > 0) {
       await audit({
         clientId,
@@ -139,163 +386,156 @@ export const rentService = {
         action: 'BILL_GENERATED',
         resource: 'RentCharge',
         description: `Generated ${created} charges for period ${period}`,
-        metadata: { created, period },
+        metadata: {
+          created,
+          period,
+          eligibleTenancies: tenancies.length,
+          partialPeriodExcluded: partial.length,
+        },
       });
     }
-    return { created, period };
+
+    return {
+      created,
+      period,
+      eligibleTenancies: tenancies.length,
+      partialPeriodExcluded: partial.length,
+      partialPeriodTenancyIds: partial.slice(0, 20).map((t) => String(t._id)),
+    };
   },
 
   /**
-   * Ensures charges exist for a house in a period (all configured types).
-   * Used by reconciliation before allocation.
+   * Ensures charges exist for a specific tenancy in a period (all plan lines).
+   * Used by reconciliation before allocation. Requires explicit tenancyId.
    */
-  async ensureChargesForHouse(clientId, house, tenant, period, { session } = {}) {
-    const estate = await Estate.findById(house.estateId).session(session || null).lean();
-    const lines = await billingLinesForHouse(house);
-    const charges = [];
+  async ensureChargesForTenancy(clientId, tenancy, house, period, { session } = {}) {
+    await assertBillingIndexesAligned();
+    if (!tenancy?._id) throw Errors.InvalidRequest('tenancy is required');
+    if (house && String(house._id) !== String(tenancy.houseId)) {
+      throw Errors.Conflict('Supplied House does not belong to the requested Tenancy.');
+    }
 
-    for (const line of lines) {
-      if (!line.amountCents || line.amountCents <= 0) continue;
+    const run = async (ses) => {
+      const lock = await House.updateOne(
+        { _id: tenancy.houseId, clientId, estateId: tenancy.estateId },
+        { $inc: { billingConfigRev: 1 } },
+        { session: ses }
+      );
+      if (lock.matchedCount !== 1) throw Errors.HouseNotFound();
 
-      let charge = await RentCharge.findOne({
-        clientId,
-        houseId: house._id,
-        period,
-        chargeType: line.chargeType,
-      }).session(session || null);
+      const scopedHouse = await House.findOne({
+        _id: tenancy.houseId, clientId, estateId: tenancy.estateId,
+      }).session(ses).lean();
+      if (!scopedHouse) throw Errors.HouseNotFound();
 
-      if (!charge) {
-        const dueDay = resolveDueDay(house, estate, line.dueDay);
-        try {
-          const created = await RentCharge.create(
-            [
-              {
-                clientId,
-                estateId: house.estateId,
-                houseId: house._id,
-                tenantId: tenant?._id ?? house.tenantId,
-                period,
-                chargeType: line.chargeType,
-                description: line.description,
-                amountDueCents: line.amountCents,
-                amountPaidCents: 0,
-                balanceCents: line.amountCents,
-                status: 'UNPAID',
-                dueDate: dateUtil.dueDateFor(period, dueDay),
-              },
-            ],
-            { session }
-          );
-          charge = created[0];
-          try {
-            const { ledgerService } = await import('./ledger.service.js');
-            await ledgerService.postEntry(
-              {
-                clientId,
-                estateId: house.estateId,
-                houseId: house._id,
-                tenantId: tenant?._id ?? house.tenantId ?? null,
-                entryType: 'CHARGE',
-                amountCents: -line.amountCents,
-                referenceType: 'RentCharge',
-                referenceId: charge._id,
-                description: `${line.chargeType} ${period}`,
-                period,
-              },
-              { session }
-            );
-          } catch {
-            // idempotent / race safe
-          }
-        } catch (err) {
-          if (err?.code !== 11000) throw err;
-          charge = await RentCharge.findOne({
-            clientId,
-            houseId: house._id,
-            period,
-            chargeType: line.chargeType,
-          }).session(session || null);
-        }
+      const currentTenancy = await Tenancy.findOne({
+        _id: tenancy._id, clientId, estateId: tenancy.estateId, houseId: scopedHouse._id,
+      }).session(ses).lean();
+      if (!currentTenancy) throw Errors.NotFound('Tenancy does not belong to the selected House/Estate');
+      if (!isTenancyEligibleForPeriod(currentTenancy, period)) {
+        throw Errors.InvalidRequest('Tenancy does not cover the full billing period; partial-period billing remains blocked pending owner policy.');
       }
-      charges.push(charge);
-    }
+      assertTenancyHouseScope({
+        clientId, estateId: scopedHouse.estateId, house: scopedHouse, tenancy: currentTenancy,
+      });
 
-    // Backward-compat: if somehow no lines, create rent-only
-    if (!charges.length) {
-      const charge = await this.getOrCreateChargeForHouse(clientId, house, tenant, period, { session });
-      charges.push(charge);
-    }
-
-    return charges;
-  },
-
-  /** @deprecated Prefer ensureChargesForHouse — kept for call sites that expect a single charge. */
-  async getOrCreateChargeForHouse(clientId, house, tenant, period, { session } = {}) {
-    let charge = await RentCharge.findOne({
-      clientId,
-      houseId: house._id,
-      period,
-      chargeType: 'RENT',
-    }).session(session || null);
-
-    if (!charge) {
-      // Try any charge for period (legacy docs without chargeType may match via default)
-      charge = await RentCharge.findOne({ clientId, houseId: house._id, period }).session(session || null);
-    }
-
-    if (!charge) {
-      const estate = await Estate.findById(house.estateId).session(session || null).lean();
-      const dueDay = resolveDueDay(house, estate, null);
-      const amountDueCents = money.toCents(house.monthlyRent);
-      try {
-        const created = await RentCharge.create(
-          [
-            {
-              clientId,
-              estateId: house.estateId,
-              houseId: house._id,
-              tenantId: tenant?._id,
-              period,
-              chargeType: 'RENT',
-              description: 'Rent',
-              amountDueCents,
-              amountPaidCents: 0,
-              balanceCents: amountDueCents,
-              status: 'UNPAID',
-              dueDate: dateUtil.dueDateFor(period, dueDay),
-            },
-          ],
-          { session }
-        );
-        charge = created[0];
-      } catch (err) {
-        if (err?.code !== 11000) throw err;
-        charge = await RentCharge.findOne({
+      const { lines, planMeta, estate } = await planLinesForHouse(scopedHouse, period, { session: ses });
+      const charges = [];
+      for (const line of lines) {
+        if (!line.amountCents || line.amountCents <= 0) continue;
+        const { charge } = await ensureChargeAndLedger({
           clientId,
-          houseId: house._id,
+          estateId: scopedHouse.estateId,
+          house: scopedHouse,
+          tenancy: currentTenancy,
           period,
-          chargeType: 'RENT',
-        }).session(session || null);
+          line,
+          planMeta,
+          estate,
+          session: ses,
+        });
+        if (charge) charges.push(charge);
       }
+      return charges;
+    };
+
+    if (session) return run(session);
+    if (supportsMongoTransactions() !== true) {
+      throw Errors.ServiceUnavailable('MongoDB transactions required for charge ensure');
     }
-    return charge;
+    const ses = await mongoose.startSession();
+    try {
+      let result;
+      await ses.withTransaction(async () => {
+        result = await run(ses);
+      });
+      return result;
+    } finally {
+      ses.endSession();
+    }
   },
 
-  /** All outstanding charges for a house (any period), for allocation / arrears. */
-  async outstandingChargesForHouse(clientId, houseId, { session } = {}) {
+  /**
+   * House-oriented ensure: resolve exactly one eligible tenancy or require tenancyId.
+   * @deprecated Prefer ensureChargesForTenancy.
+   */
+  async ensureChargesForHouse(clientId, house, tenant, period, { session, tenancyId = null } = {}) {
+    await assertBillingIndexesAligned();
+    let tenancy = null;
+    if (tenancyId) {
+      tenancy = await Tenancy.findOne({ _id: tenancyId, clientId }).session(session || null).lean();
+      if (!tenancy) throw Errors.NotFound('Tenancy not found');
+      if (String(tenancy.houseId) !== String(house._id)) {
+        throw Errors.InvalidRequest('tenancyId does not belong to the selected house');
+      }
+    } else {
+      const { tenancyService } = await import('./tenancy.service.js');
+      const at = dateUtil.startOfMonth(period).toDate();
+      tenancy = await tenancyService.findUniqueForHouseAt(clientId, house._id, at, { session });
+      if (!tenancy) {
+        throw Errors.InvalidRequest(
+          'No unique tenancy for house/period; supply tenancyId explicitly'
+        );
+      }
+      if (!isTenancyEligibleForPeriod(tenancy, period)) {
+        throw Errors.InvalidRequest(
+          'Resolved tenancy does not cover the full billing period; partial-period billing is blocked pending owner policy'
+        );
+      }
+    }
+    return this.ensureChargesForTenancy(clientId, tenancy, house, period, { session });
+  },
+
+  /** @deprecated — hard-fail path that forces tenancy resolution */
+  async getOrCreateChargeForHouse(clientId, house, tenant, period, { session, tenancyId = null } = {}) {
+    const charges = await this.ensureChargesForHouse(clientId, house, tenant, period, {
+      session,
+      tenancyId,
+    });
+    return charges.find((c) => c.chargeType === 'RENT') || charges[0] || null;
+  },
+
+  async outstandingChargesForTenancy(clientId, tenancyId, { session } = {}) {
+    if (!tenancyId) return [];
     return RentCharge.find({
       clientId,
-      houseId,
-      status: { $in: ['UNPAID', 'PARTIAL'] },
+      tenancyId,
+      status: { $in: ['UNPAID', 'PARTIAL', 'OVERPAID'] },
     })
       .session(session || null)
       .sort({ period: 1, chargeType: 1 });
   },
 
-  /**
-   * Previous-period arrears for a house (balances before `period`).
-   * Returns total cents and per-charge-type breakdown.
-   */
+  async outstandingChargesForHouse(clientId, houseId, { session } = {}) {
+    return RentCharge.find({
+      clientId,
+      houseId,
+      status: { $in: ['UNPAID', 'PARTIAL', 'OVERPAID'] },
+    })
+      .session(session || null)
+      .sort({ period: 1, chargeType: 1 });
+  },
+
   async previousArrears(clientId, houseId, period) {
     const charges = await RentCharge.find({
       clientId,
@@ -305,20 +545,18 @@ export const rentService = {
     }).lean();
 
     const byType = {};
+    const byTenancy = {};
     let totalCents = 0;
     for (const c of charges) {
       const t = c.chargeType || 'RENT';
       byType[t] = (byType[t] || 0) + c.balanceCents;
       totalCents += c.balanceCents;
+      const tid = c.tenancyId ? String(c.tenancyId) : 'unattributed';
+      byTenancy[tid] = (byTenancy[tid] || 0) + c.balanceCents;
     }
-    return { totalCents, byType, charges };
+    return { totalCents, byType, byTenancy, charges };
   },
 
-
-  /**
-   * Generate charges for all active estates under a client (optional single estate).
-   * Respects estateFilter for restricted STAFF. Idempotent per unique index.
-   */
   async generateForClient(clientId, { estateId = null, period = null, estateFilter = null } = {}) {
     const p = period || dateUtil.currentPeriod();
     const estateQuery = {
@@ -334,15 +572,21 @@ export const rentService = {
     for (const estate of estates) {
       const r = await this.generateChargesForEstate(clientId, estate._id, p);
       created += r.created || 0;
-      results.push({ estateId: estate._id, name: estate.name, created: r.created, period: r.period });
+      results.push({
+        estateId: estate._id,
+        name: estate.name,
+        created: r.created,
+        period: r.period,
+        eligibleTenancies: r.eligibleTenancies,
+        partialPeriodExcluded: r.partialPeriodExcluded,
+      });
     }
     return { period: p, created, estates: results };
   },
 
   /**
-   * House billing account: config + charges + payments for workspace UI.
-   * Billed/paid-per-charge come from RentCharge (billing records).
-   * Account outstanding comes from Ledger (financial source of truth).
+   * House billing account. Groups charges/payments by tenancy so successive
+   * occupants are not merged into one implied current liability.
    */
   async houseAccount(clientId, houseId, estateFilter = null) {
     const house = await House.findOne({
@@ -350,75 +594,90 @@ export const rentService = {
       clientId,
       ...estateFilterClause(estateFilter),
     }).lean();
-    if (!house) {
-      const { Errors } = await import('../utils/errors.js');
-      throw Errors.HouseNotFound();
-    }
-    const period = dateUtil.currentPeriod();
-    const [configs, charges, estate] = await Promise.all([
-      HouseBillingConfig.find({ clientId, houseId }).lean(),
-      RentCharge.find({ clientId, houseId }).sort({ period: -1, chargeType: 1 }).lean(),
-      Estate.findById(house.estateId).lean(),
-    ]);
+    if (!house) throw Errors.HouseNotFound();
 
+    const estate = await Estate.findById(house.estateId).lean();
+    const period = dateUtil.currentPeriod();
+    const configs = await HouseBillingConfig.find({ clientId, houseId }).lean();
+    const charges = await RentCharge.find({ clientId, houseId }).sort({ period: -1 }).lean();
     const { Payment } = await import('../models/Payment.js');
-    const { ledgerService } = await import('./ledger.service.js');
     const payments = await Payment.find({ clientId, houseId, status: 'CONFIRMED' })
       .sort({ paymentDate: -1 })
-      .limit(50)
+      .limit(100)
       .lean();
 
+    const { ledgerService } = await import('./ledger.service.js');
+
+    const currentTenancy = await Tenancy.findOne({
+      clientId,
+      houseId,
+      status: 'ACTIVE',
+    }).lean();
+
+    let currentTenancyBalanceCents = null;
+    let currentTenancyHistoricalCoverage = 'UNVERIFIED';
+    let currentTenancyBalanceVerified = false;
+    let historicalUnattributedCents = 0;
+    if (currentTenancy) {
+      const bal = await ledgerService.balanceForTenancy(clientId, currentTenancy._id, 'RENT');
+      currentTenancyBalanceCents = Number.isSafeInteger(bal?.knownArrearsCents)
+        ? bal.knownArrearsCents
+        : null;
+      currentTenancyHistoricalCoverage = bal?.historicalCoverage ?? 'UNVERIFIED';
+      currentTenancyBalanceVerified = bal?.verifiedFullObligation === true;
+    }
+    const unattrCharges = charges.filter((c) => !c.tenancyId);
+    for (const c of unattrCharges) {
+      historicalUnattributedCents += Math.max(c.balanceCents || 0, 0);
+    }
+
+    const currentCharges = charges.filter((c) => c.period === period);
     let billedCents = 0;
     let paidFromChargesCents = 0;
     let overdueCents = 0;
-    const today = dateUtil.now();
-    const currentCharges = [];
     const byPeriod = new Map();
 
     for (const c of charges) {
       billedCents += c.amountDueCents || 0;
       paidFromChargesCents += c.amountPaidCents || 0;
-      const bal = Math.max(c.balanceCents || 0, 0);
-      if (bal > 0 && c.dueDate && new Date(c.dueDate) < new Date(today.toDate ? today.toDate() : today)) {
-        overdueCents += bal;
-      }
+      const bal = c.balanceCents || 0;
+      if (c.period < period && bal > 0) overdueCents += bal;
 
-      if (c.period === period) currentCharges.push(c);
-
-      const row = byPeriod.get(c.period) || {
-        period: c.period,
+      const key = c.period;
+      const row = byPeriod.get(key) || {
+        period: key,
         billedCents: 0,
         paidCents: 0,
         outstandingCents: 0,
         status: 'PAID',
         charges: [],
+        byTenancy: {},
       };
       row.billedCents += c.amountDueCents || 0;
       row.paidCents += c.amountPaidCents || 0;
       row.outstandingCents += bal;
+      const tid = c.tenancyId ? String(c.tenancyId) : 'unattributed';
+      row.byTenancy[tid] = (row.byTenancy[tid] || 0) + bal;
       row.charges.push({
         chargeType: c.chargeType,
+        description: c.description,
         amountDueCents: c.amountDueCents,
         amountPaidCents: c.amountPaidCents,
         balanceCents: c.balanceCents,
         status: c.status,
         dueDate: c.dueDate,
+        tenancyId: c.tenancyId || null,
       });
-      if (c.status === 'UNPAID' || row.status === 'UNPAID') {
-        row.status =
-          c.status === 'PARTIAL' && row.status === 'PAID'
-            ? 'PARTIAL'
-            : c.status === 'UNPAID'
-              ? 'UNPAID'
-              : row.status;
-      } else if (c.status === 'PARTIAL') row.status = 'PARTIAL';
-      byPeriod.set(c.period, row);
+      byPeriod.set(key, row);
     }
 
     const ledgerBal = await ledgerService.balanceForHouse(clientId, houseId);
     const paidFromLedger = await ledgerService.totalPaymentsReceived(clientId, { houseId });
     const paidCents = paidFromLedger > 0 ? paidFromLedger : paidFromChargesCents;
-    const outstandingCents = Math.max(ledgerBal.balanceCents || 0, 0);
+    const houseKnownArrearsCents = Number.isSafeInteger(ledgerBal?.knownArrearsCents)
+      ? ledgerBal.knownArrearsCents
+      : null;
+    const houseWideOutstanding = houseKnownArrearsCents;
     const ledgerHistory = await ledgerService.historyForHouse(clientId, houseId, { limit: 50 });
 
     return {
@@ -429,6 +688,7 @@ export const rentService = {
         status: house.status,
         monthlyRent: house.monthlyRent,
         dueDay: house.dueDay,
+        houseTypeId: house.houseTypeId || null,
       },
       estate: estate ? { _id: estate._id, name: estate.name } : null,
       period,
@@ -436,12 +696,22 @@ export const rentService = {
       currentCharges,
       payments,
       ledger: ledgerHistory,
+      currentTenancyId: currentTenancy?._id || null,
       totals: {
         billedCents,
         paidCents,
-        outstandingCents,
+        outstandingCents: houseWideOutstanding,
+        knownArrearsCents: houseKnownArrearsCents,
+        historicalCoverage: ledgerBal?.historicalCoverage ?? 'UNVERIFIED',
+        verifiedFullObligation: ledgerBal?.verifiedFullObligation === true,
         overdueCents,
-        balanceSource: ledgerBal.source,
+        currentTenancyBalanceCents,
+        currentTenancyHistoricalCoverage,
+        currentTenancyBalanceVerified,
+        historicalUnattributedCents,
+        balanceSource: ledgerBal?.source || 'unavailable',
+        note:
+          'outstandingCents is house-wide historical projection; currentTenancyBalanceCents is the active occupancy only',
       },
       monthly: [...byPeriod.values()].sort((a, b) => (a.period < b.period ? 1 : -1)),
     };
@@ -485,8 +755,16 @@ export const rentService = {
 
       const hid = String(c.houseId);
       const prev = houseStatus.get(hid) || 'PAID';
-      if (c.status === 'UNPAID' || prev === 'UNPAID') houseStatus.set(hid, c.status === 'PARTIAL' && prev === 'PAID' ? 'PARTIAL' : c.status === 'UNPAID' ? 'UNPAID' : prev);
-      else if (c.status === 'PARTIAL') houseStatus.set(hid, 'PARTIAL');
+      if (c.status === 'UNPAID' || prev === 'UNPAID') {
+        houseStatus.set(
+          hid,
+          c.status === 'PARTIAL' && prev === 'PAID'
+            ? 'PARTIAL'
+            : c.status === 'UNPAID'
+              ? 'UNPAID'
+              : prev
+        );
+      } else if (c.status === 'PARTIAL') houseStatus.set(hid, 'PARTIAL');
       else if (!houseStatus.has(hid)) houseStatus.set(hid, c.status);
     }
 

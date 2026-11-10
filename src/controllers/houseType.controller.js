@@ -6,7 +6,11 @@ export const houseTypeController = {
   async list(req, res, next) {
     try {
       const includeInactive = req.query.includeInactive === 'true';
-      const items = await houseTypeService.list(req.clientId, { includeInactive });
+      const items = await houseTypeService.list(req.clientId, {
+        estateId: req.query.estateId || null,
+        estateFilter: req.estateFilter,
+        includeInactive,
+      });
       apiResponse.success(res, items);
     } catch (err) {
       next(err);
@@ -15,7 +19,10 @@ export const houseTypeController = {
 
   async get(req, res, next) {
     try {
-      const item = await houseTypeService.get(req.clientId, req.params.id);
+      const item = await houseTypeService.get(req.clientId, req.params.id, {
+        estateId: req.query.estateId || null,
+        estateFilter: req.estateFilter,
+      });
       apiResponse.success(res, item);
     } catch (err) {
       next(err);
@@ -36,7 +43,7 @@ export const houseTypeController = {
 
   async create(req, res, next) {
     try {
-      const item = await houseTypeService.create(req.clientId, req.body);
+      const item = await houseTypeService.create(req.clientId, { ...req.body, createdBy: req.currentUser?._id || null });
       await audit({
         clientId: req.clientId,
         userId: req.currentUser._id,
@@ -54,7 +61,7 @@ export const houseTypeController = {
 
   async update(req, res, next) {
     try {
-      const item = await houseTypeService.update(req.clientId, req.params.id, req.body);
+      const item = await houseTypeService.update(req.clientId, req.params.id, { ...req.body, updatedBy: req.currentUser?._id || null });
       await audit({
         clientId: req.clientId,
         userId: req.currentUser._id,

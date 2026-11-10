@@ -18,10 +18,25 @@
 // indefinitely waiting on a Redis that isn't coming back soon.
 
 import rateLimit from 'express-rate-limit';
+import { randomUUID } from 'node:crypto';
 import { getRedisClient } from '../config/redis.js';
 import { withRedisTimeout } from '../utils/redisWithTimeout.js';
 import { apiResponse } from '../utils/apiResponse.js';
 import { logger } from '../config/logger.js';
+
+// Each Jest test-file runtime gets isolated Redis counters. The same
+// limiter instances still share counters across app instances within that
+// file, and non-test environments retain the production key format.
+const TEST_RATE_LIMIT_NAMESPACE = process.env.NODE_ENV === 'test'
+  ? `jest-${randomUUID()}`
+  : '';
+
+function redisRateLimitKey(prefix, key) {
+  const namespace = TEST_RATE_LIMIT_NAMESPACE
+    ? `${TEST_RATE_LIMIT_NAMESPACE}:`
+    : '';
+  return `rl:${namespace}${prefix}:${key}`;
+}
 
 function handler(req, res) {
   return apiResponse.error(res, 'RATE_LIMITED', 'Too many requests, please try again later', 429);
@@ -34,7 +49,7 @@ class FailOpenRedisStore {
   }
 
   async increment(key) {
-    const redisKey = `rl:${this.prefix}:${key}`;
+    const redisKey = redisRateLimitKey(this.prefix, key);
     try {
       const redis = getRedisClient();
       const count = await withRedisTimeout(redis.incr(redisKey));
@@ -50,7 +65,7 @@ class FailOpenRedisStore {
 
   async decrement(key) {
     try {
-      await withRedisTimeout(getRedisClient().decr(`rl:${this.prefix}:${key}`));
+      await withRedisTimeout(getRedisClient().decr(redisRateLimitKey(this.prefix, key)));
     } catch (_err) {
       /* fail-open: best-effort only */
     }
@@ -58,7 +73,7 @@ class FailOpenRedisStore {
 
   async resetKey(key) {
     try {
-      await withRedisTimeout(getRedisClient().del(`rl:${this.prefix}:${key}`));
+      await withRedisTimeout(getRedisClient().del(redisRateLimitKey(this.prefix, key)));
     } catch (_err) {
       /* fail-open: best-effort only */
     }

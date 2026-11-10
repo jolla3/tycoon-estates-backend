@@ -14,6 +14,7 @@ import { estateFilterClause } from '../utils/estateFilter.js';
 import { Errors } from '../utils/errors.js';
 import { supportsMongoTransactions } from '../config/database.js';
 import { audit } from './audit.service.js';
+import { tenancyService } from './tenancy.service.js';
 
 export const paymentService = {
   async list(clientId, estateFilter, query) {
@@ -91,10 +92,10 @@ export const paymentService = {
       if (tenant || house.status === 'occupied') {
         await rentService.ensureChargesForHouse(clientId, house, tenant, payPeriod, { session });
       }
-      const allOutstanding = await rentService.outstandingChargesForHouse(clientId, house._id, {
-        session,
-      });
-
+      const activeTen = await tenancyService.getActiveForHouse(clientId, house._id, { session });
+      const allOutstanding = activeTen
+        ? await rentService.outstandingChargesForTenancy(clientId, activeTen._id, { session })
+        : [];
       const plan = planAllocation(allOutstanding, amount);
       const primaryPeriod = plan[0]?.charge?.period || payPeriod;
 
@@ -105,6 +106,12 @@ export const paymentService = {
             estateId: house.estateId,
             houseId: house._id,
             tenantId: tenant?._id || null,
+            tenancyId: (await tenancyService.getActiveForHouse(clientId, house._id, { session }))?._id || null,
+            origin: 'MANUAL',
+            tenderMethod: body.tenderMethod || null,
+            recordedByUserId: actor?._id || null,
+            recordedAt: new Date(),
+            evidenceReference: paymentReference || body.evidenceReference || null,
             amountCents: amount,
             paymentDate: payDate,
             paymentReference: paymentReference || null,
@@ -161,20 +168,19 @@ export const paymentService = {
     };
 
     let result;
-    if (supportsMongoTransactions()) {
-      const session = await mongoose.startSession();
-      session.startTransaction();
-      try {
-        result = await run(session);
-        await session.commitTransaction();
-      } catch (err) {
-        await session.abortTransaction();
-        throw err;
-      } finally {
-        session.endSession();
-      }
-    } else {
-      result = await run(null);
+    if (supportsMongoTransactions() === false) {
+      throw Errors.ServiceUnavailable('MongoDB transactions required for financial posting');
+    }
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      result = await run(session);
+      await session.commitTransaction();
+    } catch (err) {
+      await session.abortTransaction();
+      throw err;
+    } finally {
+      session.endSession();
     }
 
     await audit({

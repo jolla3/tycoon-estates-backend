@@ -9,6 +9,7 @@ import { Estate } from '../../src/models/Estate.js';
 import { User } from '../../src/models/User.js';
 import { houseService } from '../../src/services/house.service.js';
 import { Errors } from '../../src/utils/errors.js';
+import { authService } from '../../src/services/auth.service.js';
 
 async function loginAndGetCsrf(app, email, password) {
   const agent = request.agent(app);
@@ -40,8 +41,8 @@ describeWithMongo('Client isolation (V2 section 2/6)', () => {
   test('Client A staff cannot enumerate or update Client B staff via the API, even by guessing IDs', async () => {
     const app = createApp();
 
-    await request(app).post('/api/v1/auth/signup').send({ clientName: 'Client A', ownerName: 'Alice', email: 'alice@a.test', password: 'Password123!' }).expect(201);
-    await request(app).post('/api/v1/auth/signup').send({ clientName: 'Client B', ownerName: 'David', email: 'david@b.test', password: 'Password123!' }).expect(201);
+    await authService.signup({ clientName: 'Client A', ownerName: 'Alice', email: 'alice@a.test', password: 'Password123!' });
+    await authService.signup({ clientName: 'Client B', ownerName: 'David', email: 'david@b.test', password: 'Password123!' });
 
     const davidUser = await User.findOne({ email: 'david@b.test' });
     const { agent, csrfToken } = await loginAndGetCsrf(app, 'alice@a.test', 'Password123!');
@@ -60,27 +61,29 @@ describeWithMongo('Client isolation (V2 section 2/6)', () => {
 
   test('public staff-creation payload cannot escalate to SUPER_ADMIN or CLIENT_OWNER', async () => {
     const app = createApp();
-    await request(app).post('/api/v1/auth/signup').send({ clientName: 'Client C', ownerName: 'Carla', email: 'carla@c.test', password: 'Password123!' }).expect(201);
+    await authService.signup({ clientName: 'Client C', ownerName: 'Carla', email: 'carla@c.test', password: 'Password123!' });
 
     const { agent, csrfToken } = await loginAndGetCsrf(app, 'carla@c.test', 'Password123!');
 
-    // schemas.createStaff's zod schema only declares role as
-    // z.enum(['STAFF','CLIENT_ADMIN']) — 'SUPER_ADMIN' is not a valid
-    // enum value, so this is rejected at validation, before it ever
-    // reaches the service layer.
+    // clientContext deliberately strips caller-supplied role before schema
+    // validation. The schema then defaults to STAFF, the least-privileged
+    // allowed role. The service independently rejects invalid direct calls.
     const res = await agent
       .post('/api/v1/users')
       .set('x-csrf-token', csrfToken)
       .send({ name: 'Sneaky', email: 'sneaky@c.test', password: 'Password123!', role: 'SUPER_ADMIN' });
 
-    expect(res.status).toBe(422); // INVALID_REQUEST — zod rejected the role value
+    expect(res.status).toBe(201);
     const created = await User.findOne({ email: 'sneaky@c.test' });
-    expect(created).toBeNull();
+    expect(created).toBeTruthy();
+    expect(created.role).toBe('STAFF');
+    const carla = await User.findOne({ email: 'carla@c.test' });
+    expect(String(created.clientId)).toBe(String(carla.clientId));
   });
 
   test('an authorized CLIENT_OWNER can create STAFF for their own client', async () => {
     const app = createApp();
-    await request(app).post('/api/v1/auth/signup').send({ clientName: 'Client D', ownerName: 'Dana', email: 'dana@d.test', password: 'Password123!' }).expect(201);
+    await authService.signup({ clientName: 'Client D', ownerName: 'Dana', email: 'dana@d.test', password: 'Password123!' });
     const { agent, csrfToken } = await loginAndGetCsrf(app, 'dana@d.test', 'Password123!');
 
     const res = await agent

@@ -16,6 +16,7 @@ import { escapeRegex } from '../utils/regex.js';
 import { dateUtil } from '../utils/date.js';
 import { houseTypeService } from './houseType.service.js';
 
+import mongoose from 'mongoose';
 async function balanceForHouse(clientId, houseId) {
   const period = dateUtil.currentPeriod();
   const charges = await RentCharge.find({ clientId, houseId }).lean();
@@ -32,49 +33,6 @@ async function balanceForHouse(clientId, houseId) {
   return { billedCents, paidCents, outstandingCents, currentPeriodOutstandingCents, period };
 }
 
-async function applyTypeDefaults(clientId, house, houseType) {
-  if (!houseType) return;
-  // Seed HouseBillingConfig from type defaults without touching RentCharge history.
-  const lines =
-    houseType.defaultBilling?.length > 0
-      ? houseType.defaultBilling
-      : houseType.defaultRentCents > 0
-        ? [
-            {
-              chargeType: 'RENT',
-              description: 'Rent',
-              amountCents: houseType.defaultRentCents,
-              dueDay: houseType.defaultDueDay,
-            },
-          ]
-        : [];
-
-  for (const line of lines) {
-    if (!line.amountCents || line.amountCents <= 0) continue;
-    const description = (line.description || line.chargeType).trim();
-    // OTHER lines are unique by description so Security + Garbage can coexist
-    const filter =
-      line.chargeType === 'OTHER'
-        ? { clientId, houseId: house._id, chargeType: 'OTHER', description }
-        : { clientId, houseId: house._id, chargeType: line.chargeType };
-    await HouseBillingConfig.findOneAndUpdate(
-      filter,
-      {
-        clientId,
-        estateId: house.estateId,
-        houseId: house._id,
-        chargeType: line.chargeType,
-        description,
-        amountCents: line.amountCents,
-        dueDay: line.dueDay ?? house.dueDay,
-        isActive: true,
-        frequency: 'monthly',
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-  }
-}
-
 export const houseService = {
   async create(clientId, estateId, data) {
     const estate = await Estate.findOne({ _id: estateId, clientId });
@@ -82,7 +40,7 @@ export const houseService = {
 
     let houseType = null;
     if (data.houseTypeId) {
-      houseType = await houseTypeService.assertOwned(clientId, data.houseTypeId);
+      houseType = await houseTypeService.assertOwned(clientId, estateId, data.houseTypeId);
     }
 
     const monthlyRent =
@@ -99,16 +57,13 @@ export const houseService = {
       estateId,
       houseNumber: data.houseNumber,
       houseTypeId: houseType?._id || null,
+      billingSource: houseType ? 'HOUSE_TYPE' : 'MONTHLY_RENT',
       monthlyRent,
       dueDay,
       paymentReferences: data.paymentReferences || [],
       status: data.status || 'vacant',
       isActive: data.isActive !== false,
     });
-
-    if (houseType) {
-      await applyTypeDefaults(clientId, house, houseType);
-    }
 
     return house;
   },
@@ -194,30 +149,131 @@ export const houseService = {
   },
 
   async update(clientId, houseId, updates, estateFilter = null) {
-    const allowed = {};
-    if (updates.houseNumber !== undefined) allowed.houseNumber = updates.houseNumber;
-    if (updates.monthlyRent !== undefined) allowed.monthlyRent = updates.monthlyRent;
-    if (updates.dueDay !== undefined) allowed.dueDay = updates.dueDay;
-    if (updates.status !== undefined) allowed.status = updates.status;
-    if (typeof updates.isActive === 'boolean') allowed.isActive = updates.isActive;
-    if (updates.paymentReferences !== undefined) allowed.paymentReferences = updates.paymentReferences;
+    // Serialize every House mutation with charge generation and explicit
+    // HouseBillingConfig mutations. The shared revision write is intentional:
+    // MongoDB transactions then conflict instead of committing stale billing
+    // source snapshots concurrently.
+    const session = await mongoose.startSession();
+    let updatedHouse;
+    try {
+      await session.withTransaction(async () => {
+        const scope = {
+          _id: houseId,
+          clientId,
+          ...estateFilterClause(estateFilter),
+        };
+        const lock = await House.updateOne(
+          scope,
+          { $inc: { billingConfigRev: 1 } },
+          { session }
+        );
+        if ((lock.matchedCount ?? lock.n) !== 1) throw Errors.HouseNotFound();
 
-    if (updates.houseTypeId !== undefined) {
-      if (updates.houseTypeId === null || updates.houseTypeId === '') {
-        allowed.houseTypeId = null;
-      } else {
-        const ht = await houseTypeService.assertOwned(clientId, updates.houseTypeId);
-        allowed.houseTypeId = ht._id;
-      }
+        const current = await House.findOne(scope).session(session).lean();
+        if (!current) throw Errors.HouseNotFound();
+
+        const allowed = {};
+        for (const key of ['houseNumber', 'monthlyRent', 'dueDay', 'status', 'paymentReferences']) {
+          if (updates[key] !== undefined) allowed[key] = updates[key];
+        }
+        if (typeof updates.isActive === 'boolean') allowed.isActive = updates.isActive;
+
+        const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+        const currentSource = current.billingSource || 'LEGACY_UNCLASSIFIED';
+
+        if (updates.houseTypeId !== undefined) {
+          if (updates.houseTypeId === null || updates.houseTypeId === '') {
+            allowed.houseTypeId = null;
+            // Clearing an assignment must not silently change an unrelated
+            // explicit source such as HOUSE_CONFIG or MONTHLY_RENT.
+            if (currentSource === 'HOUSE_TYPE' && updates.billingSource === undefined) {
+              allowed.billingSource = 'UNCONFIGURED';
+            }
+          } else {
+            const type = await houseTypeService.assertOwned(
+              clientId,
+              current.estateId,
+              updates.houseTypeId
+            );
+            allowed.houseTypeId = type._id;
+            allowed.billingSource = 'HOUSE_TYPE';
+          }
+        }
+
+        if (updates.billingSource !== undefined) {
+          const choices = ['HOUSE_TYPE', 'HOUSE_CONFIG', 'MONTHLY_RENT', 'UNCONFIGURED'];
+          if (!choices.includes(updates.billingSource)) {
+            throw Errors.InvalidRequest('Invalid billingSource');
+          }
+          const resultingHouseTypeId = hasOwn(allowed, 'houseTypeId')
+            ? allowed.houseTypeId
+            : current.houseTypeId;
+
+          if (updates.billingSource === 'HOUSE_TYPE') {
+            if (!resultingHouseTypeId) {
+              throw Errors.InvalidRequest('HOUSE_TYPE billing requires a HouseType assignment');
+            }
+            await houseTypeService.assertOwned(clientId, current.estateId, resultingHouseTypeId);
+          }
+
+          if (updates.billingSource === 'HOUSE_CONFIG') {
+            const hasConfig = await HouseBillingConfig.exists({
+              clientId,
+              estateId: current.estateId,
+              houseId: current._id,
+              isActive: true,
+              $or: [{ effectiveTo: null }, { effectiveTo: { $gt: new Date() } }],
+            }).session(session);
+            if (!hasConfig) {
+              throw Errors.InvalidRequest('HOUSE_CONFIG billing requires an active HouseBillingConfig line');
+            }
+          }
+          allowed.billingSource = updates.billingSource;
+        }
+
+        const nextSource = hasOwn(allowed, 'billingSource')
+          ? allowed.billingSource
+          : currentSource;
+        const nextHouseTypeId = hasOwn(allowed, 'houseTypeId')
+          ? allowed.houseTypeId
+          : current.houseTypeId;
+        const houseTypeChanged = String(nextHouseTypeId || '') !== String(current.houseTypeId || '');
+        const sourceChanged = nextSource !== currentSource;
+        const monthlyRentChanged = hasOwn(allowed, 'monthlyRent')
+          && Number(allowed.monthlyRent) !== Number(current.monthlyRent);
+        const dueDayChanged = hasOwn(allowed, 'dueDay')
+          && Number(allowed.dueDay) !== Number(current.dueDay);
+
+        const billingTermsChanged = sourceChanged
+          || ((currentSource === 'HOUSE_TYPE' || nextSource === 'HOUSE_TYPE') && houseTypeChanged)
+          || ((currentSource === 'MONTHLY_RENT' || nextSource === 'MONTHLY_RENT')
+            && (monthlyRentChanged || dueDayChanged));
+
+        if (billingTermsChanged) {
+          const existingChargeCount = await RentCharge.countDocuments({
+            clientId,
+            estateId: current.estateId,
+            houseId: current._id,
+          }).session(session);
+          if (existingChargeCount > 0) {
+            throw Errors.Conflict(
+              'Cannot change this House billing source or its active billing terms after charges exist. '
+              + 'Install effective-dated House billing-source history before making that change.'
+            );
+          }
+        }
+
+        updatedHouse = await House.findOneAndUpdate(
+          scope,
+          { $set: allowed },
+          { new: true, runValidators: true, session }
+        );
+        if (!updatedHouse) throw Errors.HouseNotFound();
+      });
+    } finally {
+      await session.endSession();
     }
-
-    const house = await House.findOneAndUpdate(
-      { _id: houseId, clientId, ...estateFilterClause(estateFilter) },
-      allowed,
-      { new: true }
-    );
-    if (!house) throw Errors.HouseNotFound();
-    return house;
+    return updatedHouse;
   },
 
   async get(clientId, houseId, estateFilter = null) {

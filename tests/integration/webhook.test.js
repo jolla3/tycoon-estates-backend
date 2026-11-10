@@ -1,6 +1,4 @@
 import '../setup.js';
-process.env.COOP_INS_BASIC_SECRET = 'test-ins-secret';
-
 import request from 'supertest';
 import { describeWithMongo, connectTestDb, clearTestDb, disconnectTestDb } from '../helpers/db.js';
 import { createApp } from '../../src/app.js';

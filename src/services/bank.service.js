@@ -54,11 +54,16 @@ async function storeAndReconcile(clientId, estateId, bankAccountId, normalizedTx
       () => BankTransaction.create({ ...txn, clientId, estateId, bankAccountId })
     );
 
-    if (created) {
-      stored += 1;
-      if (doc.eventType === 'CREDIT') {
+    if (created) stored += 1;
+    if (doc.eventType === 'CREDIT' && doc.processingState !== 'POSTED') {
+      try {
         await reconciliationService.reconcile(doc);
-        reconciled += 1;
+        if (created) reconciled += 1;
+      } catch (err) {
+        doc.processingState = 'FAILED_RETRYABLE';
+        doc.lastProcessingError = err.message;
+        await doc.save();
+        logger.error({ error: err.message, id: String(doc._id) }, 'Reconciliation failed; left retryable');
       }
     }
   }

@@ -60,8 +60,15 @@ router.post('/banks/coop/transactions', webhookRateLimiter, async (req, res) => 
       () => BankTransaction.create({ ...normalized, clientId: bankAccount.clientId, estateId: bankAccount.estateId, bankAccountId: bankAccount._id })
     );
 
-    if (created && doc.eventType === 'CREDIT') {
-      await reconciliationService.reconcile(doc);
+    if (doc.eventType === 'CREDIT' && doc.processingState !== 'POSTED') {
+      try {
+        await reconciliationService.reconcile(doc);
+      } catch (reconErr) {
+        doc.processingState = 'FAILED_RETRYABLE';
+        doc.lastProcessingError = reconErr.message;
+        await doc.save();
+        logger.error({ error: reconErr.message }, 'Co-op webhook reconcile failed; left retryable');
+      }
     }
 
     res.status(200).json({ received: true, alreadyProcessed: !created });

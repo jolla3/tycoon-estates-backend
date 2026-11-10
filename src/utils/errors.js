@@ -10,6 +10,8 @@ export class AppError extends Error {
 }
 
 export const Errors = {
+  ServiceUnavailable: (msg = 'Service unavailable') => new AppError('SERVICE_UNAVAILABLE', msg, 503),
+
   AuthRequired: (msg = 'Authentication required') => new AppError('AUTH_REQUIRED', msg, 401),
   InvalidCredentials: (msg = 'Invalid email or password') => new AppError('INVALID_CREDENTIALS', msg, 401),
   Forbidden: (msg = 'Not permitted') => new AppError('FORBIDDEN', msg, 403),

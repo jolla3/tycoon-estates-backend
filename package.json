@@ -42,7 +42,7 @@
     "testEnvironment": "node",
     "transform": {},
     "testMatch": [
-      "**/tests/**/*.test.js"
+      "<rootDir>/tests/**/*.test.js"
     ]
   }
 }

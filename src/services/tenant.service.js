@@ -10,17 +10,35 @@ import { Errors } from '../utils/errors.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import { dateUtil } from '../utils/date.js';
 import { ledgerService } from './ledger.service.js';
+import { tenancyService } from './tenancy.service.js';
+import mongoose from 'mongoose';
+import { supportsMongoTransactions } from '../config/database.js';
 
 export const tenantService = {
-  async create(clientId, data) {
+  async create(clientId, data, actorUserId = null) {
     const house = await House.findOne({ _id: data.houseId, clientId });
     if (!house) throw Errors.HouseNotFound();
-
-    const tenant = await Tenant.create({ ...data, clientId, estateId: house.estateId });
-    house.tenantId = tenant._id;
-    house.status = 'occupied';
-    await house.save();
-    return tenant;
+    if (supportsMongoTransactions() === false) {
+      throw Errors.ServiceUnavailable('MongoDB transactions required for tenant create');
+    }
+    const session = await mongoose.startSession();
+    try {
+      let tenant;
+      await session.withTransaction(async () => {
+        const [created] = await Tenant.create(
+          [{ ...data, clientId, estateId: house.estateId, status: 'active' }],
+          { session }
+        );
+        tenant = created;
+        await tenancyService.open({
+          clientId, estateId: house.estateId, houseId: house._id,
+          tenantId: tenant._id, startAt: data.moveInDate || new Date(), actorUserId,
+        }, { session });
+      });
+      return tenant;
+    } finally {
+      session.endSession();
+    }
   },
 
   list: (clientId, estateFilter) =>
@@ -84,11 +102,17 @@ export const tenantService = {
 
     const monthly = [...byPeriod.values()].sort((a, b) => (a.period < b.period ? 1 : -1));
 
-    const ledgerBal = tenant.houseId
-      ? await ledgerService.balanceForHouse(clientId, tenant.houseId)
-      : await ledgerService.balanceForTenant(clientId, tenant._id, null);
+    const activeTenancy = await tenancyService.getActiveForHouse(clientId, tenant.houseId);
+    const ledgerBal = activeTenancy
+      ? await ledgerService.balanceForTenancy(clientId, activeTenancy._id)
+      : tenant.houseId
+        ? await ledgerService.balanceForHouse(clientId, tenant.houseId)
+        : await ledgerService.balanceForTenant(clientId, tenant._id, null);
     // Authoritative outstanding = Ledger running balance (amount owed)
-    const outstandingCents = Math.max(ledgerBal.balanceCents || 0, 0);
+    const knownArrearsCents = Number.isSafeInteger(ledgerBal?.knownArrearsCents)
+      ? ledgerBal.knownArrearsCents
+      : null;
+    const outstandingCents = knownArrearsCents;
     // Prefer ledger-reported payments when available; fall back to charge cache
     const paidFromLedger = tenant.houseId
       ? await ledgerService.totalPaymentsReceived(clientId, { houseId: tenant.houseId })
@@ -110,7 +134,10 @@ export const tenantService = {
         billedCents,
         paidCents,
         outstandingCents,
-        balanceSource: ledgerBal.source,
+        knownArrearsCents,
+        historicalCoverage: ledgerBal?.historicalCoverage ?? 'UNVERIFIED',
+        verifiedFullObligation: ledgerBal?.verifiedFullObligation === true,
+        balanceSource: ledgerBal?.source || 'unavailable',
         overdueCents: charges
           .filter((c) => Math.max(c.balanceCents || 0, 0) > 0 && c.dueDate && new Date(c.dueDate) < new Date())
           .reduce((s, c) => s + Math.max(c.balanceCents || 0, 0), 0),
@@ -164,50 +191,23 @@ export const tenantService = {
     if (!tenant) throw Errors.TenantNotFound();
 
     if (updates.status === 'moved_out') {
-      await House.updateOne(
-        { _id: tenant.houseId, clientId, ...estateFilterClause(estateFilter) },
-        { tenantId: null, status: 'vacant' }
-      );
+      const active = await tenancyService.getActiveForHouse(clientId, tenant.houseId);
+      if (active && String(active.tenantId) === String(tenant._id)) {
+        await tenancyService.close(clientId, active._id, { reason: 'MOVE_OUT' });
+      } else {
+        await House.updateOne(
+          { _id: tenant.houseId, clientId, ...estateFilterClause(estateFilter) },
+          { tenantId: null, status: 'vacant' }
+        );
+      }
     }
     return tenant;
   },
 
-  async moveToHouse(clientId, tenantId, newHouseId, estateFilter = null) {
-    const tenant = await Tenant.findOne({
-      _id: tenantId,
-      clientId,
-      ...estateFilterClause(estateFilter),
-    });
+  async moveToHouse(clientId, tenantId, newHouseId, estateFilter = null, actorUserId = null) {
+    await tenancyService.moveToHouse(clientId, tenantId, newHouseId, estateFilter, actorUserId);
+    const tenant = await Tenant.findOne({ _id: tenantId, clientId });
     if (!tenant) throw Errors.TenantNotFound();
-
-    const newHouse = await House.findOne({
-      _id: newHouseId,
-      clientId,
-      isActive: true,
-      ...estateFilterClause(estateFilter),
-    });
-    if (!newHouse) throw Errors.HouseNotFound('Target house not found for your client');
-    if (newHouse.tenantId && !newHouse.tenantId.equals(tenant._id)) {
-      throw Errors.Conflict('Target house already has a tenant');
-    }
-
-    const oldHouseId = tenant.houseId;
-
-    if (oldHouseId && !oldHouseId.equals(newHouse._id)) {
-      await House.updateOne(
-        { _id: oldHouseId, clientId, ...estateFilterClause(estateFilter) },
-        { tenantId: null, status: 'vacant' }
-      );
-    }
-
-    tenant.houseId = newHouse._id;
-    tenant.estateId = newHouse.estateId;
-    await tenant.save();
-
-    newHouse.tenantId = tenant._id;
-    newHouse.status = 'occupied';
-    await newHouse.save();
-
     return tenant;
   },
 };

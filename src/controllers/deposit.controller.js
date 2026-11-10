@@ -1,6 +1,10 @@
 import { depositService } from '../services/deposit.service.js';
 import { apiResponse } from '../utils/apiResponse.js';
 
+function idempotencyKeyFrom(req) {
+  return req.get('Idempotency-Key') || req.get('idempotency-key') || req.body?.idempotencyKey || null;
+}
+
 export const depositController = {
   async get(req, res, next) {
     try {
@@ -30,7 +34,8 @@ export const depositController = {
         req.params.tenantId,
         req.body.amountCents,
         req.currentUser,
-        req.estateFilter
+        req.estateFilter,
+        { idempotencyKey: idempotencyKeyFrom(req) }
       );
       apiResponse.success(res, dep, 'Deposit payment recorded');
     } catch (err) {
@@ -44,7 +49,8 @@ export const depositController = {
         req.params.tenantId,
         req.body,
         req.currentUser,
-        req.estateFilter
+        req.estateFilter,
+        { idempotencyKey: idempotencyKeyFrom(req) }
       );
       apiResponse.success(res, dep, 'Deduction recorded');
     } catch (err) {

@@ -10,6 +10,16 @@ const HouseSchema = new Schema(
     // Optional — existing houses may have null until assigned.
     // Historical RentCharges are never rewritten when this changes.
     houseTypeId: { type: Schema.Types.ObjectId, ref: 'HouseType', default: null, index: true },
+    // Existing records without billingSource remain unclassified until reviewed.
+    billingSource: {
+      type: String,
+      enum: ['HOUSE_TYPE', 'HOUSE_CONFIG', 'MONTHLY_RENT', 'UNCONFIGURED', 'LEGACY_UNCLASSIFIED'],
+      default: 'LEGACY_UNCLASSIFIED',
+      required: true,
+      index: true,
+    },
+    // Non-monetary CAS point shared by billing-source/config edits and charge generation.
+    billingConfigRev: { type: Number, default: 0, min: 0 },
     // Admin-configurable alternate identifiers a bank transaction's
     // reference/narration might use instead of the exact house number
     // (e.g. a tenant's account number, an old house numbering scheme).

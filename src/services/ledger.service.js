@@ -1,188 +1,271 @@
-// src/services/ledger.service.js
-//
-// Financial source of truth. All account balances for tenant/house must
-// be derived from Ledger running balances (or recomputed from Ledger rows).
-//
-// RentCharge.amountPaidCents / balanceCents remain operational caches for
-// allocation and billing UI — they are NOT the authoritative account balance.
-
+// Ledger — sole financial authority (aggregate of signed movements).
 import { Ledger } from '../models/Ledger.js';
-import { RentCharge } from '../models/RentCharge.js';
-import { money } from '../utils/money.js';
-import { estateFilterClause } from '../utils/estateFilter.js';
+import { Tenancy } from '../models/Tenancy.js';
 
-/**
- * Latest running balance for a house (amount owed). Falls back to sum of
- * open RentCharge balances only when no ledger rows exist yet (migration).
- */
-async function currentBalanceForHouse(clientId, houseId, { session } = {}) {
-  const last = await Ledger.findOne({ clientId, houseId })
-    .sort({ createdAt: -1, _id: -1 })
-    .session(session || null)
-    .lean();
-  if (last) return last.runningBalanceCents;
+/** Expected sign by (accountCategory, entryType). null = no enforcement (rare). */
+const SIGN_RULES = {
+  RENT: {
+    CHARGE: 'neg',
+    PENALTY: 'neg',
+    PAYMENT: 'pos',
+    SETTLEMENT: 'pos',
+    MANUAL_ADJUSTMENT: null,
+    BONUS: 'pos',
+    LOAN: null,
+    INTEREST: 'neg',
+    REVERSAL: null,
+  },
+  DEPOSIT: {
+    DEPOSIT_RECEIVED: 'pos',
+    DEPOSIT_TRANSFER_IN: 'pos',
+    DEPOSIT_DEDUCTION: 'neg',
+    DEPOSIT_REFUND: 'neg',
+    DEPOSIT_TRANSFER_OUT: 'neg',
+    MANUAL_ADJUSTMENT: null,
+    REVERSAL: null,
+  },
+};
 
-  const open = await RentCharge.find({
-    clientId,
-    houseId,
-    status: { $in: ['UNPAID', 'PARTIAL'] },
-  })
-    .session(session || null)
-    .select('balanceCents')
-    .lean();
-  return open.reduce((s, c) => s + Math.max(c.balanceCents || 0, 0), 0);
+function assertSign(accountCategory, entryType, amount) {
+  const rules = SIGN_RULES[accountCategory];
+  if (!rules) throw new Error(`Unknown accountCategory: ${accountCategory}`);
+  if (!(entryType in rules) && rules[entryType] === undefined) {
+    // entry type not listed for category — allow only if global enum has it and rule missing
+    const rule = rules[entryType];
+    if (rule === undefined) {
+      // e.g. CHARGE under DEPOSIT — reject
+      throw new Error(`entryType ${entryType} not valid for ${accountCategory}`);
+    }
+  }
+  const rule = rules[entryType];
+  if (rule === 'pos' && amount <= 0) {
+    throw new Error(`${accountCategory}/${entryType} requires positive amountCents`);
+  }
+  if (rule === 'neg' && amount >= 0) {
+    throw new Error(`${accountCategory}/${entryType} requires negative amountCents`);
+  }
 }
 
-/**
- * Post a ledger entry. Idempotent when referenceType + referenceId + entryType
- * already exist — returns the existing row without creating a second balance.
- *
- * amountCents: signed. For PAYMENT use positive (credit reduces debt).
- */
-async function postEntry(
-  {
-    clientId,
-    estateId,
-    houseId,
-    tenantId = null,
-    entryType,
-    amountCents,
-    referenceType = null,
-    referenceId = null,
-    description = '',
-    period = null,
-  },
-  { session } = {}
-) {
-  const amount = Math.trunc(Number(amountCents));
-  if (!Number.isFinite(amount) || amount === 0) {
-    throw new Error('ledger amountCents must be a non-zero integer');
+async function sumLedger(clientId, tenancyId, accountCategory, { session } = {}) {
+  if (!tenancyId) return 0;
+  const rows = await Ledger.aggregate([
+    { $match: { clientId, tenancyId, accountCategory } },
+    { $group: { _id: null, total: { $sum: '$amountCents' } } },
+  ]).session(session || null);
+  return rows[0]?.total || 0;
+}
+
+async function currentBalanceForTenancy(clientId, tenancyId, accountCategory = 'RENT', { session } = {}) {
+  return sumLedger(clientId, tenancyId, accountCategory, { session });
+}
+
+async function currentBalanceForHouse(clientId, houseId, { session } = {}) {
+  const rows = await Ledger.aggregate([
+    { $match: { clientId, houseId, accountCategory: 'RENT' } },
+    { $group: { _id: null, total: { $sum: '$amountCents' } } },
+  ]).session(session || null);
+  return rows[0]?.total || 0;
+}
+
+async function postEntry(payload, { session } = {}) {
+  const {
+    clientId, estateId, houseId, tenantId = null, tenancyId = null,
+    accountCategory = 'RENT', entryType, amountCents,
+    referenceType = null, referenceId = null, description = '', period = null,
+  } = payload;
+
+  if (!Number.isSafeInteger(amountCents) || amountCents === 0) {
+    throw new Error('ledger amountCents must be a non-zero safe integer');
+  }
+  assertSign(accountCategory, entryType, amountCents);
+
+  const requiresTenancy = accountCategory === 'RENT'
+    && (entryType === 'CHARGE' || entryType === 'PAYMENT');
+  if (requiresTenancy && !tenancyId) {
+    throw new Error('tenancyId is required for RENT CHARGE and PAYMENT ledger entries');
+  }
+  if (requiresTenancy && !session) {
+    throw new Error('RENT CHARGE and PAYMENT Ledger entries require a MongoDB transaction');
+  }
+  if (requiresTenancy && (!referenceType || !referenceId)) {
+    throw new Error('RENT CHARGE and PAYMENT Ledger entries require an exact source reference');
   }
 
+  const sameId = (a, b) => (a == null && b == null)
+    || (a != null && b != null && String(a) === String(b));
+  const matchesExpected = (existing) => Boolean(existing)
+    && existing.amountCents === amountCents
+    && existing.accountCategory === accountCategory
+    && existing.entryType === entryType
+    && sameId(existing.clientId, clientId)
+    && sameId(existing.estateId, estateId)
+    && sameId(existing.houseId, houseId)
+    && sameId(existing.tenantId, tenantId)
+    && sameId(existing.tenancyId, tenancyId)
+    && existing.referenceType === (referenceType || null)
+    && sameId(existing.referenceId, referenceId)
+    && String(existing.period || '') === String(period || '');
+
+  // Exact source-reference lookup first. A retry may reuse only a movement that
+  // matches the full accounting scope, not merely amount + tenancy.
   if (referenceType && referenceId) {
-    const existing = await Ledger.findOne({
-      clientId,
-      referenceType,
-      referenceId,
-      entryType,
-    })
+    const existing = await Ledger.findOne({ clientId, referenceType, referenceId, entryType })
       .session(session || null)
       .lean();
     if (existing) {
+      if (!matchesExpected(existing)) {
+        throw new Error('ledger idempotency conflict: existing movement identity differs');
+      }
       return { entry: existing, reused: true };
     }
   }
 
-  const prior = await currentBalanceForHouse(clientId, houseId, { session });
-  // Credit (positive amount) reduces amount owed; debit (negative) increases it.
-  const runningBalanceCents = money.subtract(prior, amount);
-
-  try {
-    const [entry] = await Ledger.create(
-      [
-        {
-          clientId,
-          estateId,
-          houseId,
-          tenantId: tenantId || null,
-          entryType,
-          amountCents: amount,
-          runningBalanceCents,
-          referenceType: referenceType || null,
-          referenceId: referenceId || null,
-          description: description || '',
-          period: period || null,
-        },
-      ],
-      session ? { session } : undefined
-    );
-    return { entry, reused: false };
-  } catch (err) {
-    // Unique index race: another worker posted the same reference
-    if (err?.code === 11000 && referenceType && referenceId) {
-      const existing = await Ledger.findOne({
-        clientId,
-        referenceType,
-        referenceId,
-        entryType,
-      })
-        .session(session || null)
-        .lean();
-      if (existing) return { entry: existing, reused: true };
+  // Serialize new tenancy-owned rent movements on one shared document before
+  // reading the prior balance. This prevents two different payments/charges
+  // for one tenancy from committing the same runningBalanceCents snapshot.
+  if (accountCategory === 'RENT' && tenancyId) {
+    if (!session) {
+      throw new Error('Tenancy-scoped RENT Ledger movements require a MongoDB transaction');
     }
-    throw err;
+    const lock = await Tenancy.updateOne(
+      { _id: tenancyId, clientId, estateId, houseId, ...(tenantId ? { tenantId } : {}) },
+      { $inc: { ledgerRev: 1 } },
+      { session }
+    );
+    if (lock.matchedCount !== 1) {
+      throw new Error('Ledger tenancy scope does not match an existing Tenancy');
+    }
   }
-}
 
-/**
- * Authoritative house account balance (amount owed). Prefer Ledger.
- */
-async function balanceForHouse(clientId, houseId, estateFilter = null) {
-  const filter = { clientId, houseId, ...estateFilterClause(estateFilter) };
-  // estateFilter may not include house ownership — caller must already scope house
-  const last = await Ledger.findOne({ clientId, houseId }).sort({ createdAt: -1, _id: -1 }).lean();
-  if (last) {
-    return {
-      balanceCents: last.runningBalanceCents,
-      source: 'ledger',
-      asOf: last.createdAt,
-    };
-  }
-  const open = await RentCharge.find({
+  const prior = tenancyId
+    ? await sumLedger(clientId, tenancyId, accountCategory, { session })
+    : await currentBalanceForHouse(clientId, houseId, { session });
+
+  const [entry] = await Ledger.create([{
     clientId,
+    estateId,
     houseId,
-    status: { $in: ['UNPAID', 'PARTIAL'] },
-  })
-    .select('balanceCents')
-    .lean();
-  const balanceCents = open.reduce((s, c) => s + Math.max(c.balanceCents || 0, 0), 0);
-  return { balanceCents, source: 'rentcharge_fallback', asOf: null };
+    tenantId: tenantId || null,
+    tenancyId: tenancyId || null,
+    accountCategory,
+    entryType,
+    amountCents,
+    runningBalanceCents: prior + amountCents,
+    referenceType: referenceType || null,
+    referenceId: referenceId || null,
+    description: description || '',
+    period: period || null,
+  }], session ? { session } : undefined);
+  return { entry, reused: false };
 }
 
-/**
- * Tenant balance = balance of their current house (tenant accounts are house-scoped).
- */
-async function balanceForTenant(clientId, tenantId, houseId, estateFilter = null) {
-  if (houseId) return balanceForHouse(clientId, houseId, estateFilter);
-  const last = await Ledger.findOne({ clientId, tenantId }).sort({ createdAt: -1, _id: -1 }).lean();
-  if (last) {
+async function balanceForTenancy(clientId, tenancyId, accountCategory = 'RENT') {
+  if (!tenancyId) {
     return {
-      balanceCents: last.runningBalanceCents,
-      source: 'ledger',
-      asOf: last.createdAt,
+      knownLedgerSumCents: null,
+      knownArrearsCents: accountCategory === 'RENT' ? null : undefined,
+      historicalCoverage: 'UNVERIFIED',
+      verifiedFullObligation: false,
+      source: 'no_tenancy',
     };
   }
-  return { balanceCents: 0, source: 'empty', asOf: null };
+
+  const sum = await sumLedger(clientId, tenancyId, accountCategory);
+  if (accountCategory === 'RENT') {
+    return {
+      knownLedgerSumCents: sum,
+      knownArrearsCents: Math.max(0, -sum),
+      knownCreditCents: Math.max(0, sum),
+      historicalCoverage: 'UNVERIFIED',
+      verifiedFullObligation: false,
+      unresolvedHistorical: true,
+      source: 'ledger_tenancy_sum',
+    };
+  }
+
+  return {
+    knownLedgerSumCents: sum,
+    depositHeldCents: sum,
+    depositIntegrityOk: sum >= 0,
+    historicalCoverage: 'UNVERIFIED',
+    verifiedFullObligation: false,
+    unresolvedHistorical: true,
+    source: 'ledger_tenancy_sum',
+  };
+}
+
+async function balanceForHouse(clientId, houseId) {
+  // Do not net one tenancy's credit against another tenancy's arrears.
+  // Unattributed legacy movements remain outside this provisional projection.
+  const rows = await Ledger.aggregate([
+    {
+      $match: {
+        clientId,
+        houseId,
+        accountCategory: 'RENT',
+        tenancyId: { $type: 'objectId' },
+      },
+    },
+    { $group: { _id: '$tenancyId', balanceCents: { $sum: '$amountCents' } } },
+  ]);
+
+  const knownLedgerSumCents = rows.reduce((sum, row) => sum + row.balanceCents, 0);
+  const knownArrearsCents = rows.reduce(
+    (sum, row) => sum + Math.max(0, -row.balanceCents), 0
+  );
+  const knownCreditCents = rows.reduce(
+    (sum, row) => sum + Math.max(0, row.balanceCents), 0
+  );
+
+  return {
+    knownLedgerSumCents,
+    knownArrearsCents,
+    knownCreditCents,
+    historicalCoverage: 'UNVERIFIED',
+    verifiedFullObligation: false,
+    unresolvedHistorical: true,
+    source: 'ledger_tenancy_aggregate',
+  };
+}
+
+async function balanceForTenant(clientId, tenantId, houseId) {
+  if (houseId) return balanceForHouse(clientId, houseId);
+  return {
+    knownLedgerSumCents: null,
+    knownArrearsCents: null,
+    historicalCoverage: 'UNVERIFIED',
+    verifiedFullObligation: false,
+    source: 'tenant_without_tenancy_scope',
+  };
 }
 
 async function historyForHouse(clientId, houseId, { limit = 100 } = {}) {
   return Ledger.find({ clientId, houseId }).sort({ createdAt: -1, _id: -1 }).limit(limit).lean();
 }
-
-async function historyForTenant(clientId, tenantId, { limit = 100 } = {}) {
-  return Ledger.find({ clientId, tenantId }).sort({ createdAt: -1, _id: -1 }).limit(limit).lean();
+async function historyForTenancy(clientId, tenancyId, { limit = 100 } = {}) {
+  return Ledger.find({ clientId, tenancyId }).sort({ createdAt: -1, _id: -1 }).limit(limit).lean();
 }
-
-/**
- * Total PAYMENT credits posted to ledger for a scope (actual money received).
- */
-async function totalPaymentsReceived(clientId, filterExtra = {}) {
-  const rows = await Ledger.find({
-    clientId,
-    entryType: 'PAYMENT',
-    ...filterExtra,
-  })
-    .select('amountCents')
-    .lean();
-  return rows.reduce((s, r) => s + Math.max(r.amountCents || 0, 0), 0);
+async function totalPaymentsReceived(clientId, { houseId, tenantId, tenancyId } = {}) {
+  const match = { clientId, entryType: 'PAYMENT', accountCategory: 'RENT' };
+  if (tenancyId) match.tenancyId = tenancyId;
+  else if (houseId) match.houseId = houseId;
+  else if (tenantId) match.tenantId = tenantId;
+  const rows = await Ledger.aggregate([
+    { $match: match },
+    { $group: { _id: null, total: { $sum: '$amountCents' } } },
+  ]);
+  return Math.max(0, rows[0]?.total || 0);
 }
 
 export const ledgerService = {
   postEntry,
+  sumLedger,
+  currentBalanceForTenancy,
   currentBalanceForHouse,
+  balanceForTenancy,
   balanceForHouse,
   balanceForTenant,
   historyForHouse,
-  historyForTenant,
+  historyForTenancy,
   totalPaymentsReceived,
 };
