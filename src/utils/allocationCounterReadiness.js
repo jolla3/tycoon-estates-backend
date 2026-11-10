@@ -1,5 +1,7 @@
 /**
- * Production readiness: Payment.allocatedCents and PaymentAllocation structural integrity.
+ * Production readiness: PaymentAllocation structural integrity.
+ * Payment.allocatedCents is a deprecated denormalized compatibility mirror;
+ * it is intentionally not compared with allocation rows.
  * Read-only — never modifies financial records.
  */
 import { Payment } from '../models/Payment.js';
@@ -43,8 +45,9 @@ function issue(list, type, payload) {
 }
 
 /**
- * Full structural + counter verification.
- * Readiness is set true only when setReady=true and issues is empty.
+ * Full structural verification. Allocation totals are derived from
+ * PaymentAllocation; the deprecated allocatedCents mirror is not a gate.
+ * Readiness is set true only when setReady=true and structural issues are absent.
  */
 export async function verifyAllocationCounters({ setReady = true, session = null } = {}) {
   const issues = [];
@@ -57,7 +60,7 @@ export async function verifyAllocationCounters({ setReady = true, session = null
     const q = Payment.find(lastId ? { _id: { $gt: lastId } } : {})
       .sort({ _id: 1 })
       .limit(BATCH)
-      .select('_id clientId estateId houseId tenancyId tenantId amountCents allocatedCents status');
+      .select('_id clientId estateId houseId tenancyId tenantId amountCents status');
     if (session) q.session(session);
     const batch = await q.lean();
     if (!batch.length) break;
@@ -140,14 +143,6 @@ export async function verifyAllocationCounters({ setReady = true, session = null
           paymentId: String(p._id), allocatedSum: total, amountCents: p.amountCents,
         });
       }
-      if ((p.allocatedCents || 0) !== total) {
-        issue(issues, 'counter_mismatch', {
-          paymentId: String(p._id),
-          storedAllocatedCents: p.allocatedCents || 0,
-          actualAllocationSum: total,
-          amountCents: p.amountCents,
-        });
-      }
     }
     if (batch.length < BATCH) break;
   }
@@ -183,7 +178,8 @@ export async function verifyAllocationCounters({ setReady = true, session = null
     checkedAllocations,
     issues,
     // backward-compatible alias
-    mismatches: issues.filter((i) => i.type === 'counter_mismatch'),
+    // Backward-compatible report field; deprecated mirror differences are not checked.
+    mismatches: [],
     verifiedAt: new Date().toISOString(),
   };
   lastReport = report;

@@ -267,15 +267,23 @@ async function inspectMalformedTenancyIds(collection) {
 }
 
 /**
- * Identity fields must have scalar BSON types compatible with the Mongoose
- * schema. Arrays could make the compound index multikey; other types can
- * create identities the application never writes.
+ * Validate identity fields only for records included by the target partial
+ * unique index. Legacy/unattributed rows have no ObjectId tenancyId, so they
+ * are intentionally outside this index and may retain older schema shapes.
+ * Do not backfill legacy fields merely to satisfy this index preflight.
  *
- * Legacy description null/missing is retained and treated as equivalent
- * to null for duplicate preflight. Empty string remains distinct.
+ * Arrays could make the compound index multikey; other BSON types can create
+ * identities that current application writers do not produce.
+ * Legacy description null/missing remains equivalent for duplicate checks;
+ * empty string remains distinct.
  */
 async function inspectMalformedIdentityFields(collection) {
   const rows = await collection.aggregate([
+    {
+      $match: {
+        $expr: { $eq: [{ $type: '$tenancyId' }, 'objectId'] },
+      },
+    },
     {
       $project: {
         _id: 1,

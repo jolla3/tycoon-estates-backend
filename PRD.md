@@ -191,3 +191,51 @@ No silent write-offs. No invented occupancy dates. No copying current `House.ten
 ## 10. Document alignment
 
 This PRD, `architecture.md` and `architecture-summary.md` share the same G2 decisions on tenancy lifecycle, payment origins, deposits, legacy balances, Co-op matching/retry, ledger semantics, billing effective dates, Mongo transactions, index policy and delivery gates. Proposed schema is target design, not current code.
+
+## 11. Runtime implementation reconciliation (2026-11-10)
+
+This is an implementation addendum to the G2 product/design baseline above. The
+`569c96c` code baseline and statements that proposed G3 models do not exist are
+historical descriptions of that baseline, not descriptions of the current
+repository. Current source and live readiness reports must be inspected before
+making implementation claims. This addendum does not declare G3 or G4 complete.
+
+### 11.1 Allocation authority and compatibility
+
+- `PaymentAllocation` rows are the source from which allocation totals are
+  derived. `Payment.allocatedCents` is a deprecated denormalized compatibility
+  mirror in the current source; a mismatch in that mirror alone is not evidence
+  of missing money or a reason to prevent the HTTP application from starting.
+- Structural allocation problems remain integrity failures: invalid amounts,
+  allocations exceeding a receipt, cross-client/estate/house/tenancy ownership,
+  missing charges, and orphan allocations must still be detected.
+- No routine startup process or automatic migration may rewrite historical
+  payment, allocation, charge, or ledger records to make a cached number agree.
+
+### 11.2 Application startup versus financial-write readiness
+
+- Database connectivity, transaction-topology verification, and structural
+  allocation validation are startup checks.
+- Required financial index alignment is a separate readiness gate. If explicit
+  index migrations are incomplete, the HTTP application may start, while
+  financial mutation paths remain blocked by their existing readiness checks.
+- Ordinary startup is read-only with respect to financial identity indexes. It
+  must not create or drop those indexes to make readiness appear green.
+
+### 11.3 Legacy index and data handling
+
+- The exact historical RentCharge unique key is
+  `{ clientId, houseId, period, chargeType, description }`. MongoDB may assign
+  the generated name `clientId_1_houseId_1_period_1_chargeType_1_description_1`
+  when the original schema does not specify a name. Recognition must validate
+  the complete ordered key and unique-index options, not depend solely on the
+  custom name expected by a later migration.
+- Recognizing that exact old index only classifies it for migration preflight;
+  it does not make billing ready and does not authorize dropping it at startup.
+- Historical and development-seed documents may predate current Tenancy,
+  origin, and processing-state fields. Their absence must be classified against
+  the purpose and provenance of the dataset. Do not infer that every stale
+  development fixture is a production financial obligation, and do not infer
+  that every old record should be rewritten to the newest schema.
+- Data repair or index mutation requires a separate, explicit, target-verified
+  migration decision and a reviewed preflight report.

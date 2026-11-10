@@ -8,6 +8,13 @@ export const LEGACY_HOUSE_UNIQUE_KEYS = Object.freeze({
   description: 1,
 });
 
+// MongoDB uses this generated name when the original schema declares the exact
+// compound key without an explicit `name` option. Name alone is not semantic,
+// so the complete key and safe unique options are still checked below.
+export const GENERATED_LEGACY_HOUSE_UNIQUE_NAME = Object.entries(LEGACY_HOUSE_UNIQUE_KEYS)
+  .map(([field, direction]) => `${field}_${direction}`)
+  .join('_');
+
 export const TARGET_PARTIAL_FILTER = Object.freeze({
   tenancyId: Object.freeze({ $type: 'objectId' }),
 });
@@ -58,7 +65,10 @@ export function isExactTargetRentChargeIndex(index) {
 }
 
 export function isExactObsoleteHouseRentChargeIndex(index) {
-  return index?.name === RENT_CHARGE_INDEX.OBSOLETE_HOUSE_UNIQUE
+  const recognizedName = index?.name === RENT_CHARGE_INDEX.OBSOLETE_HOUSE_UNIQUE
+    || index?.name === GENERATED_LEGACY_HOUSE_UNIQUE_NAME;
+
+  return recognizedName
     && hasSafeUniqueOptions(index)
     && sameOrderedKeyPattern(index.key, LEGACY_HOUSE_UNIQUE_KEYS)
     && index.partialFilterExpression == null;

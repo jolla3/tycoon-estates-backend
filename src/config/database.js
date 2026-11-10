@@ -34,22 +34,16 @@ export async function connectDatabase() {
     // isolated integration-test connection helper; no test-only bypass exists.
     await verifyMongoTransactionSupport();
 
-    // Allocation counter verification (default ON). Disabling must never enable financial posting:
-    // poster still requires areAllocationCountersReady() which stays false when verify is skipped.
-    const verifyCounters = process.env.G3_VERIFY_ALLOCATION_COUNTERS !== '0';
-    if (verifyCounters) {
-      const report = await verifyAllocationCounters({ setReady: true });
-      if (!report.ok) {
-        const sample = (report.issues || []).slice(0, 5).map((i) => i.type).join(', ');
-        throw new Error(
-          `Allocation integrity verification failed: ${report.issues.length} issue(s)`
-          + (sample ? ` (e.g. ${sample})` : '')
-          + '. Resolve data issues / run disposable backfill, then restart.'
-        );
-      }
-    } else {
-      logger.warn(
-        'G3_VERIFY_ALLOCATION_COUNTERS=0 — counters not verified; financial posting remains blocked until verifyAllocationCounters succeeds'
+    // Structural allocation verification. PaymentAllocation rows are the
+    // allocation authority; Payment.allocatedCents is a deprecated compatibility
+    // mirror and a mismatch in that cache must not prevent application startup.
+    const report = await verifyAllocationCounters({ setReady: true });
+    if (!report.ok) {
+      const sample = (report.issues || []).slice(0, 5).map((i) => i.type).join(', ');
+      throw new Error(
+        `Payment allocation integrity verification failed: ${report.issues.length} issue(s)`
+        + (sample ? ` (e.g. ${sample})` : '')
+        + '. Inspect structural integrity issues; no automatic data repair was attempted.'
       );
     }
 

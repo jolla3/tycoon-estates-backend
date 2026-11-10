@@ -411,3 +411,61 @@ Metrics: sources RECEIVED/CLAIMED/POSTED/FAILED_*; unmatched age; ledger vs char
 ## Document control
 
 Aligned with `PRD.md` and `architecture-summary.md` at G2 (2026-11-07). Code baseline SHA preserved. No implementation authorized by this revision alone.
+
+## 21. Runtime implementation reconciliation (2026-11-10)
+
+The G2 baseline at `569c96c` is historical. The current repository has since
+introduced Tenancy, origin-aware Payments, allocation serialization, tenancy-
+scoped ledger posting, live index-readiness inspection, and guarded migration
+scripts. The design documents remain constraints and intent; they must not be
+used as a substitute for inspecting current source, tests, runtime output, and
+the actual database before diagnosing a failure. This addendum does not claim
+that G3/G4 acceptance is complete.
+
+### 21.1 Allocation totals
+
+- `PaymentAllocation` is the canonical source for allocation totals.
+- `Payment.allocatedCents` remains a deprecated denormalized compatibility
+  field in the present schema/writer path. It is not an accounting authority.
+- Startup integrity verification checks allocation structure and ownership,
+  not equality between `allocatedCents` and the sum of allocation rows.
+- Structural invariants remain enforced: safe positive allocation amounts,
+  receipt capacity, client/estate/house/tenancy consistency, existing charge
+  references, and absence of orphan allocations.
+- No automatic counter backfill is part of application startup.
+
+### 21.2 Readiness boundaries
+
+`connectDatabase()` should fail startup for an unavailable database, failed
+transaction-topology verification where required, or genuine allocation
+structural-integrity failures. It should not fail because a deprecated cached
+counter is stale.
+
+Financial index readiness remains independent. `ensureIndexes()` may create
+ordinary schema-declared operational indexes, but financial identity indexes
+remain explicit-migration-owned. A missing or misaligned RentCharge,
+HouseType, or MANUAL payment-reference index keeps financial posting disabled;
+it does not require terminating the HTTP server. Posting services must retain
+their own live index and transaction checks.
+
+### 21.3 Exact historical RentCharge index recognition
+
+The historical house-scoped unique index was declared with the key
+`{ clientId: 1, houseId: 1, period: 1, chargeType: 1, description: 1 }`
+without an explicit name. MongoDB therefore reports the generated name
+`clientId_1_houseId_1_period_1_chargeType_1_description_1`. The readiness and
+migration classifiers must recognize this exact verified key/name pair as the
+known obsolete index, while continuing to reject unknown unique indexes that
+contain `houseId`, or indexes whose uniqueness options/key pattern differ.
+Recognition is classification only. The explicit migration still performs
+duplicate and malformed-record preflight, installs and verifies the target
+tenancy-scoped partial unique index, and only then drops the verified old index.
+
+### 21.4 Data provenance
+
+Schema compatibility is not equivalent to financial truth. Development seed
+records, stale legacy projections, and genuine historical transactions are
+different data classes. Missing new fields alone do not justify assigning
+Tenancy ownership, changing charge status, manufacturing allocations, or
+posting ledger entries. Review provenance and the actual write path first;
+keep uncertain rows unchanged until an explicit disposition is approved.

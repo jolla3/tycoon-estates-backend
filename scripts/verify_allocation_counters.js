@@ -1,6 +1,7 @@
 /**
- * Read-only: verify Payment.allocatedCents vs PaymentAllocation sums.
- * Does not modify data. Exit 1 if mismatches.
+ * Legacy command filename retained for compatibility.
+ * Read-only: verify PaymentAllocation structural integrity.
+ * The deprecated Payment.allocatedCents mirror is not compared.
  */
 import mongoose from 'mongoose';
 import { verifyAllocationCounters } from '../src/utils/allocationCounterReadiness.js';

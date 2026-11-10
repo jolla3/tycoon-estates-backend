@@ -80,3 +80,19 @@ Compatibility projections `House.tenantId`, `Tenant.houseId`, `Tenant.estateId` 
 - Residual product choices listed in PRD (simultaneous tenancies per tenant, STK vs C2B shortcode verification, etc.).
 
 See **architecture.md** for the full design, self-critique, migration policy and test strategy. See **PRD.md** for product requirements and acceptance criteria.
+
+## Runtime reconciliation — 2026-11-10
+
+- The G2 baseline SHA above is historical; current source must be inspected
+  independently. These documents do not claim G3/G4 implementation is complete.
+- `PaymentAllocation` is authoritative for allocation sums. The deprecated
+  `Payment.allocatedCents` mirror is not a startup or accounting authority.
+- Startup validates allocation structure. Financial index readiness is
+  separate: missing explicit indexes blocks financial writes, not HTTP startup.
+- Ordinary startup does not mutate financial identity indexes.
+- The exact historical RentCharge house-unique key may carry MongoDB's generated
+  name `clientId_1_houseId_1_period_1_chargeType_1_description_1`; classify it
+  by verified key and options, not only by a later custom name.
+- Old and development-seed records must be classified by provenance. No
+  automatic Tenancy attribution or financial reconstruction from current
+  House/Tenant pointers.
