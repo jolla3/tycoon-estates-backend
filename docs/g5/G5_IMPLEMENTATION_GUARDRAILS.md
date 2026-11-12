@@ -71,16 +71,16 @@ Never run `git reset --hard`, `git clean`, force-push, broad restore/checkout, w
 
 ## 5. Financial invariants that code must enforce
 
-1. **Historical identity:** every link, SMS submission, winning transaction claim and posted Payment resolves to one exact `Tenancy._id` plus immutable `clientId`, `estateId`, `houseId`, and `tenantId` scope. The winning claim is transaction fields, not a separate initial claim collection.
+1. **Tenant attribution, Tenancy accounting:** the link and receipt claim identify one immutable `{ clientId, estateId, tenantId }`. Every child Payment, PaymentAllocation, RentCharge projection and Tenancy Ledger movement still resolves to one exact Tenancy and its House/client/Estate/Tenant scope.
 2. **Third-party payer:** payer name/phone are evidence attributes, not the tenancy lookup key. Do not require payer phone = tenant phone.
 3. **No fuzzy assignment:** no amount-only, phone-only, current-house, current-tenant, date-only, or nearest-match fallback.
 4. **Canonical receipt:** callback and Pull converge to one canonical transaction, uniquely scoped by verified merchant identity and external receipt number. Until B01/B02 prove the scope and the exact unique index is installed and readiness-verified, candidates are non-postable.
-5. **One receipt, one claim/payment:** concurrency must be enforced by the external receipt unique index, the Payment-to-internal-transaction unique index, and conditional state transitions, not only Redis locks. The Payment index alone does not prevent duplicate transaction documents for one external receipt.
+5. **One receipt, one claim:** concurrency is enforced by external receipt uniqueness and a single Tenant-level conditional claim. A combined receipt may create one child Payment per Tenancy under unique `{ mpesaReceiptId, tenancyId }`; all child postings and any Tenant-credit movement are atomic. The Payment index alone does not prevent duplicate transaction documents for one external receipt.
 6. **G3 remains authority:** `Payment.origin = 'MPESA'`; `Payment.mpesaReceiptId` points to the internal `MpesaTransaction._id`; do not put the external alphanumeric receipt in an ObjectId field.
 7. **Atomic commit:** Payment, PaymentAllocation rows, RentCharge projections, Ledger PAYMENT, and claim/transaction POSTED state commit or roll back in the same Mongo transaction.
-8. **Exact allocation scope:** no allocation crosses the link-bound tenancy or client/estate/house scope.
-9. **Late arrears:** closed tenancy path can touch only pre-existing eligible charges on that exact old Tenancy; no charge generation; no credit transfer to the new Tenancy.
-10. **Overpayment:** full receipt value must be accounted for. Prove how G3 represents unapplied credit; if it cannot do so safely, do not auto-post the overpayment. Route it to controlled review. Never silently drop the residual amount.
+8. **Exact allocation scope:** no individual PaymentAllocation crosses its target Tenancy or client/Estate/House scope. Tenant-level aggregate presentation is not permission to create a cross-Tenancy allocation.
+9. **Late arrears:** a Tenant-level link can settle only pre-existing eligible charges on a closed Tenancy; no charge generation for a closed Tenancy. A move affects only the selected Tenancy.
+10. **Carry-forward credit:** surplus remains the Tenant's credit and reduces future combined rent due within the same client/Estate. G3 must own an auditable Tenant-account credit/application mechanism. Do not lose the residual, refund it automatically, assign it to an arbitrary House, or move it to another Tenant.
 11. **Historical coverage:** no `SETTLED` link state from a zero projection alone. Require verified historical coverage, no unresolved obligation/credit, and no open claim.
 12. **Compatibility:** preserve BANK and MANUAL posting semantics and all G4 workflows. A shared-service change must prove that these callers behave as before.
 
@@ -88,7 +88,7 @@ Never run `git reset --hard`, `git clean`, force-push, broad restore/checkout, w
 
 - Generate at least 32 cryptographically random bytes from the platform CSPRNG.
 - Store only a one-way hash or keyed digest in the link record. Enforce uniqueness and constant-time comparison where applicable.
-- Link association is permanent to the historical Tenancy; its bearer secret is not immutable. Provide revocation/rotation after loss or compromise without reassigning the tenancy.
+- Link association is permanent to the Tenant identity `{ clientId, estateId, tenantId }`; its bearer secret is revocable/rotatable without changing that identity. Active Tenancies are resolved server-side after validation.
 - Prefer a URL fragment that is never sent in the initial HTTP request, then immediately remove it from browser history and submit the credential in a POST body. Do not place it in query/path values that are commonly logged. If the implementation uses another pattern, prove every proxy, access log, analytics, trace, referrer and error path is redacted.
 - Do not use localStorage/sessionStorage for the permanent bearer token. Keep it in memory only while the form is active.
 - Public link pages must not contain third-party analytics/pixels. Apply `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, restrictive CSP, request-size limits and rate limits.
@@ -162,11 +162,11 @@ At minimum inspect:
 - direct tenancy close/void paths and administrative correction flows;
 - any scheduled process that changes tenant/house occupancy pointers.
 
-Lifecycle transitions affecting Tenant, Tenancy, MpesaSubmissionLink and protected SMS outbox must share a clear transaction boundary. Old links remain bound to old Tenancy. New occupancy receives a new link. A failed outbox/link write rolls back the associated lifecycle mutation or leaves a durable recoverable outbox state with a documented invariant; it must never leave a half-created link silently.
+Lifecycle transitions affecting Tenant, Tenancy, the Tenant-level MpesaSubmissionLink and protected SMS outbox must share a clear transaction boundary. The link persists across added/moved units; each Tenancy retains its separate historical identity. A failed outbox/link write rolls back the associated lifecycle mutation or leaves a durable recoverable outbox state with a documented invariant; it must never leave a half-created link silently.
 
 ## 11. Index, migration, and worker rules
 
-- Design unique identities before implementation. Candidate uniqueness: link token digest; one link per Tenancy; merchant identity within verified scope; `(merchantProfileId, receiptNumber)`; one Payment per internal canonical transaction. The winning claim is a conditional state transition on `MpesaTransaction`, not a separate unique claim collection.
+- Design unique identities before implementation. Candidate uniqueness: link token digest; one link per `{ clientId, estateId, tenantId }`; merchant identity within verified scope; `(merchantProfileId, receiptNumber)`; one child Payment per `{ mpesaReceiptId, tenancyId }`. The winning claim is a conditional state transition on `MpesaTransaction`, not a separate unique claim collection.
 - MPESA financial posting must fail closed until the exact external receipt unique index is proven, installed, and runtime-verified; do not treat `Payment.mpesaReceiptId` as a cross-document external receipt constraint.
 - Treat candidate key patterns as provisional until the actual Till/Store hierarchy and current schemas are verified.
 - Guard every unique-index migration with duplicate preflight, exact index inspection, explicit migration execution and readiness verification.
@@ -198,7 +198,7 @@ Lifecycle transitions affecting Tenant, Tenancy, MpesaSubmissionLink and protect
 - Protected SMS payload never appears in API/history/serialization/logs.
 - Callback and Pull overlap create one canonical transaction when the exact external identity index is ready; otherwise duplicate candidates remain non-postable.
 - SMS-before-Daraja and Daraja-before-SMS both converge.
-- One receipt submitted against two links never posts twice or switches tenancy.
+- One receipt is claimed once for the Tenant even if the submission is repeated; a combined receipt may create multiple Tenancy-scoped child Payments but cannot duplicate a receipt/Tenancy pair.
 - Duplicate internal transaction candidates for one external receipt cannot post while external receipt uniqueness is unavailable.
 - Inbox worker lease expiry and reclaim cannot cause duplicate normalization.
 - A submission racing token rotation/revocation serializes through a write-bearing link update; read-only token revalidation is rejected.
@@ -292,8 +292,8 @@ Use `docs/g5/G5_1_SCHEMA_INDEX_DESIGN.md` as the core schema/index proposal and 
 
 Use `docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md` as the proposed design. It is not implementation authorization.
 
-- Keep `tenantService.create()` Tenant/Tenancy creation and G5 link/outbox creation in one caller-owned Mongo session. Preallocate stable IDs, token/version and idempotency key; pin the outbox key version. Generate a fresh GCM nonce/envelope inside each retryable callback attempt after session-bound merchant validation. Never reuse a nonce/key pair across callback retries.
-- Refactor `tenancyService.moveToHouse()` to accept a caller-owned session (or use one shared lifecycle orchestrator) so old Tenancy close, old-link `ARREARS_ONLY`, new Tenancy, new link/outbox, House/Tenant pointers and critical audit commit atomically. Expose `currentTenancyId` in authenticated tenant detail and require `expectedCurrentTenancyId`; compare source House pointer to the exact old Tenant and require a vacant/consistent destination House pointer before assigning. Same-house move remains a no-op.
+- Keep Tenant/Tenancy creation and first Tenant-level G5 link/outbox creation in one caller-owned Mongo session. Adding further Tenancies to that Tenant reuses the same link. Preallocate stable IDs, token/version and idempotency key; pin the outbox key version. Generate a fresh GCM nonce/envelope inside each retryable callback attempt after session-bound merchant validation. Never reuse a nonce/key pair across callback retries.
+- Refactor `tenancyService.moveToHouse()` to accept a caller-owned session (or use one shared lifecycle orchestrator) so old Tenancy close, old-link `ARREARS_ONLY`, new Tenancy, new link/outbox, House/Tenant pointers and critical audit commit atomically. Expose `activeTenancies[]` in authenticated tenant detail and require exact `expectedTenancyId` for the one Tenancy being moved; compare source House pointer to the exact old Tenant and require a vacant/consistent destination House pointer before assigning. Same-house move remains a no-op.
 - Refactor `tenantService.update(status='moved_out')` before G5 integration. Require `expectedTenancyId`, and do not write Tenant status outside the transaction that closes that exact Tenancy, conditionally updates House, transitions the old link and writes critical audit. Remove the fallback that unconditionally clears the House pointer when no matching active tenancy is found. Pass the authenticated actor ID through create/move/move-out service signatures and persist it on Tenancy/AuditLog. Require exact House pointer updates to match the expected tenant and `matchedCount === 1`; stale requests must conflict, never clear later occupants.
 - G5 provisioning is a trusted server-side `DISABLED`/`REQUIRED` decision, never a tenant-controlled body field. REQUIRED fails the whole operation if exactly one permitted operational merchant cannot be resolved or protected encryption/outbox readiness is unavailable. DISABLED creates no new link/outbox but still transitions an existing old link when its Tenancy closes/transfers.
 - Do not hook G5 provisioning to every low-level `tenancyService.open()` call. The seed script uses it directly. Demo/test flows must explicitly stay G5-disabled.
@@ -355,3 +355,25 @@ The full pinned-source audit is in docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.m
 - Direct test fixture creation may construct historical intervals, but lifecycle behaviour tests must exercise production lifecycle services and assert House/Tenant/Tenancy atomicity.
 
 No source code, index, migration, provider configuration, key or test environment change is authorized by this documentation audit.
+
+
+## 21. Tenant-level combined M-PESA account and carry-forward rules
+
+- One Tenant profile may hold multiple active Tenancies in different Houses in the same Estate. No per-Tenant ACTIVE-Tenancy unique index; retain per-House uniqueness.
+- One Tenant-level link identifies `{ clientId, estateId, tenantId }`. A one-unit Tenant sees one account; a multi-unit Tenant sees a combined statement. The existing SMS provider/sender setup is unchanged.
+- Claim a verified M-PESA receipt once. Post exact portions through the G3 accounting service to individual Tenancies. Never create a cross-Tenancy PaymentAllocation.
+- Underpayments reduce the combined total by applying to oldest eligible due obligations first, with stable tie-breakers. The payer never has to split the amount manually.
+- Overpayment remains a Tenant-level carried-forward rent credit and reduces future combined rent due in that same Estate. This requires an auditable G3 aggregate-credit/application mechanism; do not invent a G5 wallet or silently net unrelated Tenants.
+- Each Client's rent effective-date/proration configuration determines charges on a new unit. G5 does not calculate or hard-code those policies.
+- Tests must prove one-unit regression, two-unit combined payment, one receipt claim, child posting totals, excess-credit carry-forward, credit application to future configured charges, move of one Tenancy leaving another untouched, and exact tenant/Estate isolation.
+
+
+## 22. G5 Tenant-level account, M-PESA receipt and credit guardrails
+
+- The token authenticates one Tenant within one client/Estate. It never authenticates one arbitrary current House. Do not key link lookup by `Tenant.houseId`.
+- One physical M-PESA receipt has one canonical transaction and one Tenant-level claim. Combined posting may create one G3 child Payment per Tenancy, and all child amounts plus any Tenant-account credit must equal the verified receipt amount.
+- Every child Payment and PaymentAllocation remains tenancy-scoped. The aggregate statement is not permission to create a cross-Tenancy PaymentAllocation.
+- Any excess remains the Tenant's credit and reduces the next combined rent due in the same Estate. Current G3 does not pool Tenancy credits, so an auditable G3 Tenant-account credit/application extension is required. Never create a G5 wallet or pin pooled credit to an arbitrary unit.
+- G3's default internal allocation order is oldest eligible due date first, then period, tenancyId and RentCharge ID. Apply Tenant credit to future eligible charges using the same deterministic order.
+- The new unit's rent effective date and any proration are resolved from that Client's configured policy. G5 must not calculate or hard-code those rules.
+- Preserve one-unit regression behavior and prove multi-unit combined payment, one receipt claim, atomic child postings, carried-forward credit, credit application next month, and unit-specific move isolation.

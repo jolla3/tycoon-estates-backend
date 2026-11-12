@@ -16,7 +16,7 @@
 
 ## Product in one paragraph
 
-G5 attributes ordinary customer-to-merchant M-PESA Buy Goods / Till rent receipts to one immutable tenancy. A private tenancy-bound link lets the tenant or a third party submit the complete M-PESA confirmation SMS. Tycoon independently verifies that evidence against the merchant's Daraja C2B callback/Pull Transactions record, converges both channels to one canonical transaction, then posts once through G3. The Till receives the money. G5 does not move funds.
+G5 attributes ordinary customer-to-merchant M-PESA Buy Goods / Till rent receipts to one Tenant identity. A private Tenant-level link lets the tenant or a third party submit the complete confirmation SMS. Tycoon verifies the receipt against merchant-side Daraja C2B callback/Pull records, claims it once, and posts Tenancy-scoped G3 allocations. A single-unit Tenant sees one account; a multi-unit Tenant in one Estate sees a combined statement. Surplus remains as G3-owned Tenant credit for future rent. The Till receives the money; G5 does not move funds.
 
 ## Scope boundary
 
@@ -33,7 +33,7 @@ G5 attributes ordinary customer-to-merchant M-PESA Buy Goods / Till rent receipt
 3. **Secret handling:** token has at least 256 bits of randomness; the database stores only its hash/digest. The temporary SMS payload is encrypted and excluded from API/history/log surfaces. Secret rotation/revocation does not change the tenancy binding.
 4. **Two independent evidence sources:** automatic posting requires a submitted confirmation SMS and a matching canonical Daraja merchant transaction. SMS alone and callback alone are insufficient.
 5. **One transaction identity:** callback and Pull Transactions use one normalization/upsert path and one canonical `(merchantProfileId, receiptNumber)` record only after B01/B02 prove that scope and the exact unique index is installed and verified. Before that, duplicate candidates remain quarantined and non-postable.
-6. **One receipt, one payment:** the external receipt unique index prevents duplicate canonical records; `Payment.mpesaReceiptId` separately prevents two Payments referencing one internal transaction `_id`. The latter alone cannot prevent duplicate external receipts across two transaction documents.
+6. **One receipt, one claim:** the external receipt unique index prevents duplicate canonical records. A combined Tenant receipt may create multiple child Payments, one per Tenancy, protected by `{ mpesaReceiptId, tenancyId }`; the canonical receipt claim still occurs only once.
 7. **G3 only:** `Payment.origin = 'MPESA'`; `Payment.mpesaReceiptId` is an ObjectId reference to `MpesaTransaction._id`, never the external receipt string. Extend `accountingPosting.service.js`; do not create a parallel ledger.
 8. **Atomic financial effect:** Payment, allocations, charge projections, Ledger PAYMENT, and transaction `paymentId`/POSTED state commit or roll back in one MongoDB transaction. The transaction claim is stored on `MpesaTransaction`, not a separate claim collection.
 9. **Closed tenancy:** late payment uses the original link-bound tenancy and only its already-existing eligible charges. No new old-tenancy charges, no credit transfer to a new tenancy. Unapplied amount remains old-tenancy credit or goes to review if G3 cannot safely represent it.
@@ -60,7 +60,7 @@ G5 attributes ordinary customer-to-merchant M-PESA Buy Goods / Till rent receipt
 ## Proposed G5 domain records
 
 - `MpesaMerchantProfile`: Daraja application/merchant configuration and verified client/estate/store ownership mapping.
-- `MpesaSubmissionLink`: token hash, exact historical tenancy snapshot, lifecycle state, revocation/rotation metadata.
+- `MpesaSubmissionLink`: token hash, immutable client/Estate/Tenant identity, lifecycle state, revocation/rotation metadata.
 - `MpesaSmsSubmission`: encrypted original message if retention is approved, digest, parsed normalized evidence, parser version and state.
 - `MpesaIngestionEvent`: durable callback/Pull inbox and quarantine, source identity/digest, normalized transaction link, and fenced processing lease.
 - `MpesaTransaction`: one normalized provider receipt per verified merchant profile, winning claim fields, posting lease/state, and G3 Payment reference. There is no separate `MpesaPaymentClaim` record in the initial five-record model.
@@ -125,7 +125,7 @@ The proposed lifecycle/outbox decision record is [G5_2_TENANCY_LINK_AND_OUTBOX_D
 
 **Independent review verdict:** APPROVE WITH REQUIRED CHANGES; the corrections are recorded below and in G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16. **Implementation:** NO-GO for application changes, models, migrations, keys, workers or Celcom sends without separate bounded owner authorization.
 
-G5.2 keeps the existing Celcom queue/provider, but extends it with session-aware protected enqueue, a versioned encrypted payload, API/history redaction, dispatch lease fencing and conservative crash recovery. Tenant/Tenancy/link/outbox/critical audit commit together when trusted G5 provisioning is REQUIRED; DISABLED creates no new link/outbox but still transitions any old link when its Tenancy closes/transfers. `moved_out` must become atomic; move must accept a caller-owned session; demo SMS must be explicitly suppressed. Move/move-out requests require an exact expected Tenancy ID supplied by the authenticated tenant detail `currentTenancyId` field. B01/B03 merchant readiness, B05 inbound evidence retention, D17 protected outbox retention, B08 unknown-send recovery and D14 delivery SLA remain unresolved. D18 also requires an API contract change to expose and return exact expected Tenancy IDs.
+G5.2 keeps the existing Celcom queue/provider, but extends it with session-aware protected enqueue, a versioned encrypted payload, API/history redaction, dispatch lease fencing and conservative crash recovery. Tenant/Tenancy/link/outbox/critical audit commit together when trusted G5 provisioning is REQUIRED; DISABLED creates no new link/outbox but still transitions any old link when its Tenancy closes/transfers. `moved_out` must become atomic; move must accept a caller-owned session; demo SMS must be explicitly suppressed. Move/move-out requests require exact `expectedTenancyId` values selected from the authenticated Tenant DTO's `activeTenancies[]`. B01/B03 merchant readiness, B05 inbound evidence retention, D17 protected outbox retention, B08 unknown-send recovery and D14 delivery SLA remain unresolved. D18 also requires an API contract change to expose and return exact expected Tenancy IDs.
 
 Source of truth for G5 documentation and shared review is the live GitHub feature branch accessed through Composio. A hosted agent's local workbench may be stale or divergent and must be reconciled without destructive Git operations.
 
@@ -179,3 +179,12 @@ All 157 pinned src/ JavaScript files, 21 scripts/ JavaScript files and 57 JavaSc
 Two missed API paths are now explicit: House PATCH can change occupancy status/isActive without checking a live Tenancy, and Tenant PATCH can set status active without opening a Tenancy. tenancyService.open() also needs exact Tenant/House/Estate checks, matched-count enforcement and a Tenant-wide ACTIVE uniqueness barrier. See G5-D19/D20, G5.2 §17 and the proposed G5.1 partial index.
 
 **Implementation remains NO-GO.** Remove generic occupancy mutation and harden the existing lifecycle primitive before adding G5 link/outbox hooks.
+
+
+## Tenant-level combined M-PESA account rules (12 November 2026)
+
+- One Tenant profile, one Tenant-level private link, one-unit simple account, multi-unit combined statement within the same Estate.
+- One verified M-PESA receipt is claimed once. G3 posts the portions to exact Tenancies and preserves any surplus as a Tenant-level carried-forward credit.
+- Excess credit reduces future combined rent due for that same Tenant/Estate. Current G3 needs an auditable aggregate-credit extension; G5 does not own another wallet or ledger.
+- Rent effective dates and proration come from each Client's configured policy. G5 consumes the RentCharges G3 generated; it does not invent rent dates.
+- Existing SMS provider and sender configuration are unchanged.

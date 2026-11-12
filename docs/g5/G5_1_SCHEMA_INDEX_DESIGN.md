@@ -16,7 +16,7 @@ G5 remains Buy Goods / Till receipt attribution. PayBill is outside scope. G3 re
 | ID | Decision | Classification | Consequence |
 |---|---|---|---|
 | S01 | Use a distinct M-PESA domain; do not reuse G4 bank models as M-PESA records. | OWNER-DECISION / fixed product boundary | No BankTransaction, BankConnection, or BankCredential reuse. |
-| S02 | A submission link binds to one immutable `Tenancy._id` and its client/estate/house/tenant snapshot. | OWNER-DECISION / fixed invariant | Current Tenant and House pointers are not attribution keys. |
+| S02 | A submission link authenticates one immutable Tenant identity within its client/Estate; it does not bind to one House or Tenancy. | OWNER-DECISION / fixed invariant | The verified receipt is claimed once for that Tenant; G3 allocations remain tenancy-scoped. |
 | S03 | Keep the first model set to five core records: MerchantProfile, SubmissionLink, SmsSubmission, IngestionEvent, and Transaction. | PROPOSED | Do not add a separate PaymentClaim collection initially. |
 | S04 | Store the winning claim/lease/posting relationship on the canonical Transaction; preserve competing attempts as SmsSubmissions and audit events. | PROPOSED | Avoid a second record that duplicates a one-transaction/one-winning-claim relationship. Revisit only if later workflows prove an independent claim aggregate is necessary. |
 | S05 | Defer Pull checkpoint schema until B02 establishes the actual cursor, window, pagination, and recovery contract. | PROPOSED | No guessed cursor fields or TTL assumptions in G5.1. |
@@ -30,7 +30,7 @@ G5 remains Buy Goods / Till receipt attribution. PayBill is outside scope. G3 re
 
 ### Why no separate MpesaPaymentClaim initially?
 
-Once B01/B02 prove the correct merchant receipt scope and the exact unique `{ merchantProfileId, receiptNumber }` index is installed and passes runtime readiness, one conditional state transition on the canonical Transaction can reserve its one permitted tenancy association and posting lease. It can carry `claimedLinkId`, `claimedSubmissionId`, `matchedTenancyId`, `processingClaimToken`, `processingClaimExpiresAt`, and `paymentId`.
+Once B01/B02 prove the correct merchant receipt scope and the exact unique `{ merchantProfileId, receiptNumber }` index is installed and passes runtime readiness, one conditional state transition on the canonical Transaction can reserve its one permitted Tenant association and posting lease. It can carry `claimedLinkId`, `claimedSubmissionId`, `claimedTenantId`, `processingClaimToken`, `processingClaimExpiresAt`, `paymentIds[]`, and a reference to any G3-owned tenant-account credit movement.
 
 This claim gate is not itself the external-receipt uniqueness barrier. The existing unique partial `Payment.mpesaReceiptId` index can prevent two Payment documents from referencing the same internal `MpesaTransaction._id`; it cannot prevent two duplicate `MpesaTransaction` documents representing one physical Safaricom receipt from each receiving a Payment. Therefore automatic MPESA posting MUST remain disabled until B01/B02 establish the canonical receipt key and the exact database unique index is present and verified. Before that gate is satisfied, provider events may be durably ingested or quarantined for review, but duplicate candidates must not become financially postable.
 
@@ -81,7 +81,7 @@ Candidate fields:
 
 | Field | Type | Rule / note |
 |---|---|---|
-| `clientId`, `estateId`, `houseId`, `tenantId`, `tenancyId` | ObjectIds | Required ownership snapshot copied from the exact Tenancy at creation; immutable. |
+| `clientId`, `estateId`, `tenantId` | ObjectIds | Required immutable Tenant identity snapshot. No House or Tenancy is embedded in the link identity. |
 | `merchantProfileId` | ObjectId → MpesaMerchantProfile | Optional until B01 resolves whether the tenancy has one unambiguous merchant mapping. No link is operational while mapping is ambiguous. |
 | `tokenHash` | String | Required SHA-256 digest of a uniformly random token with at least 256 bits of CSPRNG entropy; raw bearer token is returned once to protected notification delivery and is never persisted. Keep a digest on revoked records so a full unique index does not encounter multiple null/missing keys; revoked status makes it non-redeemable. |
 | `tokenVersion` | Integer | Starts at 1 and increments on rotation. |
@@ -93,7 +93,7 @@ Candidate fields:
 
 Proposed uniqueness:
 
-- One link association per Tenancy: unique `tenancyId`. Rotation updates the secret/version on the same association; it does not create a new Tenancy or repoint the link.
+- One link association per Tenant within a client/Estate: unique `{ clientId, estateId, tenantId }`. Adding or moving a House does not create another link or change the Tenant identity. Token rotation updates the same association.
 - Unique `tokenHash` across all links; every link document must retain one valid string digest, including revoked links.
 - Rotation replaces the current digest and increments `tokenVersion`; the old digest is not retained in the active lookup collection and becomes unusable.
 
@@ -110,7 +110,7 @@ Candidate fields:
 
 | Field | Type | Rule / note |
 |---|---|---|
-| `clientId`, `estateId`, `houseId`, `tenantId`, `tenancyId` | ObjectIds | Immutable snapshot resolved from the link, never from current Tenant/House pointers. |
+| `clientId`, `estateId`, `tenantId` | ObjectIds | Immutable Tenant identity resolved from the validated link. Individual Tenancy/House targets are resolved server-side from the Tenant's eligible obligations. |
 | `linkId` | ObjectId → MpesaSubmissionLink | Required. |
 | `merchantProfileId` | ObjectId → MpesaMerchantProfile | Nullable until merchant identity is resolved unambiguously. |
 | `submittedAt` | Date | Server timestamp. |
@@ -182,14 +182,14 @@ Candidate fields:
 | `payerEvidence` | Protected subdocument, optional | Minimize; not part of tenancy matching. |
 | `verificationState` | Enum | `UNVERIFIED`, `PENDING_EVIDENCE`, `MATCHED`, `CONFLICT`, `MANUAL_REVIEW`. |
 | `claimState` | Enum | `UNCLAIMED`, `CLAIMED`, `REVIEW`, `REJECTED`. Posting completion is represented only by `postingState`; do not duplicate `POSTED` across state axes. |
-| `claimedLinkId`, `claimedSubmissionId`, `matchedTenancyId` | ObjectIds | Set together through one conditional winning claim transition; immutable once committed except a separately authorized correction process. |
+| `claimedLinkId`, `claimedSubmissionId`, `claimedTenantId` | ObjectIds | Set together through one conditional winning Tenant-level claim transition; immutable once committed except a separately authorized correction process. |
 | `processingClaimToken` | String | Random fencing token for the current worker claim. |
 | `processingClaimExpiresAt` | Date | Lease expiry; must be checked by a write-bearing conditional operation on this same transaction document inside the G3 session. |
 | `processingAttempts`, `lastProcessingErrorCode` | Number/String | Bounded operational diagnostics; no raw payload or secrets. |
 | `postingState` | Enum | `NOT_POSTED`, `PROCESSING`, `POSTED`, `FAILED_RETRYABLE`, `FAILED_TERMINAL`. |
-| `paymentId` | ObjectId → Payment | Set only when the G3 Payment commits in the same MongoDB transaction. |
+| `paymentIds[]` | ObjectIds → Payment | All tenancy-scoped G3 Payment records created from this one receipt; set only in the same MongoDB transaction as those postings. |
 
-The winning claim transition must be a conditional update from `UNCLAIMED` to `CLAIMED` that writes `claimedLinkId`, `claimedSubmissionId`, and `matchedTenancyId` together; require exactly one matched document. The final G3 transaction must perform a write-bearing conditional update on this same `MpesaTransaction` using `_id`, the exact claim/link/submission/tenancy tuple, the current `processingClaimToken`, and `processingClaimExpiresAt > now`. This write must occur inside the G3 session, before or as part of the financial write sequence, so it obtains the document write fence. Payment, allocations, charge projections, Ledger, `paymentId`, and `postingState: POSTED` then commit in that same session. A read-only token check is not sufficient.
+The winning claim transition must be a conditional update from `UNCLAIMED` to `CLAIMED` that writes `claimedLinkId`, `claimedSubmissionId`, and `claimedTenantId` together; require exactly one matched document. The final G3 transaction must perform a write-bearing conditional update on this same `MpesaTransaction` using `_id`, the exact claim/link/submission/Tenant tuple, the current `processingClaimToken`, and `processingClaimExpiresAt > now`. This write must occur inside the G3 session, before or as part of the financial write sequence, so it obtains the document write fence. All tenancy-scoped Payments/allocations/Ledger movements, any G3 Tenant-account credit movement, `paymentIds[]`, and `postingState: POSTED` then commit in that same session. A read-only token check is not sufficient.
 
 Lease semantics must be explicit: expiry makes the lease eligible for takeover; it does not magically cancel a transaction that already acquired the same document's write fence. A competing takeover waits or conflicts. After the transaction ends, the contender must re-read state and token; if the old transaction committed, the record is already POSTED, and if takeover won first, the stale transaction must abort. Do not claim that a wall-clock expiry predicate alone can cancel an already-running MongoDB transaction.
 
@@ -201,7 +201,7 @@ All indexes below are candidates. The actual MongoDB collection indexes must be 
 |---|---|---|---|
 | `mpesamerchantprofiles` | `{ clientId: 1, operationalState: 1 }` non-unique | Admin/readiness listing | Can be designed now. |
 | `mpesasubmissionlinks` | `{ tokenHash: 1 }` unique | Bearer token lookup and collision barrier | PROPOSED; require a valid string digest on every record and run duplicate/type preflight. |
-| `mpesasubmissionlinks` | `{ tenancyId: 1 }` unique | One association per immutable Tenancy; rotation updates same record | PROPOSED; validate the one-link-per-tenancy product invariant and run duplicate/type preflight. |
+| `mpesasubmissionlinks` | `{ clientId: 1, estateId: 1, tenantId: 1 }` unique | One private link per Tenant within the client/Estate | PROPOSED; run duplicate/type preflight and verify same-Estate ownership. |
 | `mpesasubmissionlinks` | `{ clientId: 1, estateId: 1, status: 1 }` non-unique | Scoped admin lifecycle queries | Can be designed now. |
 | `mpesasmsubmissions` | `{ linkId: 1, submittedAt: -1 }` non-unique | Submission history for a tenancy link | Can be designed now. |
 | `mpesasmsubmissions` | `{ reconciliationState: 1, submittedAt: 1 }` non-unique | Pending evidence work | Can be designed now. |
@@ -212,7 +212,7 @@ All indexes below are candidates. The actual MongoDB collection indexes must be 
 | `mpesatransactions` | `{ merchantProfileId: 1, receiptNumber: 1 }` unique | Callback/Pull canonical identity | BLOCKED by B01/B02; exact uniqueness scope must be proven. Mandatory before any automatic posting. |
 | `mpesatransactions` | `{ postingState: 1, processingClaimExpiresAt: 1 }` non-unique | Reconciliation/recovery lease scans | Can be designed now. |
 | `mpesatransactions` | `{ verificationState: 1, transactionAt: -1 }` non-unique | Pending transaction review | Can be designed now. |
-| `payments` | Existing unique partial `{ mpesaReceiptId: 1 }` for ObjectId values | One Payment per internal canonical Transaction ID | VERIFIED-SOURCE schema declaration; live DB definition must be inspected. |
+| `payments` | Replace the unique partial `{ mpesaReceiptId: 1 }` with `{ mpesaReceiptId: 1, tenancyId: 1 }` for ObjectId receipt refs and ObjectId tenancy IDs | One child Payment per canonical receipt per Tenancy, allowing one verified combined receipt to fan out to multiple Tenancies | PROPOSED G3 migration; inspect live index, duplicate data and all callers. No posting until installed and runtime-verified. |
 
 ### Read-only preflight examples for link uniqueness
 
@@ -226,13 +226,13 @@ db.mpesasubmissionlinks.aggregate([
 ])
 
 db.mpesasubmissionlinks.aggregate([
-  { $match: { tenancyId: { $type: "objectId" } } },
-  { $group: { _id: "$tenancyId", n: { $sum: 1 } } },
+  { $match: { clientId: { $type: "objectId" }, estateId: { $type: "objectId" }, tenantId: { $type: "objectId" } } },
+  { $group: { _id: { clientId: "$clientId", estateId: "$estateId", tenantId: "$tenantId" }, n: { $sum: 1 } } },
   { $match: { n: { $gt: 1 } } }
 ])
 ```
 
-Also report any document where `tokenHash` is not a BSON string or `tenancyId` is not an ObjectId; duplicate groups alone do not prove required fields are populated. The exact migration must fail on either duplicates or malformed/missing required values.
+Also report any document where `tokenHash`, `clientId`, `estateId`, or `tenantId` is missing or has the wrong BSON type; duplicate groups alone do not prove required fields are populated. The exact migration must fail on either duplicates or malformed/missing required values.
 
 ### Indexes deliberately not proposed yet
 
@@ -363,3 +363,33 @@ This is an additional constraint on an existing G3 collection, not a sixth G5 mo
 If a Tenant may lease multiple Houses concurrently, do not install this index. The current Tenant.houseId, moveToHouse() and currentTenancyId contract cannot represent that workflow; stop and redesign the occupancy model first.
 
 No index creation or migration is authorized by this proposal.
+
+
+## 6. G5.1.2 — Tenant-level link, combined receipt and carry-forward credit
+
+This section is normative and supersedes earlier per-Tenancy link/claim wording in this document.
+
+### Tenant identity and links
+- One Tenant profile may have multiple simultaneous ACTIVE Tenancies in different Houses within the same Estate. Keep the existing unique ACTIVE-Tenancy-per-House constraint. Do not create a unique ACTIVE-Tenancy-per-Tenant index.
+- One `MpesaSubmissionLink` authenticates `{ clientId, estateId, tenantId }`. Candidate unique key is `{ clientId, estateId, tenantId }`; tokenHash remains unique. House/Tenancy IDs are not part of the link identity.
+- One-unit tenants see one rental account. Tenants with multiple units in the same Estate see one combined statement derived from the Tenant's eligible Tenancies and obligations.
+- `MpesaSmsSubmission` and the canonical `MpesaTransaction` claim are Tenant-scoped. The receipt is claimed once for the Tenant, not once per House.
+
+### Verified receipt posting
+- The one canonical receipt may create one tenancy-scoped G3 Payment for each Tenancy receiving a positive amount. Each child Payment, its allocations, RentCharge projection and Ledger movement stays inside that exact Tenancy.
+- All child Payments and any G3-owned Tenant-account credit movement must be committed with the canonical transaction's POSTED state in one Mongo transaction. The sum of child Payment amounts plus the credit movement must equal the verified merchant receipt amount exactly.
+- The existing G3 `Payment.houseId` is required, `Payment.tenancyId` is used as the child account scope, and the existing `Payment.mpesaReceiptId` index currently permits only one Payment per receipt. Multi-Tenancy receipt posting therefore requires the reviewed compound unique `{ mpesaReceiptId, tenancyId }` migration noted above.
+- The `MpesaTransaction` stores `claimedTenantId`, `paymentIds[]` and the G3 credit movement reference, rather than one `matchedTenancyId` and one `paymentId`.
+
+### Overpayment and future credit
+- Product rule: money received above the Tenant's current eligible obligations remains the Tenant's credit and reduces future rent due. It is not refunded, discarded, forfeited, or assigned to an arbitrary House.
+- The carry-forward credit belongs to `{ clientId, estateId, tenantId }`, is applied to future eligible rent obligations for that same Tenant within that Estate, and never transfers to another Tenant, client or Estate.
+- Current G3 has tenancy-scoped Ledger balances and deliberately does not net one Tenancy's positive credit against another Tenancy's arrears. The combined Tenant account therefore requires a G3-owned, auditable Tenant-account credit/application mechanism. Do not fake pooled credit by placing it on a random Tenancy or by writing a second G5 ledger/wallet.
+- G3 must preserve the source receipt, credited amount, remaining amount and each later application to an exact Tenancy/RentCharge. Credit application is atomic with the relevant RentCharge projection and tenancy Ledger movement. The mechanism belongs to G3 accounting and must be reusable regardless of whether the original credit came from M-PESA.
+- Allocation to current eligible obligations should be deterministic. Proposed default: oldest eligible due date first, then period, tenancyId and RentCharge ID as stable tie-breakers. The verified receipt's total is always fully accounted for as child Payments plus Tenant-account credit.
+
+### M-PESA boundary
+- G5 verifies and claims the receipt once, then calls the G3 combined-account posting operation. G5 does not directly update RentCharge, Payment, PaymentAllocation or Ledger and does not own the carried-forward credit balance.
+- The one-unit flow remains a single Tenancy payment and uses existing G3 tenancy-credit behaviour. Multi-unit account aggregation and pooled carry-forward use the G3 aggregate-account extension above.
+
+Implementation remains NO-GO until the G3 posting/credit extension, index migration, same-session atomicity and integration tests are reviewed and explicitly authorized.
