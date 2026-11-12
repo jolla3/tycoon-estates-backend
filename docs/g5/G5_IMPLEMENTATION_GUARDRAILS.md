@@ -2,7 +2,7 @@
 
 **Purpose:** prevent an AI or human implementation agent from inventing missing product, repository, financial, security, or Daraja behaviour.  
 **Applies to:** Grok, Codex, ChatGPT, developers, reviewers, and any delegated agent working on G5.  
-**Current phase:** G5.0 documentation/source review. No implementation is authorized by this file.
+**Current phase:** G5.2 post-independent-review documentation resolution. No implementation is authorized by this file.
 
 ---
 
@@ -321,3 +321,23 @@ Use `docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md` as the proposed design. It 
 
 Independent review must challenge the lifecycle state machine, provisioning policy, encryption/AAD/key rotation, lease expiry and seed suppression. After review, the owner must explicitly authorize a bounded implementation slice. Until then, no Tenant/Tenancy refactor, SmsMessage model change, key creation, worker/scheduler change, migration or provider send is permitted.
 
+## 19. G5.2.1 independent review resolutions are mandatory
+
+The independent verdict was **APPROVE WITH REQUIRED CHANGES**. The correction record in docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16 supersedes any looser wording elsewhere.
+
+- Never move or move out without the exact expected ACTIVE Tenancy ID. Never infer the target solely from Tenant.houseId.
+- Never clear an old House pointer without _id + clientId + tenantId: expectedTenantId and matchedCount === 1. Never close a Tenancy if its exact House pointer compare matched zero.
+- A destination House with any non-null tenantId is a conflict; do not automatically repair an orphan pointer, even when it equals the moving tenant.
+- A replay is a no-op only when the exact expected Tenancy is already CLOSED with closeReason MOVE_OUT. It must never touch a later occupancy.
+- For an active Tenant, currentTenancyId requires exactly one tenant-scoped ACTIVE Tenancy and matching Tenant/House ownership. Zero/multiple rows or pointer mismatch is a conflict.
+- Pass actor identity into create/move/move-out lifecycle services and same-session audit writes.
+- Extend strict SMS enums for g5_onboarding_link, cancelled and suppressed before inserting those values.
+- Keep mutually exclusive claim branches: standard excludes G5_PROTECTED while preserving missing legacy fields; protected requires G5_PROTECTED and SEND. Protected messages never use plaintext fallback.
+- Reclaim expired protected work only before send-start and after link/version validation. Post-send-start expiry is unknown, never automatic requeue. Every transition is fenced by the attempt token.
+- submissionRevision, dispatchRevision, tokenVersion and notificationVersion are distinct. Send-start uses observed dispatchRevision CAS paired with SMS row update in one transaction.
+- Verify the live smsmessages.idempotencyKey unique index and duplicate state. Mongoose unique:true is not live proof.
+- Seed/test rows use status suppressed plus dispatchMode SUPPRESSED; provider mock must record zero calls.
+- D11 records owner acceptance/support handling for an in-flight SMS arriving after token invalidation. D14 sets maximum dispatch latency; B08 controls unknown resolution; D17 controls encrypted outbound retention.
+- B09 is Daraja API credential scope. No API credential or secret belongs in an SMS body.
+
+No application code, models, migrations, keys, worker/scheduler changes or provider sends are authorized by this documentation correction.

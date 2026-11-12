@@ -1042,3 +1042,29 @@ Official transaction references: [MongoDB Node.js Driver transactions](https://w
 
 **G5.2 design verdict:** PROPOSED for independent review. NO-GO for lifecycle/SMS code, schema changes, migrations, key creation, worker changes or provider sends until explicit slice authorization.
 
+## 27. G5.2.1 independent review resolution (12 November 2026)
+
+The independent review verdict is **APPROVE WITH REQUIRED CHANGES**. The corrected G5.2 decision record is G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16. This is an architecture clarification, not implementation authorization.
+
+### Tenancy integrity
+
+- Moves require expectedCurrentTenancyId; move-out requires expectedTenancyId. Resolve the exact ACTIVE Tenancy by client, tenant and supplied ID inside one Mongo transaction. Never choose a current Tenancy from Tenant.houseId alone.
+- For an active Tenant, currentTenancyId comes from exactly one tenant-scoped ACTIVE Tenancy and is returned only after Tenant.houseId equals Tenancy.houseId and House.tenantId equals Tenant._id, plus client ownership checks. Zero/multiple rows or mismatched pointers are conflicts.
+- Old-House release matches _id + clientId + tenantId and requires matchedCount === 1. tenancyService.close() has the same requirement. Any destination House pointer other than null is a conflict, even when it names the moving tenant.
+- Move-out status, exact Tenancy close, House compare, link transition and critical audit are atomic. An already CLOSED MOVE_OUT expected Tenancy is a no-op replay and cannot touch a later occupancy. Delete the unsafe fallback and split update path.
+- Controllers pass authenticated actor identity into create/move/move-out services and same-session audit records.
+
+### Protected SMS dispatch
+
+- Extend the strict SmsMessage enum with g5_onboarding_link, cancelled and suppressed before creating G5 rows.
+- Standard claim: queued + deliveryMode != G5_PROTECTED + dispatchMode != SUPPRESSED, plus retry-due condition. Missing new fields remain compatible for legacy standard rows.
+- Protected claim: queued + deliveryMode === G5_PROTECTED + dispatchMode === SEND, plus retry-due condition. No missing-field fallback. Decrypt under a valid lease; never send ordinary message/phoneNumber.
+- Expired pre-send leases requeue only after exact link/version validation and an SMS CAS on the current lease token. Expired post-send-start leases become unknown, preserve the attempt token and are never blindly requeued. Late responses are accepted only for the same attempt token.
+- Send-start conditionally increments the observed dispatchRevision on the exact link and writes sendStartedAt on the SMS row under the current unexpired lease in one session. This serializes with token rotation/revocation. Messages already past this boundary may still arrive with an invalid URL; D11 must record owner acceptance and support handling.
+- Seed rows use both status suppressed and dispatchMode SUPPRESSED; a provider spy must prove zero calls. Legacy rows with missing new fields remain eligible only through the standard branch.
+
+### Remaining proof and release gates
+
+The live smsmessages.idempotencyKey index has not been inspected. Verify exact unique index keys and duplicate state before relying on it; schema unique:true does not establish database readiness. Celcom's third idempotency argument is ignored by its two-argument adapter. Keep unknown non-retryable pending B08. D14 must define maximum commit-to-first-dispatch latency; D17 defines encrypted outbound payload retention. B01/B03 prove merchant mapping/capability. B09 is limited to Daraja API credential ownership and never authorizes sending credentials in an SMS.
+
+**Status:** G5.2 documentation corrections incorporated; **NO-GO for implementation** until explicit owner authorization names a bounded slice and relevant decisions/readiness checks are satisfied.

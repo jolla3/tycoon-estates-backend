@@ -329,9 +329,21 @@ The G5.2 lifecycle/outbox design in [`G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md`](G
 
 | Field | Type | Purpose / constraint |
 |---|---|---|
-| `dispatchRevision` | Number, default `0` | Write-fence revision incremented by the protected SMS dispatcher when it authorizes the `sendStartedAt` boundary for the exact current `tokenVersion`. Rotation/revocation writes the same link document, so the competing write operations serialize. It is not a submission idempotency key and requires no index. |
+| `dispatchRevision` | Number, default `0` | Send-start write-fence revision. The dispatcher reads the observed value and conditionally increments it in the same transaction that writes `sendStartedAt`, matching exact link ID, SMS `tokenVersion`, eligible link status and observed revision. Rotation/revocation updates the same link document using its expected token version, so the operations serialize. It is not a submission counter, token version, retry count or idempotency key; it requires no index. |
 
 This is not part of the original G5.1.1 proposal and is not an existing source/model field. It is proposed because G5.2 identified a concrete dispatch-start-vs-rotation/revocation race. It remains subject to independent G5.2 review and explicit implementation authorization. The existing `submissionRevision` remains the submission-vs-rotation write fence; do not overload it with dispatch semantics.
 
 The protected SMS fields and dispatch lease additions are proposed extensions to the existing generic `SmsMessage` queue record, not new G5 domain aggregates. See the G5.2 design record for the envelope, `deliveryMode`, `dispatchMode`, lease, `sendStartedAt`, suppression and retention requirements.
 
+## 11. G5.2.1 revision glossary
+
+The four values are deliberately separate:
+
+| Field | Meaning | Update rule |
+|---|---|---|
+| submissionRevision | Submission-vs-rotation/revocation write fence. | Increment on each accepted submission's write-bearing link CAS. |
+| dispatchRevision | Dispatch-start-vs-rotation/revocation write fence. | Increment once on successful send-start using observed revision. |
+| tokenVersion | Bearer-secret generation. | Increment on rotation/revocation; SMS eligibility requires an exact current match. |
+| notificationVersion | Outbound template/content contract. | Change only when the approved template changes; independent of token rotation and worker retries. |
+
+Do not overload one field for another domain. The live smsmessages.idempotencyKey index remains unverified until a read-only database preflight confirms its exact unique key and duplicate state; the Mongoose unique:true declaration is not sufficient evidence.

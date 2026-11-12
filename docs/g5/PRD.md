@@ -265,9 +265,7 @@ G5 is not production-ready until evidence demonstrates all of the following:
 27. Tenant detail exposes the exact unique `currentTenancyId`; move/move-out requests carry that expected Tenancy ID. Stale/replayed requests cannot move a tenant back to an old House, close a later Tenancy, or clear a later occupant's House pointer.
 28. Protected SMS records use an explicit `g5_onboarding_link` message type and `g5_onboarding_link:v1` notification version; their outbox idempotency key is derived from `linkId + tokenVersion + notificationVersion + preallocated SmsMessage._id` and protects the prepared database attempt, not Celcom request idempotency.
 29. Critical lifecycle audit records include the authenticated initiating actor and commit in the same Mongo transaction.
-30. The authenticated tenant detail DTO supplies the exact unique `currentTenancyId` required for move/move-out preconditions; it never infers a current tenancy from mutable House pointers.
-28. Destination House pointer conflicts and old-House `matchedCount !== 1` fail closed; no House pointer is overwritten or cleared without matching the exact expected Tenant/Tenancy.
-29. Critical lifecycle audit records include the authenticated initiating actor and commit in the same Mongo transaction.
+30. Destination House pointer conflicts and old-House `matchedCount !== 1` fail closed; no House pointer is overwritten or cleared without matching the exact expected Tenant/Tenancy.
 
 ## 10. Blocking decisions and provider evidence required
 
@@ -356,3 +354,19 @@ The current proposal uses trusted `DISABLED`/`REQUIRED` provisioning modes. When
 The existing SMS queue/provider remains the only dispatch path. Protected message content and destination are encrypted in a versioned G5 envelope with AAD, while ordinary SMS fields/history contain only redacted values. Dispatch leases are fenced; expiry before `sendStartedAt` may be safely reclaimed after link validation, while expiry after `sendStartedAt` is `unknown` and never blindly resent. Demo seed records must be suppressed, not queued.
 
 **G5.2 status:** PROPOSED for independent design review. NO-GO for lifecycle refactors, SmsMessage schema changes, encryption key creation, dispatch worker changes, migrations, or Celcom sends until a separate explicit implementation authorization. B01/B03, B05, B08, D14 and D17 remain relevant blockers.
+
+## 14. G5.2 independent review resolution (12 November 2026)
+
+The independent G5.2 review returned **APPROVE WITH REQUIRED CHANGES**. The normative corrections are recorded in G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16 and are mandatory acceptance requirements:
+
+- Move/move-out require the exact expected ACTIVE Tenancy ID. Missing/stale IDs fail closed. Old-House pointer release and tenancyService.close() require exact tenant match and matchedCount === 1. Any non-null destination House pointer is a conflict and is not silently repaired.
+- Move-out is one transaction. A replay against the exact already-CLOSED MOVE_OUT Tenancy is a no-op and cannot mutate a later occupant.
+- Authenticated tenant detail returns currentTenancyId only after an exact tenant-scoped ACTIVE Tenancy query and Tenant/Tenancy/House pointer integrity checks. Controllers propagate actor identity into lifecycle and audit writes.
+- Extend strict SmsMessage enums with g5_onboarding_link, cancelled and suppressed before use. Seed/test rows use status suppressed and dispatchMode SUPPRESSED; provider mock must record zero calls.
+- Standard claim excludes G5_PROTECTED while preserving legacy rows with missing new fields. Protected claim requires exact G5_PROTECTED plus SEND and never falls back to plaintext. Expired pre-send leases may requeue only after link/version validation; expired post-send-start leases become unknown and are never automatically requeued.
+- submissionRevision, dispatchRevision, tokenVersion and notificationVersion are distinct. The observed dispatchRevision is part of the link CAS paired with the SMS send-start write.
+- Live smsmessages.idempotencyKey index presence and duplicate state are unverified. Inspect the actual DB index; Mongoose unique:true is not proof.
+- The in-flight-after-rotation message race is unavoidable after send-start; D11 must capture owner acceptance and support handling. D14 dispatch SLA, B08 unknown-send resolution and D17 encrypted outbound retention remain open.
+- B09 concerns Daraja API credential scope. It does not block non-secret Till instructions once B01/B03 establish the actual destination. No provider/API credential may be included in an SMS.
+
+The review did not establish live database index state, merchant mapping/capability, Celcom status lookup, retention policy or owner risk acceptance. Those remain release gates. **G5.2 implementation remains NO-GO** until separate bounded owner authorization and relevant gates are satisfied.

@@ -1,6 +1,6 @@
 # G5.2 — Tenancy Link and Protected Notification Lifecycle
 
-**Status:** Proposed design for independent review. Documentation-only. No application code, model, migration, index, route, worker, credential or runtime change is authorized by this record.  
+**Status:** Independent verdict: APPROVE WITH REQUIRED CHANGES. The documentation resolution is recorded in §16. This remains design-only; no application code, model, migration, index, route, worker, credential or runtime change is authorized.  
 **Source baseline:** `main@204c8f9c3578f753af20727799aaa049b1545135` (12 November 2026).  
 **G5 documentation baseline:** `feature/g5-construction@c89468df634e4b2d51ee67c660d89faffd470e5e`.  
 **Dependencies:** G5.1 five-record schema proposal; G5-B01/B03 merchant identity and operational enablement; G5-B05 inbound evidence retention/access policy; G5-B08 Celcom ambiguous-send resolution; G5-D14 dispatch latency/SLA; G5-D15 tenancy lifecycle and seed policy; G5-D17 protected outbound payload retention.
@@ -133,7 +133,7 @@ Proposed `SmsMessage` additions (all PROPOSED, not existing):
 | Existing `type` enum | Add `g5_onboarding_link` as an explicit SMS message type; do not overload `general` or `payment_confirmation`. Update the `NOTIFICATION_VERSIONS` constant for this type. |
 | Existing `notificationVersion` | Set `g5_onboarding_link:v1` for the initial approved body template. Persist it so later template changes do not rewrite the meaning of historical rows. |
 | `dispatchMode` | `SEND` or `SUPPRESSED`; makes demo/test no-send intent explicit. Existing legacy rows without the field must retain their documented compatibility behaviour. |
-| `status` enum additions | Add `cancelled` and `suppressed` as non-dispatch terminal states; existing `sent`, `failed`, `unknown`, `queued` and `processing` semantics remain backward compatible. |
+| `status` enum additions | The pinned `SmsMessage` schema currently permits only `queued`, `processing`, `sent`, `failed` and `unknown`. Extend the strict enum with `cancelled` and `suppressed` before inserting either value. They are terminal non-dispatch states; never insert an unsupported value or disguise suppression as `failed`/`sent`. |
 | `protectedPayload` | Versioned authenticated-encryption envelope containing destination phone and complete outbound body. `select:false` by default. |
 | `protectedPayloadVersion` / envelope `formatVersion` | Enables authenticated envelope/key rotation and strict decoding. |
 | `linkId`, `tokenVersion` | Immutable G5 association/version metadata used for dispatch eligibility and cancellation; not a bearer secret. |
@@ -195,6 +195,25 @@ The queue must claim each item with one atomic conditional update. Completion, f
 There is an unavoidable boundary between committing `sendStartedAt` and performing the HTTP request. A crash in that gap is conservatively `unknown`, even if the HTTP request was never made. That sacrifices an occasional resend for the more important guarantee that an already-accepted link SMS is not blindly duplicated. If the lease expires while the provider call is still in flight, the reclaimer may mark the row `unknown` but must preserve that attempt token; a late accepted/rejected response may settle the same attempt only while the token still matches. A later authorized recovery/new attempt must use a new token so a stale response cannot overwrite it. A rotation after `sendStartedAt` may invalidate the URL before Celcom delivers it; the old URL remains nonredeemable. This is a usability/recovery case, not permission to keep the old token valid.
 
 Lease duration must exceed the configured provider request timeout plus dispatch/DB completion margin and must be renewable only while the worker still owns its token. Do not invent a lease duration here; set it from the actual Celcom timeout, shutdown behaviour and measured worker latency. The current provider timeout is configured as 15 seconds in the adapter source; that is an input to the later operational setting, not the complete lease duration by itself.
+
+### 7.1 Exact claim predicates and expired-lease recovery
+
+The claim filters in §7 are normative. The standard branch uses deliveryMode != G5_PROTECTED and dispatchMode != SUPPRESSED, deliberately allowing legacy records where those fields do not exist. The protected branch requires exact deliveryMode G5_PROTECTED and dispatchMode SEND; missing or malformed protected dispatch mode is not eligible.
+
+For a protected row whose lease expires before send-start, the reclaimer must match status processing, deliveryMode G5_PROTECTED, dispatchMode SEND, the exact dispatchLeaseToken, dispatchLeaseExpiresAt <= now, and sendStartedAt null/missing. It revalidates exact linkId, tokenVersion and eligible link state. A still-current row may return to queued with the old lease fields cleared; the next claimant generates a new lease token. A stale/rotated/revoked link makes the row cancelled. The later send-start transaction must independently repeat its write-bearing link/version CAS.
+
+If an expired protected row has a non-null sendStartedAt, the reclaimer CASes processing to unknown only when the exact current lease token and expired time still match. It preserves the attempt token so a late response from that same provider call can settle the row. It never requeues the row. An operator-authorized future attempt, if B08 permits one, receives a new attempt identity/token.
+
+A crash after committing sendStartedAt but before issuing the HTTP request is still unknown. This deliberate conservative boundary avoids duplicate sends when the provider outcome cannot be established. A Redis scheduler lock is not a substitute for the database lease or conditional writes.
+
+### 7.2 Revision semantics
+
+- submissionRevision is the accepted-submission write fence. The submission transaction increments it when it writes the same link record that rotation/revocation must update.
+- dispatchRevision is the send-start write fence. The dispatcher reads its observed value and conditionally increments it in the same transaction that writes sendStartedAt. It is not a submission revision, token version or retry counter.
+- tokenVersion identifies the bearer-secret generation. A protected SMS can send only for the exact current token version; rotation/revocation makes older versions ineligible.
+- notificationVersion identifies the message-template contract. It changes only when the approved template changes and is independent of token rotation or dispatch attempts.
+
+The send-start link CAS must include the observed dispatchRevision as well as exact link ID, SMS tokenVersion and eligible link status, then increment dispatchRevision. The SMS send-start update and link CAS commit in one session. Rotation/revocation updates the same link document with its expected token version. Exactly one operation wins the write ordering; the losing stale operation fails/retries and rechecks token version/status.
 
 ## 8. Delivery cadence and Celcom resolution
 
@@ -304,8 +323,8 @@ No stage includes M-PESA submission parsing, Daraja ingestion, Pull, or G3 posti
 
 ## 14. Review outcome
 
-**PROPOSED: conditional GO for independent G5.2 lifecycle/outbox design review.**  
-**NO-GO: all application implementation, model changes, migrations, routes, worker changes, key creation/rotation, provider calls and live SMS until a separate explicit owner authorization names the slice.**
+**Independent review verdict: APPROVE WITH REQUIRED CHANGES.** The required documentation changes are consolidated in §16.  
+**NO-GO:** all application implementation, model changes, migrations, routes, worker changes, key creation/rotation, provider calls and live SMS remain prohibited until a separate explicit owner authorization names the bounded slice.
 
 This record is a design proposal, not proof that the actual merchant mapping, Celcom status lookup, dispatch SLA or retention policy has been approved. No application code, database, migration, credential, provider configuration or test environment was changed or exercised in this review.
 
@@ -315,3 +334,121 @@ This record is a design proposal, not proof that the actual merchant mapping, Ce
 - [MongoDB Manual — Handle Transactions in Applications](https://www.mongodb.com/docs/manual/core/transactions-in-applications/) — the callback API retries the transaction for `TransientTransactionError` and retries commit for `UnknownTransactionCommitResult`.
 - [MongoDB Manual — Transaction Production Considerations](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/) — transaction reads can be stale; a write such as `findOneAndUpdate()` can acquire a document write lock and force the transaction to contend correctly with concurrent writes.
 - [Mongoose Connection API — `Connection#transaction()`](https://mongoosejs.com/docs/api/connection.html) — wraps the driver's transaction API and retries retriable errors; use only after reviewing compatibility with the repository's current `session.withTransaction()` pattern.
+
+## 16. G5.2.1 — Independent review reconciliation (12 November 2026)
+
+**Independent verdict:** APPROVE WITH REQUIRED CHANGES.  
+**Resolution:** The documentation corrections below are normative. This remains a design record, not implementation authorization. No application code, model, migration, key, route, worker, provider or runtime change is authorized.
+
+**Verified references:** The reviewed feature branch was at 6f98a2bd448e6eac4268dcfeecf0b25a7bb6267c. The pinned application source was main@204c8f9c3578f753af20727799aaa049b1545135. These source references are immutable; all source line references below are from the pinned main snapshot.
+
+### 16.1 Finding disposition
+
+| Finding | Reconciliation |
+|---|---|
+| F1 | **Confirmed BLOCKER.** tenant.service.js:193-201 has an unconditional fallback House clear. Require expected Tenancy ID and remove the fallback entirely. |
+| F2 | **Confirmed BLOCKER.** tenancy.service.js:187-191 clears the old House without tenantId in the filter. Require exact tenant match and matchedCount === 1. |
+| F3 | **Confirmed BLOCKER.** seedDemoClient.js:214-229 inserts “not sent” SMS as queued. Seed rows must be suppressed in both status and dispatchMode and excluded from claims. |
+| F4 | **Confirmed HIGH.** tenancy.service.js:171-174, 212-214 checks active Tenancy but can overwrite a non-null destination House pointer. Any non-null pointer conflicts, even if it appears to belong to the moving tenant. No implicit repair is allowed. |
+| F5 | **Confirmed HIGH.** tenancy.service.js:122-143 ignores the House update result. The exact pointer update must match one document or abort the transaction. |
+| F6 | **Confirmed source defect; design detail strengthened.** sms.service.js:588-606 has no stale-processing reclaimer. The precise expiry algorithm is mandatory under §7.1. |
+| F7 | **Confirmed HIGH.** sms.service.js:609-615 passes an extra idempotency argument; sms/providers/celcom/celcom.provider.js:40-48 accepts only send(mobile, message). The extra argument is ignored. Never auto-retry unknown. |
+| F8 | **Confirmed HIGH design gap.** SmsMessage.js:32-36 does not currently permit suppressed/cancelled. Extend the strict enum before writing either value. |
+| F9 | **Mandatory invariant made exact.** The legacy claim must exclude G5_PROTECTED; the protected claim must require G5_PROTECTED and SEND. |
+| F10 | **Confirmed HIGH for G5 reuse.** tenant.service.js:172-181 returns ordinary phoneNumber/message fields. G5 serializers and history paths require explicit allowlists and redaction. |
+| F11 | **Confirmed; covered by F1.** No split moved-out write path may remain. |
+| F12 | **Confirmed MEDIUM.** tenant.controller.js:19-41 does not forward actor context into create/move/update lifecycle services. Propagate actor identity into the same-session lifecycle audit. |
+| F13 | **Confirmed MEDIUM.** tenant.service.js:105-110 uses a House-based active tenancy lookup and does not return the ID. currentTenancyId must come from an exact tenant-scoped query plus pointer integrity checks. |
+| F14 | **Confirmed MEDIUM.** utils/encryption.js:20-34 uses GCM without AAD or a versioned key envelope. Keep the dedicated G5 keyring/envelope. |
+| F15 | **Confirmed MEDIUM.** utils/idempotency.js:6-21 is read-before-create and has no session parameter. Do not call it unchanged inside the lifecycle transaction. |
+| F16 | **Unverified database assumption.** SmsMessage.js:39 declares unique:true, but live index presence and duplicate state were not inspected. Keep the read-only live preflight as a hard gate. |
+| F17 | **Accepted residual race, owner acceptance pending.** A send past sendStartedAt may arrive after rotation/revocation with a now-invalid URL. D11 must record owner acceptance and support handling; do not delay revocation. |
+| F18 | **Documentation gap.** The four revision fields are defined separately in §7.2 and the G5.1 follow-on. |
+| F19 | **Owner/operations decision.** D14 must set maximum time-to-first-attempt. The existing 15-minute cadence is not an SLA. |
+
+### 16.2 Normative tenancy lifecycle rules
+
+1. Every move requires expectedCurrentTenancyId; every move-out requires expectedTenancyId. Missing IDs are rejected before mutation. Inside the transaction, re-read the exact ACTIVE Tenancy by ID, clientId, tenantId and status. Never substitute whichever Tenancy happens to be active for a mutable House pointer.
+2. For an active Tenant, currentTenancyId comes from exactly one ACTIVE Tenancy queried by clientId and tenantId. Cross-check Tenancy.houseId against Tenant.houseId and confirm the House belongs to the same client and has tenantId equal to Tenant._id. Zero/multiple rows or pointer mismatch is a lifecycle conflict. Do not return a guessed ID.
+3. Releasing the old House requires the exact filter {_id: oldTenancy.houseId, clientId, tenantId: expectedTenantId} and matchedCount === 1. tenancyService.close() has the same requirement. A zero match aborts the transaction.
+4. A destination House must have tenantId === null and no ACTIVE Tenancy. Any non-null pointer is a conflict, including one naming the moving Tenant. G5.2 has no automatic pointer-repair exception.
+5. Move-out status, exact Tenancy close, House compare, old-link transition and critical audit share one Mongo transaction. Remove the current split write and unconditional fallback.
+6. If the exact expected Tenancy is already CLOSED with closeReason MOVE_OUT, a replay is an idempotent no-op success. It must not touch the House or later occupancy. A CLOSED Tenancy with another reason is a conflict, not permission to close a newer Tenancy.
+7. Authenticated controllers pass actor identity into create, move and move-out services. Tenancy actor fields and critical audit records commit in the same session.
+
+### 16.3 Strict SMS schema and mutually exclusive claims
+
+The pinned SmsMessage schema currently has strict type and status enums. Before creating protected rows, add type g5_onboarding_link and status values cancelled and suppressed. Never insert suppressed/cancelled before the enum supports them. A seed/test row must have status suppressed and dispatchMode SUPPRESSED. Seed code must not trigger G5 provisioning.
+
+The following predicates are normative. The standard branch intentionally accepts missing deliveryMode/dispatchMode on legacy rows. The protected branch requires explicit G5_PROTECTED and SEND and fails closed if either is missing.
+
+    const due = [
+      { nextRetryAt: null },
+      { nextRetryAt: { $exists: false } },
+      { nextRetryAt: { $lte: now } },
+    ];
+    const standardClaim = {
+      status: 'queued',
+      deliveryMode: { $ne: 'G5_PROTECTED' },
+      dispatchMode: { $ne: 'SUPPRESSED' },
+      $or: due,
+    };
+    const protectedClaim = {
+      status: 'queued',
+      deliveryMode: 'G5_PROTECTED',
+      dispatchMode: 'SEND',
+      $or: due,
+    };
+
+The standard branch may send only ordinary phoneNumber/message rows and must never claim G5_PROTECTED. The protected branch decrypts only the authenticated envelope under a valid lease and never falls back to ordinary fields. A suppressed row is excluded by both its terminal status and dispatch mode.
+
+### 16.4 Exact lease-expiry behavior
+
+- Every protected claim atomically changes queued to processing and writes a fresh random dispatchLeaseToken, dispatchLeaseExpiresAt and processingStartedAt.
+- **Expired before send-start:** consider only processing G5_PROTECTED/SEND rows with dispatchLeaseExpiresAt <= now, the exact current dispatchLeaseToken, and sendStartedAt null/missing. Revalidate exact linkId, tokenVersion and eligible link status. If still current, CAS the SMS row using the same lease token/expiry/no-send-start predicates, requeue it, and clear the old lease. The next claim receives a new lease token. If link/version is stale or revoked, CAS the row to cancelled. The send-start transaction must repeat the link/version fence.
+- **Expired after send-start:** when sendStartedAt is non-null, CAS processing to unknown only if the exact current lease token and expired time still match. Preserve that attempt token so a late response from that same request may settle the row. Never requeue it automatically.
+- Every reclaim, completion and failure update matches the current dispatchLeaseToken. A later owner-authorized attempt, if B08 permits one, must have a new attempt identity/token; an old response cannot overwrite it.
+- A crash after committing sendStartedAt but before issuing the HTTP request remains unknown. This deliberately avoids duplicate sends where provider outcome is unknowable.
+
+### 16.5 Send-start revision fence
+
+The send-start transaction reads the link's observed dispatchRevision, then performs a write-bearing conditional link update matching exact link ID, SMS tokenVersion, eligible status and that observed revision; it increments dispatchRevision once. In the same Mongo session, update the SMS row only if status is processing, the current lease token matches, the lease is unexpired and sendStartedAt is null/missing. Require one matched link write and one matched SMS write. Commit both before invoking Celcom. Rotation/revocation writes the same link using expectedTokenVersion, so the operations serialize. If rotation/revocation wins, old-version send-start fails. If send-start wins, the request may still reach Celcom after a later rotation, but its token is already invalid for redemption.
+
+### 16.6 Revision glossary
+
+| Field | Meaning | Increment/change rule |
+|---|---|---|
+| submissionRevision | Submission-vs-rotation/revocation write fence. | Increment for each accepted submission's write-bearing link CAS. |
+| dispatchRevision | Dispatch-start-vs-rotation/revocation write fence. | Increment once for successful send-start using observed revision. Not a submission counter, token version or retry count. |
+| tokenVersion | Bearer-secret generation. | Increment on rotation/revocation; an SMS is eligible only for its exact current version. |
+| notificationVersion | Outbound template/content contract. | Changes only when the approved template changes; independent of token rotation and worker retries. |
+
+### 16.7 Required test additions
+
+1. Missing expected Tenancy ID on move-out is rejected with no writes.
+2. A replay for an already CLOSED MOVE_OUT Tenancy is a no-op after a later tenant occupies the House; the later Tenant and House pointer remain unchanged.
+3. A CLOSED Tenancy with another close reason is not treated as an idempotent move-out.
+4. Old-House pointer mismatch and close() House matchedCount === 0 both roll back all lifecycle/link/outbox/audit changes.
+5. Destination House with any non-null tenantId and no ACTIVE Tenancy is rejected; include same-tenant and foreign-tenant pointer fixtures.
+6. currentTenancyId requires exactly one tenant-scoped ACTIVE row and matching Tenant/House/Tenancy pointers.
+7. Controller actor identity reaches Tenancy fields and same-session audit for create, move and move-out.
+8. Schema validation accepts g5_onboarding_link, cancelled and suppressed. Suppressed seed SMS is never claimed and provider mock records zero calls.
+9. A legacy SMS missing deliveryMode and dispatchMode remains claimable by standard branch; protected records never enter it.
+10. Expired pre-send leases requeue only for the still-current link/version; stale links cancel. Expired post-send-start leases become unknown and retain their attempt token.
+11. Late provider response settles only its same attempt token; stale response cannot overwrite a newer attempt.
+12. Celcom unknown never requeues, despite the currently ignored third idempotency argument.
+13. Live idempotencyKey index preflight confirms exact unique key pattern and duplicate state before outbox use. A Mongoose unique declaration alone is insufficient.
+14. Transaction callback retry generates a fresh GCM nonce per encryption attempt and only the committed envelope can be dispatched.
+
+### 16.8 Owner decisions and residual risk
+
+- **D11:** owner acceptance and support handling are required for an SMS already past sendStartedAt that arrives after token invalidation with a nonredeemable URL. Revocation is never delayed.
+- **D14:** owner sets maximum transaction-commit-to-first-dispatch latency; the current 15-minute drain is not a contractual SLA.
+- **B08:** no resend after unknown without verified provider status or explicitly approved audited operator resolution.
+- **D17:** encrypted outbound recipient/body clearing and retention/hold policy remain unapproved; no TTL or duration is invented.
+- **B01/B03:** actual Till identity, destination mapping and merchant capability gate real instructions and REQUIRED provisioning.
+- **B09 clarification:** B09 concerns Daraja API credential ownership/scope. It does not block non-secret Till instructions once B01/B03 are proven. No API credential, provider secret or encryption key belongs in an SMS body.
+
+The live database index, Celcom status-lookup capability, merchant mapping, provider enablement, retention policy and owner risk acceptances were not established by this review. They remain explicit gates.
+
+**Final G5.2 status:** APPROVE WITH REQUIRED DOCUMENTATION CHANGES; these are incorporated here. **NO-GO for implementation** until separate bounded owner authorization and relevant owner decisions/readiness gates are satisfied.

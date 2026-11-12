@@ -4,11 +4,13 @@ This directory is the **G5 construction workspace** for Tycoon Estates backend.
 
 ## Documents (read in order)
 
-1. `architecture-summary.md` — short context, design invariants, and **workspace verification**.
-2. `PRD.md` — product behaviour and acceptance criteria.
-3. `architecture.md` — repository audit, domain design, routes, jobs, indexes, tests.
-4. `G5_IMPLEMENTATION_GUARDRAILS.md` — mandatory agent conduct, source verification, no-guessing rules.
-5. `G5_SOURCE_HEAD.txt` — recorded GitHub HEAD used to populate this workspace.
+1. `architecture-summary.md` — short context and current gate.
+2. `PRD.md` — product behaviour, acceptance criteria and owner decisions.
+3. `architecture.md` — repository audit, domain design, routes, jobs, indexes and tests.
+4. `G5_1_SCHEMA_INDEX_DESIGN.md` — provisional five-record schema and index design.
+5. `G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md` — tenancy lifecycle, protected SMS outbox and independent-review resolution.
+6. `G5_IMPLEMENTATION_GUARDRAILS.md` — mandatory agent conduct, source verification and no-guessing rules.
+7. `G5_SOURCE_HEAD.txt` — pinned application-source audit baseline, not feature-branch HEAD.
 
 ## Source baseline
 
@@ -21,8 +23,8 @@ That commit is both the design-audit baseline and the current `main` HEAD at ini
 
 ## Current phase
 
-**G5.0 complete for documentation.**  
-**G5.1+ implementation is not authorized** until the owner explicitly starts construction.
+**G5.2 independent review:** APPROVE WITH REQUIRED CHANGES; documentation corrections are incorporated in the current G5.2 decision record.  
+**Implementation remains NO-GO** until the owner explicitly authorizes a bounded slice and relevant release gates are satisfied.
 
 Do not implement G5 models, Daraja clients, submission links, SMS parsers, or accounting changes without that authorization.
 
