@@ -78,17 +78,53 @@ export const transactionService = {
     let remainingBalanceCents = 0;
     try {
       await session.withTransaction(async () => {
+        // Manual assignment and automated G4 claim acquisition must contend
+        // on the same BankTransaction document before financial writes begin.
+        const assignmentFields = {
+          matchedHouseId: house._id,
+          matchedTenantId: tenant?._id || null,
+          matchedTenancyId: tenancy._id,
+          matchStatus: 'MATCHED',
+          processingState: 'POSTED',
+          processingClaimToken: null,
+          processingClaimExpiresAt: null,
+          lastProcessingError: null,
+        };
+
+        const eligibility = await BankTransaction.updateOne(
+          {
+            _id: bankTransaction._id,
+            clientId,
+            estateId: bankTransaction.estateId,
+            eventType: 'CREDIT',
+            matchStatus: { $ne: 'MATCHED' },
+            processingClaimToken: null,
+            processingClaimExpiresAt: null,
+            $or: [
+              {
+                processingState: {
+                  $in: ['RECEIVED', 'FAILED_RETRYABLE', 'MANUAL_REVIEW'],
+                },
+              },
+              { processingState: { $exists: false } },
+            ],
+          },
+          { $set: assignmentFields },
+          { session }
+        );
+
+        if (eligibility.matchedCount !== 1) {
+          throw Errors.Conflict(
+            'Bank transaction is claimed or no longer eligible for manual assignment'
+          );
+        }
+
+        Object.assign(bankTransaction, assignmentFields);
+
         const result = await reconciliationService.applyPayment({
           bankTransaction, house, tenant, period, session, tenancyId: tenancy._id,
         });
         remainingBalanceCents = result.remainingBalanceCents ?? 0;
-        bankTransaction.matchedHouseId = house._id;
-        bankTransaction.matchedTenantId = tenant?._id || null;
-        bankTransaction.matchedTenancyId = tenancy._id;
-        bankTransaction.matchStatus = 'MATCHED';
-        bankTransaction.processingState = 'POSTED';
-        bankTransaction.lastProcessingError = null;
-        await bankTransaction.save({ session });
       });
     } finally {
       await session.endSession();

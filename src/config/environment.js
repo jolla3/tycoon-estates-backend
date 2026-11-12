@@ -23,7 +23,7 @@ const dotenvResult = dotenv.config({ path: envPath });
 
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const isProd = NODE_ENV === 'production';
-const isTest = NODE_ENV === 'test';
+export const isTest = NODE_ENV === 'test';
 
 /**
  * Required string from process.env. Empty / whitespace-only = missing.
@@ -105,6 +105,15 @@ export const env = {
   COOP_PASSWORD: optional('COOP_PASSWORD'),
   COOP_SCOPE: optional('COOP_SCOPE') || null,
   COOP_INS_BASIC_SECRET: optional('COOP_INS_BASIC_SECRET'),
+  // Dedicated application-level encryption key for MongoDB BankCredential records.
+  // This key is separate from ENCRYPTION_KEY and must never be stored in MongoDB/Redis.
+  BANK_SECRETS_ENCRYPTION_KEY: optional('BANK_SECRETS_ENCRYPTION_KEY') || '',
+  BANK_SECRETS_ENCRYPTION_KEY_PREVIOUS: optional('BANK_SECRETS_ENCRYPTION_KEY_PREVIOUS') || '',
+  /** Explicit non-production lab enable for unverified COOP bank workflows. */
+  COOP_BANK_LAB_MODE: optional('COOP_BANK_LAB_MODE') === '1',
+  /** Explicit non-production lab enable for the COOP inbound webhook. */
+  COOP_WEBHOOK_LAB_OVERRIDE: optional('COOP_WEBHOOK_LAB_OVERRIDE') === '1',
+
 
   // Celcom Africa SMS — all from .env
   CELCOM_BASE_URL: optional('CELCOM_BASE_URL'),

@@ -119,14 +119,188 @@ describeWithMongo('Tenancy-scoped Bank reconciliation', () => {
     });
   }
 
-  async function chargeFor(txn, targetTenancy = tenancy) {
-    return RentCharge.findOne({
-      clientId: client._id,
-      tenancyId: targetTenancy._id,
-      period: dateUtil.periodOf(txn.transactionDate),
-      chargeType: 'RENT',
-    });
+  async function setProcessingClaim(txn, token, expiresAt = new Date(Date.now() + 60_000)) {
+    const claimed = await BankTransaction.findOneAndUpdate(
+      { _id: txn._id },
+      {
+        $set: {
+          processingState: 'CLAIMED',
+          processingClaimToken: token,
+          processingClaimExpiresAt: expiresAt,
+        },
+      },
+      { new: true }
+    );
+    if (!claimed) throw new Error('Could not set test processing claim');
+    return claimed;
   }
+
+  test('a valid G4 claim is consumed atomically with the G3 financial posting', async () => {
+    const token = 'g4-valid-claim';
+    const txn = await setProcessingClaim(await makeTxn(), token);
+
+    const result = await reconciliationService.reconcile(txn, { claimToken: token });
+
+    expect(result.matched).toBe(true);
+    expect(result.payment).toBeTruthy();
+
+    const fresh = await BankTransaction.findById(txn._id);
+    expect(fresh.processingState).toBe('POSTED');
+    expect(fresh.processingClaimToken).toBeNull();
+    expect(fresh.processingClaimExpiresAt).toBeNull();
+    expect(await Payment.countDocuments({ bankTransactionId: txn._id })).toBe(1);
+  });
+
+  test('a stale G4 token aborts all G3 financial writes', async () => {
+    const txn = await setProcessingClaim(await makeTxn(), 'current-worker-token');
+
+    await expect(
+      reconciliationService.reconcile(txn, { claimToken: 'stale-worker-token' })
+    ).rejects.toThrow(/claim/i);
+
+    expect(await Payment.countDocuments({ bankTransactionId: txn._id })).toBe(0);
+    expect(await PaymentAllocation.countDocuments({ clientId: client._id })).toBe(0);
+    expect(await RentCharge.countDocuments({
+      clientId: client._id,
+      tenancyId: tenancy._id,
+    })).toBe(0);
+    expect(await Ledger.countDocuments({
+      clientId: client._id,
+      referenceType: 'Payment',
+    })).toBe(0);
+
+    const fresh = await BankTransaction.findById(txn._id);
+    expect(fresh.processingState).toBe('CLAIMED');
+    expect(fresh.processingClaimToken).toBe('current-worker-token');
+  });
+
+  test('an expired G4 claim cannot commit G3 financial writes even with its old token', async () => {
+    const token = 'expired-worker-token';
+    const txn = await setProcessingClaim(
+      await makeTxn(),
+      token,
+      new Date(Date.now() - 5_000)
+    );
+
+    await expect(
+      reconciliationService.reconcile(txn, { claimToken: token })
+    ).rejects.toThrow(/claim/i);
+
+    expect(await Payment.countDocuments({ bankTransactionId: txn._id })).toBe(0);
+    expect(await PaymentAllocation.countDocuments({ clientId: client._id })).toBe(0);
+    expect(await RentCharge.countDocuments({
+      clientId: client._id,
+      tenancyId: tenancy._id,
+    })).toBe(0);
+    expect(await Ledger.countDocuments({
+      clientId: client._id,
+      referenceType: 'Payment',
+    })).toBe(0);
+
+    const fresh = await BankTransaction.findById(txn._id);
+    expect(fresh.processingState).toBe('CLAIMED');
+    expect(fresh.processingClaimToken).toBe(token);
+  });
+
+  test('a valid G4 claim is consumed when a credit is sent to manual review', async () => {
+    const token = 'g4-unmatched-claim';
+    const txn = await setProcessingClaim(
+      await makeTxn({ paymentReference: 'NO-SUCH-HOUSE' }),
+      token
+    );
+
+    const result = await reconciliationService.reconcile(txn, { claimToken: token });
+
+    expect(result.matched).toBe(false);
+    const fresh = await BankTransaction.findById(txn._id);
+    expect(fresh.processingState).toBe('MANUAL_REVIEW');
+    expect(fresh.matchStatus).toBe('UNMATCHED');
+    expect(fresh.processingClaimToken).toBeNull();
+    expect(fresh.processingClaimExpiresAt).toBeNull();
+    expect(await Payment.countDocuments({ bankTransactionId: txn._id })).toBe(0);
+  });
+
+  test('already-matched payment repair consumes the active G4 claim', async () => {
+    const txn = await makeTxn();
+    const first = await reconciliationService.reconcile(txn);
+
+    expect(first.matched).toBe(true);
+    expect(await Payment.countDocuments({ bankTransactionId: txn._id })).toBe(1);
+
+    await Ledger.deleteOne({
+      referenceType: 'Payment',
+      referenceId: first.payment._id,
+      entryType: 'PAYMENT',
+    });
+
+    const token = 'g4-repair-claim';
+    const claimedTxn = await setProcessingClaim(txn, token);
+
+    const repaired = await reconciliationService.reconcile(
+      claimedTxn,
+      { claimToken: token }
+    );
+
+    expect(repaired.matched).toBe(true);
+    expect(repaired.reused).toBe(true);
+    expect(await Payment.countDocuments({ bankTransactionId: txn._id })).toBe(1);
+    expect(await Ledger.countDocuments({
+      referenceType: 'Payment',
+      referenceId: first.payment._id,
+      entryType: 'PAYMENT',
+    })).toBe(1);
+
+    const fresh = await BankTransaction.findById(txn._id);
+    expect(fresh.processingState).toBe('POSTED');
+    expect(fresh.processingClaimToken).toBeNull();
+    expect(fresh.processingClaimExpiresAt).toBeNull();
+  });
+
+  test('manual assignment cannot post while an automated G4 claim is active', async () => {
+    const txn = await makeTxn({ paymentReference: 'UNKNOWN-MANUAL-CLAIM' });
+    await reconciliationService.reconcile(txn);
+
+    const claimed = await setProcessingClaim(txn, 'active-automated-worker');
+
+    await expect(
+      transactionService.assignToHouse(client._id, txn._id, house._id)
+    ).rejects.toThrow(/claim/i);
+
+    expect(await Payment.countDocuments({ bankTransactionId: txn._id })).toBe(0);
+
+    const fresh = await BankTransaction.findById(txn._id);
+    expect(fresh.processingState).toBe('CLAIMED');
+    expect(fresh.processingClaimToken).toBe('active-automated-worker');
+    expect(String(claimed._id)).toBe(String(fresh._id));
+  });
+
+  test('manual assignment rejects null claim token with non-null claim expiry', async () => {
+    const txn = await makeTxn({ paymentReference: 'UNKNOWN-MALFORMED-CLAIM' });
+    await reconciliationService.reconcile(txn);
+
+    const malformedExpiry = new Date(Date.now() + 60_000);
+
+    await BankTransaction.updateOne(
+      { _id: txn._id },
+      {
+        $set: {
+          processingClaimToken: null,
+          processingClaimExpiresAt: malformedExpiry,
+        },
+      }
+    );
+
+    await expect(
+      transactionService.assignToHouse(client._id, txn._id, house._id)
+    ).rejects.toThrow(/claim/i);
+
+    expect(await Payment.countDocuments({ bankTransactionId: txn._id })).toBe(0);
+
+    const fresh = await BankTransaction.findById(txn._id);
+    expect(fresh.processingState).toBe('MANUAL_REVIEW');
+    expect(fresh.processingClaimToken).toBeNull();
+    expect(fresh.processingClaimExpiresAt.getTime()).toBe(malformedExpiry.getTime());
+  });
 
   test('matches the correct house and posts tenancy-owned Payment, Allocation, charge and Ledger rows', async () => {
     const txn = await makeTxn();

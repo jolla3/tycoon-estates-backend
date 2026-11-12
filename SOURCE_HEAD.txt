@@ -1,0 +1,9 @@
+repository: https://github.com/jolla3/tycoon-estates-backend
+branch: main
+HEAD: e0b49c2f122be7ae3ed14eaba9eecfeacee7ce13
+message: v2.0.3
+date: 2026-11-10 20:14:31 +0300
+populated: 2026-11-10
+rechecked: 2026-11-11
+workspace_diff_vs_HEAD: clean (src, tests, scripts, package.json, package-lock.json)
+note: Architecture locked 2026-11-11. Original G4 docs updated in-place to match locked invariants. No application implementation in documentation-lock stage.

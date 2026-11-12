@@ -1,122 +1,328 @@
 // src/services/bank.service.js
 //
-// Section 14/15/31: bank account connection, sync, and historical
-// statement import. Only ever talks to a provider through
-// bank.factory.js — never imports a concrete provider directly.
-// clientId-scoped throughout (section 2).
+// Bank account onboarding, listing, and (existing) sync/statement entry points.
+// G4 Batch 02: connection association, physical identity reuse, fail-closed validation.
+// Transaction ingestion/sync behaviour is not redesigned in this batch.
 
 import { BankAccount } from '../models/BankAccount.js';
-import { BankTransaction } from '../models/BankTransaction.js';
 import { Estate } from '../models/Estate.js';
-import { getBankProvider } from './banking/bank.factory.js';
+import { BankConnection } from '../models/BankConnection.js';
+import {
+  assertProviderOperational,
+  getBankProviderCapabilities,
+} from './banking/bank.factory.js';
+import { connectionService } from './connection.service.js';
 import { encryptionUtil } from '../utils/encryption.js';
-import { withIdempotency } from '../utils/idempotency.js';
-import { reconciliationService } from './reconciliation.service.js';
-import { Errors } from '../utils/errors.js';
+import { ingestNormalizedTransactionBatch } from './banking/transactionIngestion.service.js';
+import { bankSyncService } from './banking/bankSync.service.js';
+import { Errors, AppError } from '../utils/errors.js';
 import { logger } from '../config/logger.js';
 import { audit } from './audit.service.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 
-/** Public bank account DTO — never exposes ciphertext, hashes, or secrets. */
 function toPublicBankAccount(account) {
   if (!account) return null;
   const a = typeof account.toObject === 'function' ? account.toObject() : account;
   return {
     id: a._id,
     estateId: a.estateId,
+    connectionId: a.connectionId || null,
     provider: a.provider,
     accountName: a.accountName,
     currency: a.currency || 'KES',
     connectionStatus: a.connectionStatus,
+    validationStatus: a.validationStatus || 'pending',
+    lastValidatedAt: a.lastValidatedAt || null,
+    entitlements: a.entitlements || {
+      poll: false,
+      statement: false,
+      balance: false,
+      webhookIngest: false,
+    },
     lastSyncedAt: a.lastSyncedAt || null,
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
-    // Masked hint only when we can decrypt in-process (not stored plaintext)
     accountNumberMasked: null,
   };
 }
 
+function entitlementsFromCapabilities(caps) {
+  return {
+    poll: Boolean(caps?.polling),
+    statement: Boolean(caps?.statementImport),
+    balance: Boolean(caps?.balance),
+    webhookIngest: Boolean(caps?.webhook),
+  };
+}
 
 async function storeAndReconcile(clientId, estateId, bankAccountId, normalizedTxns) {
-  let stored = 0;
-  let reconciled = 0;
-
-  for (const txn of normalizedTxns) {
-    if (!txn.providerTransactionId) {
-      logger.warn({ clientId: String(clientId) }, 'Skipping a normalized transaction with no providerTransactionId — cannot deduplicate it safely');
-      continue;
-    }
-
-    const { created, doc } = await withIdempotency(
-      BankTransaction,
-      txn.providerTransactionId,
-      'providerTransactionId',
-      () => BankTransaction.create({ ...txn, clientId, estateId, bankAccountId })
-    );
-
-    if (created) stored += 1;
-    if (doc.eventType === 'CREDIT' && doc.processingState !== 'POSTED') {
-      try {
-        await reconciliationService.reconcile(doc);
-        if (created) reconciled += 1;
-      } catch (err) {
-        doc.processingState = 'FAILED_RETRYABLE';
-        doc.lastProcessingError = err.message;
-        await doc.save();
-        logger.error({ error: err.message, id: String(doc._id) }, 'Reconciliation failed; left retryable');
-      }
-    }
+  const account = await BankAccount.findById(bankAccountId);
+  if (!account || String(account.clientId) !== String(clientId)) {
+    throw Errors.BankAccountNotFound();
   }
-  return { stored, reconciled };
+  const { stored, processed } = await ingestNormalizedTransactionBatch(
+    account,
+    normalizedTxns,
+    {
+      process: true,
+      ingestionChannel: 'statement',
+      connectionId: account.connectionId,
+    }
+  );
+  return { stored, reconciled: processed };
+}
+
+async function requireActiveConnection(clientId, connectionId, expectedProvider = null) {
+  const connection = await BankConnection.findOne({ _id: connectionId, clientId });
+  if (!connection) throw Errors.NotFound('Bank connection not found');
+  if (connection.status === 'disconnected') {
+    throw Errors.Conflict('Bank connection is disconnected');
+  }
+  if (connection.status !== 'active') {
+    throw Errors.BankAuthFailed(
+      `Bank connection is not active (status=${connection.status})`
+    );
+  }
+  if (expectedProvider && connection.provider !== String(expectedProvider).toUpperCase()) {
+    throw Errors.InvalidRequest('Bank connection provider does not match account provider');
+  }
+  return connection;
 }
 
 export const bankService = {
-  async connectAccount(clientId, estateId, { provider, accountNumber, accountName, currency }) {
+  /**
+   * Link / reconnect a physical bank account under a client-owned connection.
+   * Same client + provider + accountNumberHash → reuse existing BankAccount _id.
+   * Different client owning the same physical account → conflict.
+   * Validation failure → not activated (fail closed).
+   */
+  async connectAccount(clientId, estateId, {
+    provider,
+    accountNumber,
+    accountName,
+    currency,
+    connectionId,
+    allowEstateReassignment = false,
+  }) {
+    if (!connectionId) {
+      throw Errors.InvalidRequest('connectionId is required to link a bank account');
+    }
+
+    assertProviderOperational(provider, { allowLab: true });
+    const providerKey = String(provider).toUpperCase();
+
     const estate = await Estate.findOne({ _id: estateId, clientId });
     if (!estate) throw Errors.EstateNotFound('Estate not found for your client');
 
-    const bankAccount = await BankAccount.create({
-      clientId,
-      estateId,
-      provider,
-      accountNumberEncrypted: encryptionUtil.encrypt(accountNumber),
-      accountNumberHash: encryptionUtil.hashForLookup(accountNumber),
-      accountName,
-      currency: currency || 'KES',
-      connectionStatus: 'pending',
+    const connection = await requireActiveConnection(clientId, connectionId, providerKey);
+    const caps = getBankProviderCapabilities(providerKey);
+    const accountNumberHash = encryptionUtil.hashForLookup(accountNumber);
+
+    // Read the existing physical-account owner. Do not mutate this document.
+    const existingAccount = await BankAccount.findOne({
+      provider: providerKey,
+      accountNumberHash,
     });
 
+    if (
+      existingAccount
+      && String(existingAccount.clientId) !== String(clientId)
+    ) {
+      throw Errors.Conflict(
+        'This bank account is already registered to a different Tycoon client'
+      );
+    }
+
+    const reused = Boolean(existingAccount);
+    const previousEstateId = existingAccount?.estateId ?? null;
+    const estateReassigned = Boolean(
+      existingAccount
+      && String(existingAccount.estateId) !== String(estateId)
+    );
+
+    if (estateReassigned && !allowEstateReassignment) {
+      throw Errors.Conflict(
+        'Physical bank account is linked to a different estate. Pass allowEstateReassignment=true to reassign explicitly.'
+      );
+    }
+
+    const encryptedAccountNumber = encryptionUtil.encrypt(accountNumber);
+    const proposedAccountName = accountName || existingAccount?.accountName;
+    const proposedCurrency = currency || existingAccount?.currency || 'KES';
+
+    // Build a detached validation candidate. The live BankAccount document
+    // remains untouched until provider validation has succeeded.
+    const validationCandidate = new BankAccount({
+      ...(existingAccount
+        ? (typeof existingAccount.toObject === 'function'
+          ? existingAccount.toObject()
+          : { ...existingAccount })
+        : {}),
+      clientId,
+      estateId,
+      connectionId: connection._id,
+      provider: providerKey,
+      accountNumberEncrypted: encryptedAccountNumber,
+      accountNumberHash,
+      accountName: proposedAccountName,
+      currency: proposedCurrency,
+      connectionStatus: 'pending',
+      validationStatus: 'pending',
+      lastValidatedAt: null,
+      entitlements: {
+        poll: false,
+        statement: false,
+        balance: false,
+        webhookIngest: false,
+      },
+    });
+
+    // Authenticate and validate the detached candidate before any account write.
     try {
-      const providerImpl = getBankProvider(provider);
-      await providerImpl.authenticate();
+      const adapter = await connectionService.getAdapterForConnection(connection);
+      await adapter.authenticate();
 
-      // AccountValidation is the documented Co-op operation for
-      // "verify a bank account" (section 9/12) — this replaces the
-      // earlier version's fabricated "register-notification" call.
-      if (typeof providerImpl.validateAccount === 'function') {
-        try {
-          await providerImpl.validateAccount(bankAccount);
-        } catch (validationErr) {
-          logger.warn({ clientId: String(clientId), provider, error: validationErr.message }, 'Account validation failed — connecting anyway, flagged for manual review');
-        }
+      if (typeof adapter.validateAccount !== 'function') {
+        throw Errors.BankAuthFailed(
+          'Account validation is not available for this provider'
+        );
       }
 
-      // Whether Co-op's SendTransactionINS subscription for this account
-      // is configured via their developer portal or requires a manual
-      // account-manager request is NOT documented as a REST call (see
-      // coop.provider.js#registerTransactionNotification) — this only
-      // logs that, it doesn't block the connection.
-      if (typeof providerImpl.registerTransactionNotification === 'function') {
-        await providerImpl.registerTransactionNotification(bankAccount);
-      }
+      try {
+        await adapter.validateAccount(validationCandidate);
+      } catch (validationErr) {
+        logger.warn({
+          clientId: String(clientId),
+          connectionId: String(connection._id),
+          error: validationErr.message,
+        }, 'Account validation failed; existing account association was retained');
 
-      bankAccount.connectionStatus = 'connected';
-      bankAccount.lastSyncedAt = new Date();
-      await bankAccount.save();
+        throw Errors.InvalidRequest(
+          `Account validation failed: ${validationErr.message || 'rejected by provider'}`
+        );
+      }
     } catch (err) {
-      logger.error({ clientId: String(clientId), provider, error: err.message }, 'Bank account connection failed');
-      bankAccount.connectionStatus = 'failed';
-      await bankAccount.save();
+      logger.error({
+        clientId: String(clientId),
+        connectionId: String(connection._id),
+        provider: providerKey,
+        reused,
+        error: err.message,
+      }, 'Bank account validation failed; no account changes were committed');
+      throw err;
+    }
+
+    const validatedAt = new Date();
+    const accountUpdates = {
+      estateId,
+      connectionId: connection._id,
+      accountName: proposedAccountName,
+      currency: proposedCurrency,
+      accountNumberEncrypted: encryptedAccountNumber,
+      accountNumberHash,
+      connectionStatus: 'connected',
+      validationStatus: 'validated',
+      lastValidatedAt: validatedAt,
+      entitlements: entitlementsFromCapabilities(caps),
+    };
+
+    let bankAccount;
+
+    if (existingAccount) {
+      // Compare-and-set prevents a stale validation result from overwriting
+      // a concurrent reconnect, disconnect or estate reassignment.
+      if (
+        !(existingAccount.updatedAt instanceof Date)
+        || Number.isNaN(existingAccount.updatedAt.getTime())
+      ) {
+        throw Errors.Conflict(
+          'Existing bank account has no reliable update version; refusing unsafe reconnect'
+        );
+      }
+
+      const filter = {
+        _id: existingAccount._id,
+        clientId,
+        provider: providerKey,
+        accountNumberHash,
+        estateId: existingAccount.estateId,
+        connectionId: existingAccount.connectionId ?? null,
+        connectionStatus: existingAccount.connectionStatus,
+        validationStatus: existingAccount.validationStatus,
+        updatedAt: existingAccount.updatedAt,
+      };
+
+      try {
+        bankAccount = await BankAccount.findOneAndUpdate(
+          filter,
+          { $set: accountUpdates },
+          { new: true, runValidators: true }
+        );
+      } catch (err) {
+        logger.error({
+          clientId: String(clientId),
+          bankAccountId: String(existingAccount._id),
+          connectionId: String(connection._id),
+          error: err.message,
+        }, 'Bank account reconnect persistence outcome is uncertain');
+
+        throw Errors.Conflict(
+          'Bank account reconnect outcome is uncertain; reload the account before retrying'
+        );
+      }
+
+      if (!bankAccount) {
+        throw Errors.Conflict(
+          'Bank account changed during provider validation; reload it and retry the reconnect'
+        );
+      }
+    } else {
+      try {
+        bankAccount = await BankAccount.create({
+          clientId,
+          provider: providerKey,
+          ...accountUpdates,
+        });
+      } catch (err) {
+        if (err.code === 11000) {
+          throw Errors.Conflict(
+            'This physical bank account was linked concurrently; reload the account before retrying'
+          );
+        }
+        throw err;
+      }
+    }
+
+    // Audits describe committed state only. No reassignment audit is emitted
+    // for a rejected validation or failed compare-and-set.
+    await audit({
+      clientId,
+      estateId,
+      action: 'BANK_ACCOUNT_CONNECTED',
+      resource: 'BankAccount',
+      resourceId: bankAccount._id,
+      metadata: {
+        provider: providerKey,
+        connectionId: String(connection._id),
+        validationStatus: bankAccount.validationStatus,
+        reused,
+      },
+    });
+
+    if (estateReassigned) {
+      await audit({
+        clientId,
+        estateId,
+        action: 'BANK_ACCOUNT_ESTATE_REASSIGNED',
+        resource: 'BankAccount',
+        resourceId: bankAccount._id,
+        metadata: {
+          previousEstateId: String(previousEstateId),
+          newEstateId: String(estateId),
+          connectionId: String(connection._id),
+          provider: providerKey,
+        },
+      });
     }
 
     return toPublicBankAccount(bankAccount);
@@ -134,7 +340,7 @@ export const bankService = {
       ...estateFilterClause(estateFilter),
     });
     if (!account) throw Errors.BankAccountNotFound();
-    return account; // internal use (sync needs encrypted fields)
+    return account;
   },
 
   async getPublic(clientId, bankAccountId, estateFilter = null) {
@@ -142,33 +348,28 @@ export const bankService = {
   },
 
   async sync(clientId, bankAccountId, estateFilter = null) {
-    const bankAccount = await this.get(clientId, bankAccountId, estateFilter);
-    const provider = getBankProvider(bankAccount.provider);
-    const normalized = await provider.getTransactions(bankAccount, { noOfTransactions: 100 });
-
-    const result = await storeAndReconcile(clientId, bankAccount.estateId, bankAccount._id, normalized);
-
-    bankAccount.lastSyncedAt = new Date();
-    await bankAccount.save();
-    await audit({
-      clientId,
-      estateId: bankAccount.estateId,
-      action: 'BANK_SYNCED',
-      resource: 'BankAccount',
-      resourceId: bankAccount._id,
-      metadata: {
-        provider: bankAccount.provider,
-        stored: result.stored,
-        reconciled: result.reconciled,
-      },
-    });
-    return result;
+    // estateFilter still enforced via get for authorization
+    await this.get(clientId, bankAccountId, estateFilter);
+    return bankSyncService.synchronizeBankAccount(clientId, bankAccountId);
   },
 
-  /** Section 15/31: historical statement import for a date range (Nairobi business dates). */
   async importStatement(clientId, bankAccountId, startDate, endDate, estateFilter = null) {
     const bankAccount = await this.get(clientId, bankAccountId, estateFilter);
-    const provider = getBankProvider(bankAccount.provider);
+    if (bankAccount.connectionStatus !== 'connected') {
+      throw Errors.Conflict('Bank account is not connected');
+    }
+    if (!bankAccount.connectionId) {
+      throw Errors.Conflict('Bank account has no connection association (legacy record requires explicit migration)');
+    }
+    if (!bankAccount.entitlements?.statement) {
+      throw Errors.Forbidden('Account is not entitled to statement import');
+    }
+    const connection = await requireActiveConnection(
+      clientId,
+      bankAccount.connectionId,
+      bankAccount.provider
+    );
+    const provider = await connectionService.getAdapterForConnection(connection);
     const normalized = await provider.getFullStatement(bankAccount, startDate, endDate);
     return storeAndReconcile(clientId, bankAccount.estateId, bankAccount._id, normalized);
   },

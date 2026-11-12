@@ -7,7 +7,9 @@ import mongoose from 'mongoose';
 import { verifyMongoTransactionSupport } from '../../src/config/database.js';
 
 export const hasMongo = Boolean(process.env.MONGODB_URI);
-export const describeWithMongo = hasMongo ? describe : describe.skip;
+export const canRunMongoIntegration = hasMongo
+  && process.env.TYCOON_ALLOW_DESTRUCTIVE_TEST_DB === "1";
+export const describeWithMongo = canRunMongoIntegration ? describe : describe.skip;
 
 const SAFE_TEST_DB = /^tycoon_test_[a-z0-9_]{2,48}$/;
 const DESTRUCTIVE_ACK = '1';

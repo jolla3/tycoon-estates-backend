@@ -1,241 +1,250 @@
-# Tycoon Estates: Tenancy-Aware Accounting Foundation and Daraja Collections PRD
+# G4 Product Requirements Document: Bank Connections and Co-op Integration
 
-**Status:** G2 design freeze — 2026-11-07  
-**Document owner:** Tycoon Estates  
+**Status:** Architecture locked for implementation.  
 **Repository:** `jolla3/tycoon-estates-backend`  
-**Code baseline:** `main` at `569c96c8f6a017c114e9abbe8b5f15b72d6e934a` (Git-verified at G1/G2)  
-**Document revision:** 2026-11-07 (G2)  
-**Implementation status:** Proposed architecture only. No Category B or M-PESA implementation is authorized by this document. Proposed models do **not** exist in the baseline codebase.
+**Verified GitHub `main` HEAD:** `e0b49c2f122be7ae3ed14eaba9eecfeacee7ce13` (`v2.0.3`)  
+**Workspace:** Matches HEAD (`diff` clean for `src/`, `tests/`, `scripts/`, package files).  
+**Programme:** After G3 (tenancy-aware accounting); before G5 (Daraja/M-PESA).
+
+> GitHub is authoritative. Fetch and inspect current `main` HEAD before planning or changing code.
 
 ## 1. Product definition
 
-Tycoon Estates is a multi-tenant property and rent-payment monitoring system. A **client** owns or manages one or more **estates**. Staff operate within a client and, where applicable, an estate-level access restriction. The backend stores occupancy (tenancy), rent charges, incoming payment sources, confirmed payments, allocations and financial ledger entries.
+Tycoon Estates monitors rent payments for multi-estate clients. G4 enables secure, multi-client bank connectivity so credits on client bank accounts can be discovered (poll or webhook) and attributed through the **existing G3** financial engine.
 
-This programme has two scopes:
+G4 must ensure:
 
-1. **Category B — Tenancy-aware accounting foundation**  
-   Correct occupancy identity and shared financial ownership so money is attributed to the correct historical occupancy.
-2. **M-PESA PayBill collection (Daraja)**  
-   C2B confirmation (primary) and Pull Transactions (recovery) converge on one canonical receipt and the **same** shared financial engine. No separate M-PESA ledger.
+- Independent API relationships per Tycoon client (and multiple per client when needed).
+- No cross-client credential, token, account, or transaction leakage.
+- Duplicate provider events cannot create duplicate Payments or Ledger effects.
+- Operational failure is visible; success responses must not conceal partial failure.
+- Account activation cannot occur when validation fails or is unavailable.
 
-M-PESA financial posting is forbidden until the Co-op compatibility gate (G4) passes and owners separately authorize G5.
+## 2. Scope
 
-### 1.1 Governance and delivery gates
+### 2.1 In scope
 
-| Gate | Meaning | Status |
-|------|---------|--------|
-| Stage 0 | Repository audit | Done |
-| G1 | Canonical checkout + DB-free unit baseline | Done: SHA `569c96c…`; 10 suites / 34 unit tests passed; integration **not run** |
-| G2 | Architecture challenge and design freeze | **This document set** |
-| G3 | Category B implementation + dry-run migration prep | Not authorized until owners approve G2 |
-| G4 | Co-op compatibility against corrected engine | Blocked on G3 |
-| G5 | Daraja wire-contract + M-PESA collection integration | Blocked on G4 + owner auth |
+| ID | Capability |
+|----|------------|
+| G4-S1 | BankConnection model and lifecycle |
+| G4-S2 | Connection-scoped credentials in encrypted MongoDB `BankCredential` records, referenced by `BankConnection`, with token isolation |
+| G4-S3 | BankAccount link to one connection; physical-account identity preserved |
+| G4-S4 | Truthful provider registry: COOP adapter implemented but not operationally ready; KCB/EQUITY/NCBA disabled |
+| G4-S5 | Shared normalized ingestion (poll + webhook) |
+| G4-S6 | Durable account-scoped sync checkpoints and recovery |
+| G4-S7 | Webhook verification using the **verified** Co-op mechanism only |
+| G4-S8 | Hand-off to existing G3 reconciliation and accountingPosting |
+| G4-S9 | Backend API contract for an external frontend |
+| G4-S10 | Monitoring, redaction, production readiness |
 
-G3 requires an **approved disposable MongoDB replica-set** test environment, or an explicit owner-approved alternative with documented risk. `tests/helpers/db.js` clears all collections in its configured database and must never point at valuable data.
+### 2.2 Provider boundary
 
-G1 unit results are **not** a claim that Co-op is regression-green end-to-end.
+Identifiers **PRESERVE:** `COOP`, `KCB`, `EQUITY`, `NCBA`.  
+Only COOP is implemented. Unimplemented providers MUST NOT be connectable or advertised as operational.
 
-## 2. Users and actors
+### 2.3 Non-goals
 
-| Actor | Need |
-|-------|------|
-| Client Owner / Client Admin | Configure estates, review unmatched payments, resolve historical attribution, monitor balances. |
-| Authorized estate staff | Operate only within permitted estate scope. |
-| Tenant | Stable payment reference for **their occupancy**; no Tycoon login required to pay. |
-| Third-party payer | Pay using the tenancy reference without creating an account. |
-| Bank (Co-op) | Deliver credits via webhook/poll into `BankTransaction`. |
-| Safaricom Daraja | Deliver C2B callbacks and Pull responses (future). |
-| Tycoon backend | Persist, deduplicate, match, allocate, post ledger, audit. |
+- G5 M-PESA / Till / PayBill.
+- Second Payment, allocation, RentCharge, or Ledger engine.
+- KCB / Equity / NCBA adapters in G4.
+- Storing retail internet/mobile banking passwords, PINs, OTPs, or card data as connection secrets.
+- Inventing UK Open Banking FAPI/mTLS patterns for Kenya Co-op Connect.
+- Frontend implementation in this repository.
+- Cross-client account transfer as an ordinary product flow.
 
-MSISDN is supporting payment metadata, never the tenancy identity key. Payer ≠ tenant is allowed.
+## 3. Verified source observations (`e0b49c2`)
 
-## 3. Problem statement
+- No `BankConnection` model.
+- `BankAccount`: unique `{provider, accountNumberHash}`; `connectionStatus` pending/connected/failed; `lastSyncedAt`.
+- `BankTransaction`: unique `{provider, providerTransactionId}`; processing states; unused claim fields; `matchedTenancyId`.
+- Credentials: process env `COOP_*`; token cache on factory singleton keyed by provider name.
+- `connectAccount` may set `connected` after validation errors (non-compliant with locked fail-closed rule).
+- `withIdempotency` uses `providerTransactionId` alone; unique index is compound with `provider`.
+- Webhook path hardcodes COOP and duplicates persist+reconcile logic.
+- G3 path already receives normalized BankTransactions via `reconciliationService`.
 
-Baseline code (confirmed at `569c96c`) treats occupancy as mutable `Tenant.houseId` / `House.tenantId` and scopes charges, allocations and ledger running balances to the **physical house**. Consequences:
+Agents MUST re-verify against current GitHub HEAD before coding.
 
-- Moves overwrite occupancy history.
-- New occupants can inherit prior arrears in allocation and SMS/reporting views.
-- Co-op matching uses client-scoped house number/aliases and current house tenant.
-- Webhook/poll reconciles only when a `BankTransaction` document is first created; stored-but-unreconciled rows are skipped on retry.
-- Manual payments omit structured origin/tender metadata.
-- Deposit is unique per client+tenant (lifetime), not per occupancy.
-- `HouseBillingConfig` effective dates are not applied in charge selection.
-- Runtime `ensureIndexes` can drop/sync indexes on ordinary startup.
+## 4. Actors and trust boundaries
 
-Category B must fix ownership and processing durability **before** M-PESA posting.
+| Actor | May | Must not |
+|-------|-----|----------|
+| Client owner/admin | Manage own connections and accounts | Access other clients’ credentials or accounts |
+| Estate-restricted staff | View permitted estate bank data | Mutate outside estateFilter |
+| Co-op API / callback sender | Deliver data under verified contract | Select target client or bypass verification |
+| Tycoon backend | Validate ownership, ingest, reconcile, audit | Log secrets; invent provider behaviour |
 
-## 4. Goals
+## 5. Normative keywords
 
-1. Introduce immutable **Tenancy** as the financial ownership boundary.  
-2. Scope new RentCharge, Payment, PaymentAllocation, Ledger and Deposit records to `tenancyId`.  
-3. Preserve Co-op adapter contracts while moving matching and posting to the shared engine.  
-4. Make ingestion retry-safe without duplicate financial posts.  
-5. Keep one Ledger; separate rent vs deposit account categories.  
-6. Leave ambiguous legacy data unattributed until human resolution.  
-7. Gate M-PESA behind Co-op compatibility proof.
+MUST, MUST NOT, SHOULD, MAY, BLOCKED BY VERIFICATION, ACCEPTANCE CRITERIA, INVARIANT, NON-GOAL, VERIFIED, PROPOSED.
 
-## 5. Non-goals (G2–G3)
+**OWNER DECISION** is reserved for genuinely open product choices. Ownership, identity, fail-closed validation, connection-scoped encrypted credential storage, multi-connection support, and G3 sole authority are **locked** and MUST NOT be reopened as OWNER DECISION items.
 
-- Implementing Daraja or posting M-PESA in G3.  
-- Silently backfilling `tenancyId` by guessing from current house occupancy.  
-- Automatic write-off of unattributed balances.  
-- Mid-period rent proration (v1).  
-- Multiple concurrent active tenancies on one house (v1).  
-- Forcing every Payment to have a bank or M-PESA provider ID (manual remains valid).  
-- Making `BankTransaction` nullable for shortcode receipts.  
-- Exposing MongoDB ObjectIds in browser URLs (admin UI constraint).
+## 6. Product rules and data ownership
 
-## 6. Functional requirements
+### 6.1 Connection versus bank account (LOCKED)
 
-### 6.1 Tenancy lifecycle
+- One **BankConnection** belongs to exactly one Tycoon client and one provider.
+- A client MAY have multiple independent connections to the same provider.
+- One connection MAY authorize multiple **BankAccounts**.
+- A **BankAccount** represents one physical bank account.
+- One physical account MUST NOT be simultaneously registered to different Tycoon clients.
+- Global physical-account identity constraint **PRESERVE:** unique `{provider, accountNumberHash}` unless a separately justified and approved migration is established.
+- Each BankAccount has one current client, estate, and connection association.
+- Estate reassignment is explicit and audited.
+- Historical BankTransactions retain original ownership context (`clientId`, `estateId`, `bankAccountId` at ingest time).
 
-- **FR-T1:** Creating an occupancy creates a new Tenancy (`startAt` inclusive).  
-- **FR-T2:** Move-out sets `endAt` (exclusive) and status closed; does not delete history.  
-- **FR-T3:** Move to another house closes the prior Tenancy and opens a new Tenancy transactionally with compatibility pointer updates.  
-- **FR-T4:** A closed Tenancy is never repointed to a different tenant, house, estate or client.  
-- **FR-T5:** At most one **active** Tenancy per house (enforced).  
-- **FR-T6:** No product requirement for at most one active Tenancy per Tenant unless owners add it later.  
-- **FR-T7:** Corrections to mistaken tenancy data are auditable (no silent reopen/repurpose).
+### 6.2 Reconnect (LOCKED)
 
-### 6.2 Financial ownership
+- Reconnecting the same physical account through another connection **belonging to the same client** MUST reuse the existing BankAccount record and preserve its `_id`.
+- Cross-client transfer is not ordinary reconnect and is **not authorized** by this architecture.
+- Disconnecting a connection MUST stop future sync and credential use without deleting historical BankAccount, BankTransaction, Payment, allocation, or Ledger records.
 
-- **FR-F1:** New RentCharge, Payment, Ledger (rent category) and Deposit rows require `tenancyId`.  
-- **FR-F2:** PaymentAllocation allowed only when Payment and RentCharge share the same `tenancyId`.  
-- **FR-F3:** House/estate balances are aggregates for reporting, not allocation keys.  
-- **FR-F4:** Former tenancy arrears do not auto-apply to a new occupancy of the same house.
+### 6.3 Credentials (LOCKED)
 
-### 6.3 Payment origins
+- Customer-specific bank API credentials MUST be scoped to their owning `BankConnection`.
+- MUST NOT use shared global environment credentials as a fallback for customer-specific authentication.
+- Durable customer credential material MUST be stored in the MongoDB `bankcredentials` collection as an AES-256-GCM encrypted envelope in `BankCredential`.
+- `BankCredential._id` MUST equal the opaque `BankConnection.credentialsRef`; owner, provider and `credentialVersion` MUST match the referencing connection.
+- Plaintext credential material MUST NOT be persisted in MongoDB, Redis, logs, API responses, or migration reports.
+- The destination encryption key MUST be separate from the existing account-number encryption key and backed up independently of MongoDB.
+- Redis MUST NOT be the credential source of truth or a cache for decrypted credentials. It remains limited to temporary infrastructure state.
+- Authentication token state MUST be isolated by connection and credential version.
+- Provider instances MUST NOT share customer authentication state through a provider-name singleton.
 
-Mutually exclusive origin categories:
+### 6.4 Financial hand-off (LOCKED)
 
-| Origin | Required identity / metadata |
-|--------|------------------------------|
-| BANK | `bankTransactionId` |
-| MPESA | `mpesaReceiptId` (future model) |
-| MANUAL | Recording actor, recorded-at, tender method (cash / cheque / bank transfer / M-PESA / other), optional evidence/reference, audit context |
+- After durable BankTransaction persistence, CREDIT processing MUST use existing G3 reconciliation → accountingPosting paths only.
+- G4 MUST NOT create Payment, PaymentAllocation, RentCharge, or Ledger rows outside that path.
 
-- **FR-P1:** Origin ≠ tender method (a MANUAL row may record tender M-PESA).  
-- **FR-P2:** At most one Payment per BankTransaction; at most one per MpesaReceipt.  
-- **FR-P3:** Manually recorded M-PESA tender must not double-post when the same provider receipt is later ingested; link requires **exact** provider receipt identity and auditable resolution — not amount/date heuristics alone.  
-- **FR-P4:** Existing Payments without source IDs are **not** bulk-labelled MANUAL without data review.
+## 7. Functional requirements
 
-### 6.4 Co-op ingestion and matching
+### Connection lifecycle
 
-- **FR-C1:** Preserve BankAccount, BankTransaction, Co-op provider transport and actual authentication behaviour (Basic credential check as implemented — not described as cryptographic signature unless code changes).  
-- **FR-C2:** Shared engine consumes normalized bank transactions, not raw Co-op HTTP shapes.  
-- **FR-C3:** Match order: estate scope → exact house number/alias → Tenancy containing transaction timestamp → unique match or UNMATCHED.  
-- **FR-C4:** Post-move-out payments that only cite a house number stay unmatched until an operator selects a **Tenancy**.  
-- **FR-C5:** Manual assignment targets Tenancy; `matchedHouseId` / `matchedTenantId` remain compatibility fields alongside `matchedTenancyId`.
+| ID | Requirement |
+|----|-------------|
+| G4-FR-CONN-001 | Authorized create/inspect/reauthorize/disconnect for BankConnection |
+| G4-FR-CONN-002 | Connection status reflects auth health (e.g. active, reauth_required, disconnected, failed) without deleting history |
+| G4-FR-CONN-003 | Credential version increments on secret rotation; prior token cache for that connection invalidated |
 
-### 6.5 Retry and recovery
+### Account linkage
 
-- **FR-R1:** Durable reconciliation states on the source (e.g. RECEIVED / CLAIMED / POSTED / FAILED_RETRYABLE / FAILED_TERMINAL).  
-- **FR-R2:** Replay of webhook or poll may re-attempt unposted sources; must not duplicate Payment/allocations/Ledger.  
-- **FR-R3:** Financial posting and source state transition to POSTED commit in one Mongo transaction.  
-- **FR-R4:** Redis may coordinate workers; durable claim/state is in MongoDB.
+| ID | Requirement |
+|----|-------------|
+| G4-FR-ACCT-001 | Link BankAccount to connection + estate under same client |
+| G4-FR-ACCT-002 | Failed or unavailable account validation MUST NOT set account to `connected` / activated |
+| G4-FR-ACCT-003 | Account-level API entitlements MUST be represented and checked before using a capability |
+| G4-FR-ACCT-004 | Same-client physical reconnect updates existing row; preserves `_id` |
 
-### 6.6 Deposits
+### Registry and adapters
 
-- **FR-D1:** One Deposit per Tenancy (not tenant-lifetime unique).  
-- **FR-D2:** Move does not auto-transfer deposit.  
-- **FR-D3:** Approved transfer is explicit, atomic, audited, with source and destination Tenancy and correct liability movements — never as rent credit.
+| ID | Requirement |
+|----|-------------|
+| G4-FR-REG-001 | Capability APIs report only implemented + configured + verified capabilities |
+| G4-FR-REG-002 | Connect attempts for unimplemented providers fail closed |
+| G4-FR-REG-003 | Provider-specific auth, schemas, mapping, webhook verify stay inside the adapter |
 
-### 6.7 Billing configuration
+### Ingestion and idempotency
 
-- **FR-B1:** `effectiveFrom` / `effectiveTo` govern applicability at **billing-period boundaries**.  
-- **FR-B2:** No silent mid-period proration in v1.  
-- **FR-B3:** No overlapping active configs for same house + charge type.  
-- **FR-B4:** Each RentCharge stores applied amount and config/version reference for reproducibility.
+| ID | Requirement |
+|----|-------------|
+| G4-FR-ING-001 | Poll and webhook share one normalize → ownership validate → durable persist → process pipeline |
+| G4-FR-ING-002 | Direction MUST be explicit and validated; unknown/ambiguous direction MUST NOT default to CREDIT |
+| G4-FR-ING-003 | Idempotency lookup MUST match the actual unique index key shape |
+| G4-FR-ING-004 | Preserve unique `{provider, providerTransactionId}` until provider guarantees justify a staged change |
+| G4-FR-ING-005 | Stored but unreconciled transactions remain retryable; sync success MUST NOT imply all posted |
 
-### 6.8 Platform rules
+### Synchronization
 
-- **FR-X1:** Multi-document financial writes require Mongo transactions; if unsupported, **fail closed**.  
-- **FR-X2:** No destructive index drop/sync on ordinary startup; explicit versioned migrations only.  
-- **FR-X3:** Client isolation preserved; estate filters enforced on staff-scoped operations.  
-- **FR-X4:** Admin UI must not put internal Mongo IDs in public URLs; use state-driven navigation.
+| ID | Requirement |
+|----|-------------|
+| G4-FR-SYNC-001 | Each account owns durable checkpoint metadata for last **accepted** work |
+| G4-FR-SYNC-002 | Checkpoints MUST NOT advance past data that failed durable write |
+| G4-FR-SYNC-003 | Scheduled and manual sync use the same account-level coordination |
+| G4-FR-SYNC-004 | Stale workers MUST NOT overwrite newer checkpoint state (fencing / conditional writes) |
 
-## 7. Legacy data policy
+### Webhooks
 
-| Class | Handling |
-|-------|----------|
-| Potentially attributable | Eligible for dry-run proposal with evidence fields listed |
-| Ambiguous | Manual review queue; not auto-assigned |
-| Unattributable from current data | Remain visible as legacy/unattributed; excluded from new-tenancy auto-allocation |
-| Already inconsistent | Detected in dry-run; owner-directed repair |
+| ID | Requirement |
+|----|-------------|
+| G4-FR-WH-001 | Requests pass the verified provider authentication mechanism before processing |
+| G4-FR-WH-002 | Account resolution by verified account identity → exactly one connected account under an active connection |
+| G4-FR-WH-003 | Cryptographic signatures only if official Co-op contract specifies them (**BLOCKED BY VERIFICATION** otherwise) |
 
-No silent write-offs. No invented occupancy dates. No copying current `House.tenantId` onto historical financial rows.
+### Authorization and redaction
 
-## 8. Acceptance criteria (Category B / G3–G4)
+| ID | Requirement |
+|----|-------------|
+| G4-FR-AUTHZ-001 | All authenticated bank APIs enforce client scope and estateFilter |
+| G4-FR-AUTHZ-002 | Credential material, encryption keys, tokens and encrypted envelopes MUST NEVER appear in API responses, logs, or stored rawPayload headers |
 
-1. New occupancy paths create/close Tenancy records transactionally.  
-2. New charges/payments/ledger/deposits carry `tenancyId`; allocation rejects cross-tenancy pairs.  
-3. Co-op webhook + poll retry posts at most one Payment per bank transaction after simulated crash mid-reconcile.  
-4. Matching uses estate + time-bounded tenancy; ambiguous cases stay unmatched.  
-5. Manual payment supports origin MANUAL with actor, tender method and audit metadata.  
-6. House dashboard aggregates do not present prior-occupant arrears as the current occupancy balance.  
-7. Billing config change at period boundary affects subsequent periods only; historical charges unchanged.  
-8. Dry-run migration report classifies legacy rows without writing.  
-9. Integration tests run only against disposable replica-set (or owner-approved alternative).  
-10. Unit + integration evidence recorded before G4 sign-off.
+## 8. Non-functional requirements
 
-## 9. Unresolved owner decisions
+| ID | Requirement |
+|----|-------------|
+| G4-NFR-01 | MongoDB `BankCredential` encrypted-envelope storage; separate encryption-key custody and recovery |
+| G4-NFR-02 | Existing ENCRYPTION_KEY discipline remains for account-number ciphertext / HMAC |
+| G4-NFR-03 | Webhook rate limiting PRESERVE |
+| G4-NFR-04 | Migrations: versioned, dry-run/preflight, allowlisted DB for execute |
+| G4-NFR-05 | Tests: unit + disposable replica-set integration; G3 regression |
+| G4-NFR-06 | Bank transaction retention beyond ten days is permitted |
 
-1. Whether a Tenant may have multiple **simultaneous** active Tenancies across houses (allowed by default in G2 design; product may restrict later).  
-2. Exact MANUAL tender enum and mandatory evidence fields for compliance.  
-3. Operator UX and permissions for historical Tenancy assignment and deposit transfer.  
-4. Whether any legacy open house-level balances require a formal “unattributed suspense” account category in Ledger.  
-5. STK display shortcode vs C2B sandbox shortcode verification (retain explicit simulator gate; do not assume equality).  
-6. Timeline and staffing for dry-run review of ambiguous production rows.  
-7. Acceptance of residual risk if G3 proceeds with only partial integration coverage.
+## 9. Acceptance criteria (summary)
 
-## 10. Document alignment
+1. Two clients cannot observe each other’s credentials, tokens, or accounts.  
+2. Two connections for the same client/provider cannot share token state.  
+3. Duplicate webhook + poll yields at most one BankTransaction and at most one G3 Payment effect.  
+4. Validation failure never activates an account.  
+5. Same-client physical reconnect preserves BankAccount `_id`.  
+6. Checkpoint does not advance past unaccepted pages.  
+7. Unknown transaction direction is rejected, not credited.  
+8. Unimplemented providers are not connectable.  
+9. G3 tenancy isolation and allocation tests still pass.  
+10. No secrets in logs or API bodies.
 
-This PRD, `architecture.md` and `architecture-summary.md` share the same G2 decisions on tenancy lifecycle, payment origins, deposits, legacy balances, Co-op matching/retry, ledger semantics, billing effective dates, Mongo transactions, index policy and delivery gates. Proposed schema is target design, not current code.
+## 10. Delivery phases
 
-## 11. Runtime implementation reconciliation (2026-11-10)
+1. Models, indexes, safe migrations  
+2. Connection-scoped credentials and auth isolation  
+3. Provider registry and adapter contract  
+4. Co-op adapter (verified only)  
+5. Shared ingestion and idempotency  
+6. Account-scoped sync, checkpoints, recovery  
+7. Webhook via shared pipeline  
+8. G3 reconciliation regression  
+9. API contract / frontend boundary  
+10. Monitoring and production readiness  
 
-This is an implementation addendum to the G2 product/design baseline above. The
-`569c96c` code baseline and statements that proposed G3 models do not exist are
-historical descriptions of that baseline, not descriptions of the current
-repository. Current source and live readiness reports must be inspected before
-making implementation claims. This addendum does not declare G3 or G4 complete.
+## 11. External verification gates (remain BLOCKED until evidence)
 
-### 11.1 Allocation authority and compatibility
+| Gate | Until evidence |
+|------|----------------|
+| Co-op grant type, scopes, token TTL/refresh | No guessed scopes; gate live auth features |
+| Account validation response semantics | Fail closed on unavailable/failed validation |
+| Polled AccountTransactions item schema | Do not trust unverified mapper for production finance |
+| TransactionId uniqueness scope | Do not change unique index |
+| SendTransactionINS auth beyond Basic shared secret | Do not invent signatures |
+| Callback subscription/retry guarantees | Capability flagged not provisioned if unknown |
+| Pagination/window ordering | Do not invent checkpoint cursor semantics from guesses |
 
-- `PaymentAllocation` rows are the source from which allocation totals are
-  derived. `Payment.allocatedCents` is a deprecated denormalized compatibility
-  mirror in the current source; a mismatch in that mirror alone is not evidence
-  of missing money or a reason to prevent the HTTP application from starting.
-- Structural allocation problems remain integrity failures: invalid amounts,
-  allocations exceeding a receipt, cross-client/estate/house/tenancy ownership,
-  missing charges, and orphan allocations must still be detected.
-- No routine startup process or automatic migration may rewrite historical
-  payment, allocation, charge, or ledger records to make a cached number agree.
+## 12. Frontend boundary
 
-### 11.2 Application startup versus financial-write readiness
+No frontend source in this backend repository. G4 defines backend HTTP contracts only.
 
-- Database connectivity, transaction-topology verification, and structural
-  allocation validation are startup checks.
-- Required financial index alignment is a separate readiness gate. If explicit
-  index migrations are incomplete, the HTTP application may start, while
-  financial mutation paths remain blocked by their existing readiness checks.
-- Ordinary startup is read-only with respect to financial identity indexes. It
-  must not create or drop those indexes to make readiness appear green.
+## 13. Document control
 
-### 11.3 Legacy index and data handling
+`PRD.md`, `architecture.md`, and `architecture-summary.md` MUST remain consistent. Root G3 documents are not modified by G4. `SOURCE_CROSSWALK.md` records source→target mapping at lock time.
 
-- The exact historical RentCharge unique key is
-  `{ clientId, houseId, period, chargeType, description }`. MongoDB may assign
-  the generated name `clientId_1_houseId_1_period_1_chargeType_1_description_1`
-  when the original schema does not specify a name. Recognition must validate
-  the complete ordered key and unique-index options, not depend solely on the
-  custom name expected by a later migration.
-- Recognizing that exact old index only classifies it for migration preflight;
-  it does not make billing ready and does not authorize dropping it at startup.
-- Historical and development-seed documents may predate current Tenancy,
-  origin, and processing-state fields. Their absence must be classified against
-  the purpose and provenance of the dataset. Do not infer that every stale
-  development fixture is a production financial obligation, and do not infer
-  that every old record should be rewritten to the newest schema.
-- Data repair or index mutation requires a separate, explicit, target-verified
-  migration decision and a reviewed preflight report.
+## G4 provider readiness and lab execution boundaries
+
+**Verified implementation status as of 2026-11-12**
+
+- `implemented` and `operationalReady` are separate states. An adapter existing does not authorize production traffic.
+- COOP has an implemented adapter, but its overall `operationalReady` remains `false`. KCB, EQUITY and NCBA remain disabled shells. No bank provider is currently declared operational.
+- COOP connection creation and account linking may use `COOP_BANK_LAB_MODE=1` only outside production. The default is disabled. The flag does not change the provider readiness profile.
+- COOP FullStatement synchronization requires the account's `statement` entitlement or `poll` entitlement and the registered FullStatement strategy. AccountTransactions list polling remains disabled.
+- Sync entitlement is revalidated during execution. Revocation of both polling and statement entitlements prevents continued synchronization.
+- COOP webhook exposure requires webhook capability readiness or `COOP_WEBHOOK_LAB_OVERRIDE=1` outside production. The override never authorizes production exposure.
+- Lab mode does not bypass credential authentication, account validation, tenant ownership, callback authentication, quarantine or shared transaction ingestion.
+- The inbound Co-op INS Basic credential remains platform/application-level under the currently documented provider evidence. Do not represent it as a per-connection credential.
+- Sandbox verification remains outstanding. Passing local tests is not evidence of a successful provider sandbox session or production approval.

@@ -9,8 +9,10 @@ import { ensureRedisReady, disconnectRedis } from './config/redis.js';
 import { startBackgroundJobs, stopBackgroundJobs } from './jobs/scheduler.js';
 import { logger } from './config/logger.js';
 import { env } from './config/environment.js';
+import { assertBankCredentialEncryptionConfigured } from './services/banking/secretsManager.js';
 
 async function start() {
+  assertBankCredentialEncryptionConfigured();
   await connectDatabase();
   // Bounded wait for a real PING. Production fails hard if Redis never answers.
   await ensureRedisReady({ timeoutMs: 8000 });

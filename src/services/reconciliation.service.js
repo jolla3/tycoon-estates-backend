@@ -24,6 +24,7 @@ import mongoose from 'mongoose';
 import { House } from '../models/House.js';
 import { Tenant } from '../models/Tenant.js';
 import { Payment } from '../models/Payment.js';
+import { BankTransaction } from '../models/BankTransaction.js';
 import { rentService } from './rent.service.js';
 import { smsService } from './sms.service.js';
 import { dateUtil } from '../utils/date.js';
@@ -58,18 +59,107 @@ async function findHouseByReference(clientId, estateId, reference) {
   return House.findOne({ ...scope, paymentReferences: pattern });
 }
 
+
 const sameId = (a, b) => a != null && b != null && String(a) === String(b);
 
+/**
+ * Consume a G4 processing claim inside the same MongoDB transaction as
+ * the financial writes. This conditional write is the ownership fence:
+ * takeover and posting must contend on the same BankTransaction document.
+ */
+async function consumeG4ClaimInTransaction(bankTransaction, claimToken, session, fields = {}) {
+  if (!session) {
+    throw new Error('G4 claim consumption requires the G3 MongoDB transaction');
+  }
+
+  const now = new Date();
+  const committedFields = {
+    ...fields,
+    processingState: 'POSTED',
+    processingClaimToken: null,
+    processingClaimExpiresAt: null,
+    lastProcessingError: null,
+  };
+
+  const result = await BankTransaction.updateOne(
+    {
+      _id: bankTransaction._id,
+      processingState: 'CLAIMED',
+      processingClaimToken: claimToken,
+      processingClaimExpiresAt: { $gt: now },
+    },
+    { $set: committedFields },
+    { session }
+  );
+
+  if (result.matchedCount !== 1) {
+    throw Errors.Conflict(
+      'Bank transaction processing claim is expired, missing, or no longer owned'
+    );
+  }
+
+  Object.assign(bankTransaction, committedFields);
+}
+
+/**
+ * Atomically move a claimed transaction to manual review.
+ * Unlike financial posting, this transition has no multi-document effects,
+ * so one conditional update is the complete ownership boundary.
+ */
+async function markG4ClaimManualReview(bankTransaction, claimToken, fields = {}) {
+  const now = new Date();
+  const reviewFields = {
+    lastProcessingError: null,
+    ...fields,
+    processingState: 'MANUAL_REVIEW',
+    processingClaimToken: null,
+    processingClaimExpiresAt: null,
+  };
+
+  const result = await BankTransaction.updateOne(
+    {
+      _id: bankTransaction._id,
+      processingState: 'CLAIMED',
+      processingClaimToken: claimToken,
+      processingClaimExpiresAt: { $gt: now },
+    },
+    { $set: reviewFields }
+  );
+
+  if (result.matchedCount !== 1) {
+    throw Errors.Conflict(
+      'Bank transaction processing claim is expired, missing, or no longer owned'
+    );
+  }
+
+  Object.assign(bankTransaction, reviewFields);
+}
+
 export const reconciliationService = {
-  async reconcile(bankTransaction) {
+  async reconcile(bankTransaction, options = {}) {
+    const claimToken = options?.claimToken;
+    const hasClaimToken = claimToken !== undefined && claimToken !== null;
+
+    if (hasClaimToken && (typeof claimToken !== 'string' || !claimToken.trim())) {
+      throw Errors.InvalidRequest('A non-empty G4 processing claim token is required');
+    }
     if (bankTransaction.eventType !== 'CREDIT') {
       if (bankTransaction.matchStatus === 'MATCHED') {
         throw Errors.Conflict('MATCHED BankTransaction is not a CREDIT; manual financial review required');
       }
-      bankTransaction.matchStatus = 'UNMATCHED';
-      bankTransaction.processingState = 'MANUAL_REVIEW';
-      bankTransaction.lastProcessingError = 'Only CREDIT bank transactions can be applied as payments';
-      await bankTransaction.save();
+
+      const reviewFields = {
+        matchStatus: 'UNMATCHED',
+        lastProcessingError: 'Only CREDIT bank transactions can be applied as payments',
+      };
+
+      if (hasClaimToken) {
+        await markG4ClaimManualReview(bankTransaction, claimToken, reviewFields);
+      } else {
+        Object.assign(bankTransaction, reviewFields, { processingState: 'MANUAL_REVIEW' });
+        await bankTransaction.save();
+      }
+
       return { matched: false, bankTransaction, reason: 'not_a_credit' };
     }
     if (!Number.isSafeInteger(bankTransaction.amountCents) || bankTransaction.amountCents <= 0) {
@@ -159,9 +249,13 @@ export const reconciliationService = {
             bankTransactionId: bankTransaction._id,
             charges: [],
           }, { session });
-          bankTransaction.processingState = 'POSTED';
-          bankTransaction.lastProcessingError = null;
-          await bankTransaction.save({ session });
+          if (hasClaimToken) {
+            await consumeG4ClaimInTransaction(bankTransaction, claimToken, session);
+          } else {
+            bankTransaction.processingState = 'POSTED';
+            bankTransaction.lastProcessingError = null;
+            await bankTransaction.save({ session });
+          }
         });
       } finally {
         await session.endSession();
@@ -181,19 +275,34 @@ export const reconciliationService = {
 
     const house = await findHouseByReference(clientId, estateId, reference);
     if (!house) {
-      bankTransaction.matchStatus = 'UNMATCHED';
-      bankTransaction.processingState = 'MANUAL_REVIEW';
-      await bankTransaction.save();
+      if (hasClaimToken) {
+        await markG4ClaimManualReview(bankTransaction, claimToken, {
+          matchStatus: 'UNMATCHED',
+        });
+      } else {
+        bankTransaction.matchStatus = 'UNMATCHED';
+        bankTransaction.processingState = 'MANUAL_REVIEW';
+        await bankTransaction.save();
+      }
+
       logger.warn({ clientId: String(clientId), reference, transactionId: bankTransaction.providerTransactionId }, 'Bank transaction could not be matched to a house');
       return { matched: false, bankTransaction };
     }
 
     const tenancy = await tenancyService.findUniqueForHouseAt(clientId, house._id, bankTransaction.transactionDate);
     if (!tenancy) {
-      bankTransaction.matchStatus = 'UNMATCHED';
-      bankTransaction.matchedHouseId = house._id;
-      bankTransaction.processingState = 'MANUAL_REVIEW';
-      await bankTransaction.save();
+      const reviewFields = {
+        matchStatus: 'UNMATCHED',
+        matchedHouseId: house._id,
+      };
+
+      if (hasClaimToken) {
+        await markG4ClaimManualReview(bankTransaction, claimToken, reviewFields);
+      } else {
+        Object.assign(bankTransaction, reviewFields, { processingState: 'MANUAL_REVIEW' });
+        await bankTransaction.save();
+      }
+
       return { matched: false, bankTransaction, reason: 'no_unique_tenancy' };
     }
 
@@ -225,13 +334,22 @@ export const reconciliationService = {
         allocations = result.allocations;
         remainingBalanceCents = result.remainingBalanceCents;
 
-        bankTransaction.matchedHouseId = house._id;
-        bankTransaction.matchedTenantId = tenant?._id || null;
-        bankTransaction.matchedTenancyId = tenancy._id;
-        bankTransaction.matchStatus = 'MATCHED';
-        bankTransaction.processingState = 'POSTED';
-        bankTransaction.lastProcessingError = null;
-        await bankTransaction.save({ session });
+        if (hasClaimToken) {
+          await consumeG4ClaimInTransaction(bankTransaction, claimToken, session, {
+            matchedHouseId: house._id,
+            matchedTenantId: tenant?._id || null,
+            matchedTenancyId: tenancy._id,
+            matchStatus: 'MATCHED',
+          });
+        } else {
+          bankTransaction.matchedHouseId = house._id;
+          bankTransaction.matchedTenantId = tenant?._id || null;
+          bankTransaction.matchedTenancyId = tenancy._id;
+          bankTransaction.matchStatus = 'MATCHED';
+          bankTransaction.processingState = 'POSTED';
+          bankTransaction.lastProcessingError = null;
+          await bankTransaction.save({ session });
+        }
       });
     } finally {
       await session.endSession();

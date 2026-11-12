@@ -37,16 +37,21 @@ const ENDPOINTS = {
 export class CoopBankProvider extends BankProviderInterface {
   constructor(config = {}) {
     super();
+    // baseUrl is platform endpoint config (not customer secret).
     this.baseUrl = config.baseUrl || env.COOP_BASE_URL;
+    // Customer credential fields: connection-scoped only. No env fallback
+    // for clientId/secret/username/password/scope/ins secret on customer paths.
     this.auth = new CoopAuthService({
       baseUrl: this.baseUrl,
-      clientId: config.clientId || env.COOP_CLIENT_ID,
-      clientSecret: config.clientSecret || env.COOP_CLIENT_SECRET,
-      username: config.username || env.COOP_USERNAME,
-      password: config.password || env.COOP_PASSWORD,
-      scope: config.scope || env.COOP_SCOPE,
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      username: config.username,
+      password: config.password,
+      scope: config.scope,
     });
-    this.insBasicSecret = config.insBasicSecret || env.COOP_INS_BASIC_SECRET;
+    this.insBasicSecret = config.insBasicSecret;
+    this.connectionId = config.connectionId || null;
+    this.credentialVersion = config.credentialVersion || null;
   }
 
   getProviderName() {

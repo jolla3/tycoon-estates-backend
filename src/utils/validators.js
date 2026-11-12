@@ -112,10 +112,22 @@ export const schemas = {
 
   connectBankAccount: z.object({
     estateId: z.string().min(1),
+    connectionId: z.string().min(1),
     provider: z.enum(['COOP', 'KCB', 'EQUITY', 'NCBA']),
     accountNumber: z.string().min(4),
     accountName: z.string().min(1),
     currency: z.string().optional(),
+    allowEstateReassignment: z.boolean().optional(),
+  }),
+
+  createBankConnection: z.object({
+    provider: z.enum(['COOP', 'KCB', 'EQUITY', 'NCBA']),
+    displayName: z.string().max(120).optional(),
+    credentialMaterial: z.record(z.any()),
+  }),
+
+  reauthorizeBankConnection: z.object({
+    credentialMaterial: z.record(z.any()),
   }),
 
   sendSms: z

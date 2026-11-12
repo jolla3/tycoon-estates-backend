@@ -22,6 +22,7 @@ export const Errors = {
   BankAccountNotFound: (msg = 'Bank account not found') => new AppError('BANK_ACCOUNT_NOT_FOUND', msg, 404),
   BankProviderUnavailable: (msg = 'Bank provider unavailable') => new AppError('BANK_PROVIDER_UNAVAILABLE', msg, 502),
   BankAuthFailed: (msg = 'Bank authentication failed') => new AppError('BANK_AUTH_FAILED', msg, 502),
+  BankCapabilityUnsupported: (msg = 'Bank capability is not operational') => new AppError('BANK_CAPABILITY_UNSUPPORTED', msg, 501),
   TransactionAlreadyProcessed: (msg = 'Transaction already processed') => new AppError('TRANSACTION_ALREADY_PROCESSED', msg, 409),
   TransactionUnmatched: (msg = 'Transaction could not be matched') => new AppError('TRANSACTION_UNMATCHED', msg, 422),
   PaymentNotFound: (msg = 'Payment not found') => new AppError('PAYMENT_NOT_FOUND', msg, 404),
