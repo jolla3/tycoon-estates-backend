@@ -175,7 +175,7 @@ Add `dispatchRevision: Number`, default `0`, to the proposed `MpesaSubmissionLin
 
 ## 7. Dispatcher claim, lease and crash recovery
 
-The existing scheduler-driven SMS drain remains the only dispatcher and the same `SmsMessage` collection remains the only queue. `processQueuedBatch()` must partition its atomic claim queries by delivery mode: the legacy standard branch claims only `status: queued`, `deliveryMode != G5_PROTECTED` and `dispatchMode != SUPPRESSED` (missing legacy fields remain compatible), while the protected branch claims only `status: queued`, `deliveryMode: G5_PROTECTED` and `dispatchMode != SUPPRESSED`. A `G5_PROTECTED` row must never be returned by the legacy plaintext `phoneNumber`/`message` send branch. The protected path requires a durable lease and fencing token; a Redis scheduler lock alone is not enough.
+The existing scheduler-driven SMS drain remains the only dispatcher and the same `SmsMessage` collection remains the only queue. `processQueuedBatch()` must partition its atomic claim queries by delivery mode: the legacy standard branch claims only `status: queued`, `deliveryMode: { $ne: 'G5_PROTECTED' }` and `dispatchMode: { $ne: 'SUPPRESSED' }` (missing legacy fields remain compatible), while the protected branch claims only `status: queued`, exact `deliveryMode: 'G5_PROTECTED'` and exact `dispatchMode: 'SEND'`. A protected row with missing or malformed dispatch mode is ineligible. A `G5_PROTECTED` row must never be returned by the legacy plaintext `phoneNumber`/`message` send branch. The protected path requires a durable lease and fencing token; a Redis scheduler lock alone is not enough.
 
 Proposed transition model:
 
