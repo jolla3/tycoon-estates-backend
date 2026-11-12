@@ -1,7 +1,7 @@
 // src/models/MpesaPullCheckpoint.js
 //
-// G5.3 — Per-shortcode Pull query cursor. Schema is operational; window rules
-// still depend on the verified 48h provider limit (SECONDARY evidence).
+// G5.3 — Per-shortcode Pull query cursor.
+// Unique merchantProfileId index is migration-controlled (autoIndex: false).
 
 import mongoose from 'mongoose';
 
@@ -16,9 +16,7 @@ const MpesaPullCheckpointSchema = new Schema(
       required: true,
     },
     businessShortCode: { type: String, required: true },
-    /** Inclusive start of last successful fully ingested window (UTC). */
     windowStartAt: { type: Date, default: null },
-    /** Exclusive end of last successful fully ingested window (UTC). */
     windowEndAt: { type: Date, default: null },
     lastOffsetValue: { type: String, default: '0' },
     lastQueryStatus: {
@@ -30,13 +28,14 @@ const MpesaPullCheckpointSchema = new Schema(
     lastErrorCode: { type: String, default: null },
     leaseOwner: { type: String, default: null },
     leaseExpiresAt: { type: Date, default: null },
+    lastQueryReference: { type: String, default: null },
   },
-  { timestamps: true }
+  { timestamps: true, autoIndex: false, collection: 'mpesapullcheckpoints' }
 );
 
 MpesaPullCheckpointSchema.index(
   { merchantProfileId: 1 },
-  { unique: true }
+  { unique: true, name: 'uniq_mpesa_pull_checkpoint_profile' }
 );
 
 export const MpesaPullCheckpoint = mongoose.model(
