@@ -2,7 +2,8 @@
 //
 // G5.3 — Canonical merchant-side M-PESA receipt.
 // Provider ingestion only — no G3 Payment posting in this slice.
-// Explicit collection: mpesatransactions (mpesa + transactions).
+// Explicit collection: mpesatransactions
+// autoIndex: false — provisional unique index is migration-controlled only.
 
 import mongoose from 'mongoose';
 import {
@@ -22,9 +23,7 @@ const MpesaTransactionSchema = new Schema(
       default: null,
       index: true,
     },
-    /** Daraja BusinessShortCode / Till shortcode observed on the receipt. */
     businessShortCode: { type: String, required: true },
-    /** External M-PESA receipt / TransID — not a Payment ObjectId. */
     receiptNumber: { type: String, required: true },
     amountCents: { type: Number, required: true },
     currency: { type: String, default: 'KES' },
@@ -42,10 +41,8 @@ const MpesaTransactionSchema = new Schema(
       index: true,
     },
     conflictReason: { type: String, default: null },
-    /** First accepted normalized snapshot for conflict comparison. */
     acceptedAmountCents: { type: Number, required: true },
     acceptedTransactionAt: { type: Date, required: true },
-    // Claim / posting fields reserved for later G5 attribution — unused here.
     claimState: {
       type: String,
       enum: ['UNCLAIMED', 'CLAIMED', 'REVIEW', 'REJECTED'],
@@ -57,8 +54,10 @@ const MpesaTransactionSchema = new Schema(
       default: 'NOT_POSTED',
     },
     paymentId: { type: Schema.Types.ObjectId, ref: 'Payment', default: null },
+    /** Future multi-tenancy child Payments (G5.1) — no G3 writes in this slice. */
+    paymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
   },
-  { timestamps: true, collection: 'mpesatransactions' }
+  { timestamps: true, collection: 'mpesatransactions', autoIndex: false }
 );
 
 MpesaTransactionSchema.path('amountCents').validate(
@@ -69,11 +68,13 @@ MpesaTransactionSchema.path('amountCents').validate(
 /**
  * Provisional uniqueness: provider + shortcode + receipt.
  * Scope remains PROPOSED until B01/B02 prove merchant hierarchy identity.
+ * Declared for documentation; autoIndex is false so boot does not install it.
+ * Guarded migration + readiness gate required before treating as authority.
  * Do not treat this alone as authority to post G3 Payments.
  */
 MpesaTransactionSchema.index(
   { provider: 1, businessShortCode: 1, receiptNumber: 1 },
-  { unique: true, name: 'uniq_safaricom_shortcode_receipt' }
+  { unique: true, name: 'uniq_safaricom_shortcode_receipt_provisional' }
 );
 MpesaTransactionSchema.index({ verificationState: 1, transactionAt: -1 });
 MpesaTransactionSchema.index({ clientId: 1, transactionAt: -1 });
