@@ -1,9 +1,8 @@
 // src/services/mpesa/darajaPull.service.js
 //
-// G5.3 — Pull Transactions registration, query, lease, and result ingestion.
-// Query method: POST (SDK secondary evidence; portal GET discrepancy remains BLOCKED).
-// Do not implement speculative dual GET/POST paths.
-// Checkpoint advances only after durable ingestion of returned rows.
+// G5.3 — Pull registration, query, lease, result ingestion.
+// Registration does not auto-verify pullCapability.
+// allPersisted only for empty_valid or fully persisted rows.
 
 import crypto from 'crypto';
 import axios from 'axios';
@@ -90,6 +89,7 @@ export async function registerPull(
     registrationState = 'ACCEPTED';
   }
 
+  // Registration success updates registration state only — not pullCapability.
   if (profile) {
     await MpesaMerchantProfile.updateOne(
       { _id: profile._id, pullRegistrationState: 'REQUESTED' },
@@ -100,10 +100,6 @@ export async function registerPull(
             registrationState === 'ACCEPTED' || registrationState === 'ALREADY_REGISTERED'
               ? new Date()
               : null,
-          pullCapability:
-            registrationState === 'ACCEPTED' || registrationState === 'ALREADY_REGISTERED'
-              ? 'VERIFIED'
-              : profile.pullCapability,
         },
       }
     );
@@ -156,11 +152,6 @@ export async function queryPullTransactions(
   };
 }
 
-/**
- * Extract transaction rows and classify response shape.
- * empty_valid: known envelope with zero rows
- * unsupported: body present but no recognized row array
- */
 export function extractPullRows(body) {
   if (body == null) return { shape: 'empty_body', rows: [] };
   if (typeof body !== 'object') return { shape: 'unsupported', rows: [] };
@@ -176,22 +167,18 @@ export function extractPullRows(body) {
   return { shape: 'unsupported', rows: [] };
 }
 
-/**
- * Persist + process each Pull row through the shared durable inbox.
- * Failed row persistence prevents allPersisted=true and checkpoint advancement.
- */
 export async function ingestPullPayload(body, { sourceChannel = INGESTION_SOURCE.PULL_QUERY } = {}) {
   const extracted = extractPullRows(body);
   const rows = extracted.rows;
   const results = [];
   let persistFailures = 0;
 
-  if (extracted.shape === 'unsupported') {
+  if (extracted.shape !== 'empty_valid' && extracted.shape !== 'rows') {
     return {
       rowCount: 0,
       persistFailures: 0,
       allPersisted: false,
-      responseShape: 'unsupported',
+      responseShape: extracted.shape,
       results: [],
     };
   }
@@ -249,10 +236,6 @@ export async function ensurePullCheckpoint(merchantProfile) {
   return MpesaPullCheckpoint.findOne({ merchantProfileId: merchantProfile._id });
 }
 
-/**
- * Acquire lease with fencing token. Returns BUSY when another worker holds a live lease.
- * Avoids upsert collision against unique merchantProfileId index.
- */
 export async function acquirePullLease(merchantProfile, ownerId, { ttlMs = 120_000 } = {}) {
   await ensurePullCheckpoint(merchantProfile);
   const now = new Date();
