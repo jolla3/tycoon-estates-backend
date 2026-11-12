@@ -974,3 +974,23 @@ No alternate direct production Tenancy create/status write was identified in the
 Before G5.2, fix and test the `moved_out` transaction boundary and establish the seed/no-send policy. Before G5.3, design the public bearer endpoint middleware ordering, bounded body parser, abuse-control outage behaviour, frontend hosting owner, and Celcom queue recovery contract. Before G5.7, test the exact old-tenancy credit cases above and add MPESA idempotency through the existing G3 service.
 
 **G5.0.2 result: documentation review only. G5.1 implementation is NO-GO at this point.** The original owner authorization has not been supplied in this conversation, the final merchant identity/credential schema scope remains subject to B01/B09, and the security/lifecycle dependencies above need to be reflected in the design. This is not a claim that every B01–B10 decision blocks schema design; the blocker is the explicit authorization boundary plus the unresolved schema scope where those decisions matter. G5 remains code-free and migration-free.
+
+
+## 25. G5.1 schema/index design decision record
+
+The reviewable schema and index proposal is in `docs/g5/G5_1_SCHEMA_INDEX_DESIGN.md`. It is a design artifact only.
+
+The proposal reduces the initial conceptual model set from six to five core records: MerchantProfile, SubmissionLink, SmsSubmission, IngestionEvent, and Transaction. The canonical Transaction owns the one-winning claim, lease/fencing state, and Payment reference; a separate PaymentClaim collection is deferred unless implementation evidence demonstrates an independent lifecycle is necessary. Pull checkpoint schema is deferred until the actual B02 contract supplies the resumable unit.
+
+Important boundaries:
+
+- Link association is unique per immutable Tenancy; secret rotation updates the same link record.
+- Token lookup uses a unique digest; raw bearer tokens are not stored.
+- The external Safaricom receipt remains a string on MpesaTransaction. Payment.mpesaReceiptId links to the internal transaction ObjectId.
+- Merchant identity and receipt uniqueness are not finalized until B01/B02.
+- No TTL or retention index is proposed while B05 is unresolved.
+- No credential storage is proposed while B09 is unresolved.
+- Existing Payment.mpesaReceiptId unique partial index declaration must be verified in the live database before posting relies on it.
+- Recommended public submission limiter default is fail-closed during Redis outage unless an independently verified upstream layer offers equivalent protection. This remains a technical recommendation, not an owner decision.
+
+**G5.1 design verdict:** GO for schema/index design review; NO-GO for application models, migrations, readiness wiring, routes, workers, or posting code until explicit owner authorization.

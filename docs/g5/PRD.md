@@ -310,3 +310,10 @@ The current `ledgerService.balanceForTenancy()` returns `historicalCoverage: 'UN
 The public landing-page implementation/hosting owner is also not identified in the backend repository. Before G5.3, record whether the page belongs to a separate frontend repository or a separately deployed static application, and identify its owner. The browser requirements remain: fragment-only initial token transport, immediate fragment removal, no third-party analytics, no persistent browser storage, no-referrer, no-store, and restrictive CSP.
 
 These D-items are engineering/design gates, not replacements for owner decisions G5-B01 through G5-B10. No provider contract or business policy has been inferred from them.
+
+
+## 14. G5.1 schema/index design decision
+
+The schema and index proposal is maintained in [G5_1_SCHEMA_INDEX_DESIGN.md](G5_1_SCHEMA_INDEX_DESIGN.md). It is documentation-only and does not authorize model or migration implementation.
+
+The proposal deliberately starts with five core records and stores the one-winning claim/processing lease on the canonical transaction rather than creating a separate claim collection. B01/B02 still block final merchant and receipt uniqueness keys; B09 blocks credential ownership; B05 blocks retention/TTL decisions. The design review may proceed without resolving unrelated provider contracts, but no operational feature may rely on those unresolved values.

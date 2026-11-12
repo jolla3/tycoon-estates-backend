@@ -269,3 +269,16 @@ The `moved_out` update currently writes Tenant and closes Tenancy separately. Re
 ### Git branch protection evidence
 
 The GitHub branch API reported `protected: false` for `main` during this review. The classic branch-protection detail endpoint returned 403 to the connected integration, and the visible repository rulesets query returned an empty list. Therefore repository protection is **not verified** by this session. Treat the no-touch rule for `main` as an absolute workflow policy, not as something GitHub is known to enforce. Before any push, re-read the live feature-branch HEAD and use a non-force fast-forward update with the expected prior SHA. All G5 changes remain documentation-only until a separate explicit implementation authorization.
+
+
+## 16. G5.1 schema/index design boundary
+
+Use `docs/g5/G5_1_SCHEMA_INDEX_DESIGN.md` as the current schema/index proposal. Treat all unapproved schema fields and indexes as PROPOSED, not existing.
+
+- Do not implement a separate PaymentClaim collection unless a concrete independent lifecycle requires it; the proposal places the winning claim and fenced posting state on the canonical MpesaTransaction.
+- Do not finalize merchant identity or receipt uniqueness before B01/B02 evidence.
+- Do not introduce a Pull checkpoint schema before the authenticated provider contract defines the resumable cursor/window/page unit.
+- Do not choose credential ownership/storage before B09.
+- Do not add TTL/retention indexes before B05.
+- Public bearer submission should fail closed when the shared limiter is unavailable unless equivalent independent upstream protection is verified. This is the preferred technical default, not an owner-approved product rule.
+- Design approval does not authorize application implementation. A separate explicit owner instruction must name the implementation slice.
