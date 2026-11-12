@@ -191,7 +191,7 @@ Lifecycle transitions affecting Tenant, Tenancy, the Tenant-level MpesaSubmissio
 ### Real Mongo integration/concurrency tests
 
 - Tenant + Tenancy + link + encrypted outbox atomic create/rollback.
-- Move creates distinct old/new links; old link never retargets.
+- Adding/moving a unit retains the same Tenant-level link; each Tenancy's history remains separate.
 - Close/move and claim/post serialize against the correct tenancy revision.
 - moved_out path is transactional and requires the exact expected Tenancy ID.
 - Stale move/move-out requests cannot mutate a later Tenancy or clear a different occupant's House pointer.
@@ -206,7 +206,7 @@ Lifecycle transitions affecting Tenant, Tenancy, the Tenant-level MpesaSubmissio
 - Crash/failure at every step between Payment insert, allocation insert, Ledger insert, and claim update produces all-or-nothing state.
 - Stale claim worker cannot commit after lease takeover.
 - Closed-tenancy payment allocates only existing old-tenancy charges; no new charge is generated.
-- Overpayment is old-tenancy credit or blocked for review; new tenancy unchanged.
+- Overpayment remains the Tenant's carried-forward credit for future combined rent within the same Estate; test the G3 Tenant-account credit/application mechanism and exact Tenant isolation.
 - `SETTLED` is blocked when historical coverage is unverified, credit unresolved, or claims remain.
 - BANK and MANUAL regression behaviour unchanged.
 
@@ -329,7 +329,7 @@ The independent verdict was **APPROVE WITH REQUIRED CHANGES**. The correction re
 - Never clear an old House pointer without _id + clientId + tenantId: expectedTenantId and matchedCount === 1. Never close a Tenancy if its exact House pointer compare matched zero.
 - A destination House with any non-null tenantId is a conflict; do not automatically repair an orphan pointer, even when it equals the moving tenant.
 - A replay is a no-op only when the exact expected Tenancy is already CLOSED with closeReason MOVE_OUT. It must never touch a later occupancy.
-- For an active Tenant, currentTenancyId requires exactly one tenant-scoped ACTIVE Tenancy and matching Tenant/House ownership. Zero/multiple rows or pointer mismatch is a conflict.
+- For an active Tenant, `activeTenancies[]` contains every ACTIVE Tenancy after each House pointer/ownership match is checked. Multiple active rows across different Houses are valid.
 - Pass actor identity into create/move/move-out lifecycle services and same-session audit writes.
 - Extend strict SMS enums for g5_onboarding_link, cancelled and suppressed before inserting those values.
 - Keep mutually exclusive claim branches: standard positively allows only deliveryMode absent or STANDARD and dispatchMode absent or SEND (explicit null/malformed values are excluded); protected requires exact G5_PROTECTED and SEND. Protected messages never use plaintext fallback.
@@ -349,7 +349,7 @@ The full pinned-source audit is in docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.m
 - Generic House PATCH must not set House.status; houseService.update() must not apply occupancy status as a generic field. Do not deactivate a House while it has a non-null tenant pointer or ACTIVE Tenancy.
 - Generic Tenant PATCH must not set status active without a new ACTIVE Tenancy. Move-out must carry exact expectedTenancyId.
 - Harden tenancyService.open() inside the caller session: exact Tenant/House/Estate ownership, active House, null House pointer, no existing ACTIVE Tenancy for that Tenant, and Tenant.updateOne().matchedCount===1. Never accept a stale same-Tenant pointer as a repair opportunity.
-- Confirm the one-ACTIVE-Tenancy-per-Tenant invariant. The existing unique partial index is per House only. The proposed {clientId, tenantId} partial ACTIVE index is not installable until owner confirmation, duplicate preflight and migration authorization.
+- Enforce one ACTIVE Tenancy per House only. Do not create `{ clientId, tenantId }` partial ACTIVE uniqueness; one Tenant may occupy multiple Houses in the same Estate.
 - Demo seed Houses start vacant; tenancy opening is the only operation that marks them occupied. Seed paths stay G5-disabled.
 - Preserve ledgerRev write fences in accountingPosting, ledger and reconciliation. They are not occupancy mutations and are part of G3 financial serialization.
 - Direct test fixture creation may construct historical intervals, but lifecycle behaviour tests must exercise production lifecycle services and assert House/Tenant/Tenancy atomicity.

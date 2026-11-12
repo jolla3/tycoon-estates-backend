@@ -26,7 +26,7 @@ The following are source observations, not implemented G5 behaviour:
 |---|---|---|
 | Tenant creation | `tenantService.create()` starts a Mongo session and creates Tenant plus `tenancyService.open()` in the same `withTransaction()` callback. | Link and protected outbox can join the existing session at the top-level create use case. |
 | Low-level Tenancy open | `tenancyService.open()` accepts an outer session, but is also called directly by `scripts/seedDemoClient.js`. | Do not make every low-level `open()` call implicitly create a G5 link or send SMS. Provisioning must be an explicit top-level lifecycle decision. |
-| House move | `tenancyService.moveToHouse()` owns a transaction that closes the old Tenancy, updates House pointers, creates a new Tenancy and updates Tenant. It does not accept an outer session. Its old-House pointer-clear filter matches only House ID/client, not expected old `tenantId`. | Refactor transaction ownership and add an exact `{ _id, clientId, tenantId: expectedTenantId }` pointer compare before clearing. Require the request's `expectedCurrentTenancyId`; a stale move must return conflict without acting on whichever tenancy happens to be current later. |
+| House move | `tenancyService.moveToHouse()` owns a transaction that closes the old Tenancy, updates House pointers, creates a new Tenancy and updates Tenant. It does not accept an outer session. Its old-House pointer-clear filter matches only House ID/client, not expected old `tenantId`. | Refactor transaction ownership and add an exact `{ _id, clientId, tenantId: expectedTenantId }` pointer compare before clearing. Require the request's `expectedTenancyId` for the exact unit being moved; a stale move must return conflict without acting on another active tenancy. |
 | Move-out update | `tenantService.update(status='moved_out')` first updates Tenant outside a transaction, then calls `tenancyService.close()` separately. If it cannot find the old Tenant as the active occupant of mutable `Tenant.houseId`, its fallback unconditionally clears the House pointer/status; a stale request can therefore clear a later occupant. | Replace the split flow. Require the exact expected Tenancy ID from the caller, query by client + tenant + expected tenancy, and never clear House pointers unless the House still points to that exact tenant. A stale request must not act on a later occupancy. |
 | Close helper | `tenancyService.close()` accepts an outer session and updates Tenancy, House and Tenant together when supplied. | Reuse this domain operation in the unified move-out transaction; do not duplicate the close logic. |
 | Controller actor propagation | `tenantService.create()` and `tenantService.moveToHouse()` accept actor IDs, but the inspected tenant controller does not pass the current authenticated user. The move-out update signature also has no actor parameter. | Propagate an explicit lifecycle actor/context from each authenticated controller into the use case so Tenancy actor fields and in-transaction audit records identify the initiator. |
@@ -82,7 +82,7 @@ The current authenticated tenant detail service uses the active Tenancy internal
 
 ### 4.3 Move
 
-A move is one lifecycle transaction. Refactor `tenancyService.moveToHouse()` to accept a caller-owned session or move the transaction boundary into one shared lifecycle use case; do not nest independent transactions. The move request must include `expectedCurrentTenancyId` (the ACTIVE Tenancy the caller intends to move). In the transaction, re-read exactly `{ _id: expectedCurrentTenancyId, clientId, tenantId, status: ACTIVE }`; if it does not match, return a conflict without selecting a different current Tenancy. After moving, a replay of the old request must not move the tenant again; it may return a conflict requiring the client to refresh. A new move uses the new current Tenancy ID.
+A move is one lifecycle transaction. Refactor `tenancyService.moveToHouse()` to accept a caller-owned session or move the transaction boundary into one shared lifecycle use case; do not nest independent transactions. The move request must include `expectedTenancyId` (the ACTIVE Tenancy the caller intends to move). In the transaction, re-read exactly `{ _id: expectedCurrentTenancyId, clientId, tenantId, status: ACTIVE }`; if it does not match, return a conflict without selecting a different current Tenancy. After moving, a replay of the old request must not move the tenant again; it may return a conflict requiring the client to refresh. A new move uses the new current Tenancy ID.
 
 The existing `SmsMessage.idempotencyKey` schema declaration is unique, but G5.2 must inspect the exact live `smsmessages` index and duplicate state before using it as the outbox uniqueness barrier. The unique link-per-Tenancy index from G5.1 must also pass runtime readiness.
 
@@ -279,7 +279,7 @@ A compatibility plan for existing SmsMessage rows without `dispatchMode` must pr
 - Inject failure after each write in create and prove all-or-nothing rollback.
 - G5 `DISABLED` create/move preserves normal G3 behaviour and creates no new link/outbox; an existing old link still receives its close/transfer lifecycle transition.
 - G5 `REQUIRED` without a unique operational merchant or encryption readiness aborts the whole operation.
-- Move creates distinct old/new Tenancies and distinct links; old link remains bound to old Tenancy and transitions to `ARREARS_ONLY`.
+- Move closes/opens only the selected Tenancy; the Tenant-level link persists and remains associated with that Tenant.
 - Same-house move is a no-op with no duplicate link/outbox.
 - `moved_out` failure rolls back Tenant, Tenancy, House, link and audit; repeated move-out cannot mutate a later tenancy.
 - Stale `expectedCurrentTenancyId` move request after a subsequent move cannot move the tenant back to an old House.
@@ -434,7 +434,7 @@ The send-start transaction reads the link's observed dispatchRevision, then perf
 3. A CLOSED Tenancy with another close reason is not treated as an idempotent move-out.
 4. Old-House pointer mismatch and close() House matchedCount === 0 both roll back all lifecycle/link/outbox/audit changes.
 5. Destination House with any non-null tenantId and no ACTIVE Tenancy is rejected; include same-tenant and foreign-tenant pointer fixtures.
-6. currentTenancyId requires exactly one tenant-scoped ACTIVE row and matching Tenant/House/Tenancy pointers.
+6. `activeTenancies[]` includes every tenant-scoped ACTIVE row and matching Tenant/House/Tenancy pointers.
 7. Controller actor identity reaches Tenancy fields and same-session audit for create, move and move-out.
 8. Schema validation accepts g5_onboarding_link, cancelled and suppressed. Suppressed seed SMS is never claimed and provider mock records zero calls.
 9. A legacy SMS missing deliveryMode and dispatchMode remains claimable by standard branch; protected records never enter it.
@@ -511,7 +511,7 @@ Mandatory preconditions inside the caller's Mongo session:
 2. Derive estateId from House; reject a supplied estateId that differs.
 3. Require House.tenantId=null and no ACTIVE Tenancy for the House. Any non-null pointer is a conflict, including the same Tenant. Do not silently repair.
 4. Re-read exact Tenant by _id + clientId and verify its ownership/state is consistent with the target House/Estate. A Tenant created earlier in tenantService.create() is visible in the same session.
-5. Require no other ACTIVE Tenancy for that Tenant.
+5. Require no other ACTIVE Tenancy for the target House; other ACTIVE Tenancies for the same Tenant in different Houses within the same Estate are permitted.
 6. Create Tenancy, update House and Tenant in the same session; require Tenant.updateOne().matchedCount===1 or abort.
 7. Keep low-level open() free of G5 provisioning. Only the top-level approved lifecycle orchestrator creates link/outbox.
 
@@ -542,7 +542,7 @@ Concurrent opens for one Tenant across different vacant Houses may both commit; 
 
 ### 17.7 Implementation gate
 
-Before G5.2 application work, rerun this scan at the authorized implementation HEAD; resolve D19/D20; confirm the one-active-Tenancy-per-Tenant invariant and duplicate preflight; harden open(); and remove generic occupancy mutation paths. No application code, database, migration, index, provider, key or test environment was changed or exercised by this audit. G5.2 remains NO-GO for implementation pending explicit bounded owner authorization.
+Before G5.2 application work, rerun this scan at the authorized implementation HEAD; resolve D19/D20; preserve the existing per-House uniqueness barrier; do not add a per-Tenant unique index; harden open(); and remove generic occupancy mutation paths. No application code, database, migration, index, provider, key or test environment was changed or exercised by this audit. G5.2 remains NO-GO for implementation pending explicit bounded owner authorization.
 
 
 ## 21. G5.2.3 — Tenant-level link and multi-unit lifecycle correction
@@ -556,3 +556,12 @@ This section supersedes prior G5.2 wording that binds the link and protected SMS
 - A surplus becomes Tenant-account carry-forward credit in G3, applied to future combined rent due within the same client/Estate. The current Tenancy-only credit functions are insufficient; this is an explicit G3 extension, not a new M-PESA wallet.
 - Each Client's rent effective-date/proration policy is applied by existing G3 billing configuration. G5 consumes the resulting RentCharges and must not invent an effective date.
 - This correction remains documentation-only. No G3 source code, model, index, migration, route, SMS configuration, key, worker or provider change is authorized.
+
+
+## 22. G5.2.4 supersession note — link and occupancy rules
+
+Sections earlier in this decision record that describe one link per Tenancy, a link-bound `tenancyId`, a new link on every move, a singular `currentTenancyId`, or one ACTIVE Tenancy per Tenant are superseded by §21.
+
+The authoritative rules are: one Tenant-level link per `{ clientId, estateId, tenantId }`; multiple ACTIVE Tenancies for one Tenant are valid in different Houses within the same Estate; per-House ACTIVE uniqueness remains; move/close names one exact `expectedTenancyId`; the Tenant DTO returns `activeTenancies[]`; combined M-PESA receipts are claimed once and settled through G3 per-Tenancy postings plus any Tenant-account carry-forward credit.
+
+G5 uses the existing SMS provider and sender configuration. Client rent effective-date and proration policy is owned by Client configuration/G3 billing. G5 attributes verified receipts to the obligations G3 generates.

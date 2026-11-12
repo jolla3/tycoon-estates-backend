@@ -34,7 +34,7 @@ Once B01/B02 prove the correct merchant receipt scope and the exact unique `{ me
 
 This claim gate is not itself the external-receipt uniqueness barrier. The existing unique partial `Payment.mpesaReceiptId` index can prevent two Payment documents from referencing the same internal `MpesaTransaction._id`; it cannot prevent two duplicate `MpesaTransaction` documents representing one physical Safaricom receipt from each receiving a Payment. Therefore automatic MPESA posting MUST remain disabled until B01/B02 establish the canonical receipt key and the exact database unique index is present and verified. Before that gate is satisfied, provider events may be durably ingested or quarantined for review, but duplicate candidates must not become financially postable.
 
-A second submission against another link is still durably represented by its own SmsSubmission and marked as conflict; it must not overwrite the first successful association. The transaction record is the one-winner gate. A separate claim collection would initially duplicate this identity and its state. Reintroduce it only if evidence shows claims need a distinct multi-record lifecycle or independent audit semantics that cannot be represented without bloating Transaction.
+A repeated submission of a receipt through the same Tenant-level link is durably represented by its own SmsSubmission and handled idempotently; it must not create another winning Tenant claim. The transaction record is the one-winner gate. A separate claim collection would initially duplicate this identity and its state. Reintroduce it only if evidence shows claims need a distinct multi-record lifecycle or independent audit semantics that cannot be represented without bloating Transaction.
 
 ### Why no Pull checkpoint model yet?
 
@@ -348,22 +348,9 @@ The four values are deliberately separate:
 
 Do not overload one field for another domain. The live smsmessages.idempotencyKey index remains unverified until a read-only database preflight confirms its exact unique key and duplicate state; the Mongoose unique:true declaration is not sufficient evidence.
 
-## 12. G5.2.2 follow-on ACTIVE Tenancy uniqueness proposal
+## 12. G5.2.2 follow-on — WITHDRAWN per-Tenant ACTIVE Tenancy index
 
-The current Tenancy schema has a partial unique index on houseId for status ACTIVE. Tenant has one mutable houseId, moveToHouse() resolves one active Tenancy by clientId+tenantId+ACTIVE, and the G5 API exposes one currentTenancyId.
-
-To enforce that one-current-occupancy contract under concurrent opens, propose one additional partial unique index on the existing tenancies collection:
-
-| Collection | Proposed keys | Partial filter | Proposed name | Gate |
-|---|---|---|---|---|
-| tenancies | { clientId: 1, tenantId: 1 } unique | { status: 'ACTIVE' } | uniq_active_tenancy_per_client_tenant | Owner confirms one ACTIVE Tenancy per Tenant; dry-run duplicate preflight and live index inspection pass before migration. |
-
-This is an additional constraint on an existing G3 collection, not a sixth G5 model. It does not replace the per-House unique index.
-
-If a Tenant may lease multiple Houses concurrently, do not install this index. The current Tenant.houseId, moveToHouse() and currentTenancyId contract cannot represent that workflow; stop and redesign the occupancy model first.
-
-No index creation or migration is authorized by this proposal.
-
+The earlier proposal for a unique partial `{ clientId, tenantId }` index on ACTIVE Tenancies is withdrawn by the owner's 12 November 2026 decision. One Tenant may have multiple simultaneous ACTIVE Tenancies in different Houses within the same Estate. Do not create, migrate, or check for `uniq_active_tenancy_per_client_tenant`. Preserve the existing partial unique ACTIVE-Tenancy-per-House index. `Tenant.houseId` is not an occupancy authority.
 
 ## 6. G5.1.2 — Tenant-level link, combined receipt and carry-forward credit
 

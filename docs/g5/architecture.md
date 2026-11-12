@@ -110,8 +110,8 @@ These items are release gates. See `PRD.md` and `G5_IMPLEMENTATION_GUARDRAILS.md
 
 | Existing component | G5 use | Constraint |
 |---|---|---|
-| `Tenancy` | Historical occupancy and ownership identity | Link stores exact `Tenancy._id`; never follow mutable current Tenant/House pointers. |
-| `RentCharge` | Existing rent obligations | Only eligible rows attached to the exact link-bound tenancy can be considered. |
+| `Tenancy` | Historical occupancy and accounting identity | Tenant-level link identifies the Tenant; each G3 payment allocation resolves to exact Tenancy. |
+| `RentCharge` | Existing rent obligations | Eligible obligations across the validated Tenant's Tenancies may be considered; each allocation remains scoped to its exact charge/Tenancy. |
 | `PaymentAllocation` | Allocation rows | No second allocation collection or parallel allocator. |
 | `Payment` | Rent receipt accounting record | Extend with MPESA linkage using existing `origin` and `mpesaReceiptId` semantics. |
 | `Ledger` / `ledgerService` | Accounting movement and rent account history | G5 never writes Ledger directly. |
@@ -125,8 +125,8 @@ These items are release gates. See `PRD.md` and `G5_IMPLEMENTATION_GUARDRAILS.md
 
 | Component | Required change | Verification before change |
 |---|---|---|
-| `tenantService.create()` | Create link + protected outbound notification item in the same transaction after exact Tenancy creation. | Trace all creation callers and transaction/session conventions. |
-| `tenancyService.moveToHouse()` | Close old Tenancy and create a separate new link/outbox for new Tenancy in one transaction. | Trace all move callers and any side effects outside the transaction. |
+| Tenant's first G5-provisioned lifecycle operation | Create one Tenant-level link + protected outbound notification in the same transaction. Later unit additions retain that link. | Trace all creation callers and transaction/session conventions. |
+| `tenancyService.moveToHouse()` | Close/open only the selected Tenancy in one transaction; retain the Tenant-level link and leave other active Tenancies untouched. | Trace all move callers and any side effects outside the transaction. |
 | `tenantService.update(status='moved_out')` | Replace the current split status/close flow with a single transaction-safe lifecycle operation before coupling link state. | Trace callers, status transitions, tenancy close and rollback effects. |
 | Other close/void/admin paths | Apply link transitions consistently without retargeting links. | Find every Tenancy status writer and direct model update. |
 | `SmsMessage` / `sms.service.js` | Add protected outbound payload, session-aware enqueue, decryption-at-send, and history/API redaction. | Trace `queueSms`, `withIdempotency`, worker, history, tenant detail, serializer and logs. |
@@ -331,7 +331,7 @@ Do not apply an arbitrary short calendar TTL to a permanent tenancy association.
 - A `VOID` Tenancy cannot receive automatic posting; hold its link for authorized review or revoke only under the correction/audit process. No current void service was identified in the inspected baseline.
 - The audited `tenantService.update(status='moved_out')` path is a split write. Its fallback can unconditionally clear a House pointer when no matching active old Tenancy is found; this can affect a later occupant. Replace it with one transaction covering Tenant, exact expected Tenancy, conditional House pointer, old-link transition and audit.
 - Tenant detail must expose `activeTenancies[]` from all ACTIVE records for the Tenant within the client/Estate, each with its own House, Tenancy ID and tenancy-scoped balance. Move/move-out requests identify the exact `expectedTenancyId`; never infer one current Tenancy from the singular Tenant.houseId field. Controllers must pass the authenticated actor ID into create/move/move-out lifecycle services.
-- `tenancyService.moveToHouse()` clears the old House pointer using only House ID/client and does not reject a non-null conflicting destination House tenant pointer when no active Tenancy row exists. Require `expectedCurrentTenancyId`, exact source House `{ _id, clientId, tenantId }` match with one row modified, and a vacant/consistent destination pointer before assigning it.
+- `tenancyService.moveToHouse()` clears the old House pointer using only House ID/client and does not reject a non-null conflicting destination House tenant pointer when no active Tenancy row exists. Require `expectedTenancyId` for the selected unit, exact source House `{ _id, clientId, tenantId }` match with one row modified, and a vacant/consistent destination pointer before assigning it.
 - G5 provisioning must be an explicit trusted `DISABLED`/`REQUIRED` decision. REQUIRED fails the whole lifecycle operation if one operational merchant mapping or protected outbox write is unavailable; DISABLED creates no new link/outbox but still transitions any existing old link atomically when its Tenancy closes/transfers. The protected message uses the new `g5_onboarding_link` type and `g5_onboarding_link:v1` notification version; its outbox key is tied to link ID, token version, template version and preallocated message ID.
 - Low-level `tenancyService.open()` must not implicitly create links or dispatch SMS because demo/seed callers use it directly. Trace every status/close/void path and scheduled task at the implementation HEAD.
 

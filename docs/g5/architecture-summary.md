@@ -28,15 +28,15 @@ G5 attributes ordinary customer-to-merchant M-PESA Buy Goods / Till rent receipt
 
 ## Non-negotiable invariants
 
-1. **Tenancy identity:** the private link stores the exact `Tenancy._id` and immutable ownership scope. Never infer the historical tenancy from current `Tenant` or `House` pointers.
-2. **Third-party payer:** the link identifies the intended tenancy, not the human submitter. Payer MSISDN need not equal tenant phone.
+1. **Tenant identity:** the private link stores immutable `{ clientId, estateId, tenantId }`. Resolve all eligible Tenancies after token validation; never infer occupancy from one current House pointer.
+2. **Third-party payer:** the link identifies the Tenant account, not the human submitter. Payer MSISDN need not equal Tenant phone.
 3. **Secret handling:** token has at least 256 bits of randomness; the database stores only its hash/digest. The temporary SMS payload is encrypted and excluded from API/history/log surfaces. Secret rotation/revocation does not change the tenancy binding.
 4. **Two independent evidence sources:** automatic posting requires a submitted confirmation SMS and a matching canonical Daraja merchant transaction. SMS alone and callback alone are insufficient.
 5. **One transaction identity:** callback and Pull Transactions use one normalization/upsert path and one canonical `(merchantProfileId, receiptNumber)` record only after B01/B02 prove that scope and the exact unique index is installed and verified. Before that, duplicate candidates remain quarantined and non-postable.
 6. **One receipt, one claim:** the external receipt unique index prevents duplicate canonical records. A combined Tenant receipt may create multiple child Payments, one per Tenancy, protected by `{ mpesaReceiptId, tenancyId }`; the canonical receipt claim still occurs only once.
 7. **G3 only:** `Payment.origin = 'MPESA'`; `Payment.mpesaReceiptId` is an ObjectId reference to `MpesaTransaction._id`, never the external receipt string. Extend `accountingPosting.service.js`; do not create a parallel ledger.
-8. **Atomic financial effect:** Payment, allocations, charge projections, Ledger PAYMENT, and transaction `paymentId`/POSTED state commit or roll back in one MongoDB transaction. The transaction claim is stored on `MpesaTransaction`, not a separate claim collection.
-9. **Closed tenancy:** late payment uses the original link-bound tenancy and only its already-existing eligible charges. No new old-tenancy charges, no credit transfer to a new tenancy. Unapplied amount remains old-tenancy credit or goes to review if G3 cannot safely represent it.
+8. **Atomic financial effect:** all child Payments, allocations, charge projections, Tenancy Ledger entries, Tenant-account credit movement and canonical `paymentIds[]`/POSTED state commit or roll back in one MongoDB transaction. The transaction claim is stored on `MpesaTransaction`, not a separate claim collection.
+9. **Closed Tenancy:** a Tenant-level receipt may pay pre-existing eligible charges on that Tenant's closed Tenancies as well as current charges. It never generates new charges for a closed Tenancy. Surplus carries forward as Tenant-account credit in the same Estate.
 10. **G4 isolation:** do not change the shared `tenancyContains()` rule or G4 bank reconciliation to accommodate G5 arrears.
 11. **Unknown means blocked:** no invented Daraja methods, payload fields, signatures, callback acknowledgments, merchant mappings, timestamp tolerance, or enablement claims.
 12. **Preservation:** never reset, clean, force-push, broad-restore, or overwrite unrelated work. Narrow changes only.
@@ -69,12 +69,12 @@ Exact schema fields, key patterns and migration definitions are provisional unti
 
 ## Lifecycle and accounting rules
 
-- Create link + protected notification outbox in the same transaction as the exact Tenancy.
+- Create one Tenant-level link + protected notification outbox in the same transaction as the Tenant's first G5-provisioned lifecycle operation; later unit additions retain that link.
 - Send SMS only after commit through the existing scheduler-driven Celcom queue drain (not a dedicated worker process).
 - An accepted public submission must conditionally write the same link document using its current token hash/version and increment `submissionRevision` inside the submission transaction; token rotation/revocation must write that same document.
 - Ingestion and posting workers use separate write-bearing leases/fencing tokens; no read-only lease check can authorize financial posting.
-- On move, create a new link for the new Tenancy; old link becomes `ARREARS_ONLY` when debt or claims may remain. Never reassign it.
-- Closed-tenancy payments use `link.tenancyId`; allocate only to existing charges of that same Tenancy. Do not invoke the bank date-based tenancy rule and do not create new charges.
+- On move, retain the same Tenant-level link. Close/open only the selected Tenancy; other active units and the Tenant link remain unchanged.
+- Closed-Tenancy obligations are resolved through the Tenant-level link, but allocations target only already-existing charges of the exact old Tenancy. Do not invoke the bank date-based tenancy rule or create new charges for a closed Tenancy.
 - Excess payment cannot be lost or transferred. Prove G3's unapplied-credit behaviour before automatic overpayment posting; otherwise review.
 - Link becomes `SETTLED` only after verified historical ledger coverage, all obligations resolved, no unresolved credit, and no open claims. `UNVERIFIED` coverage means non-terminal/review.
 
