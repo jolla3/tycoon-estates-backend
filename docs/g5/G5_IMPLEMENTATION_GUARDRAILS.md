@@ -341,3 +341,17 @@ The independent verdict was **APPROVE WITH REQUIRED CHANGES**. The correction re
 - B09 is Daraja API credential scope. No API credential or secret belongs in an SMS body.
 
 No application code, models, migrations, keys, worker/scheduler changes or provider sends are authorized by this documentation correction.
+
+## 20. G5.2.2 source audit findings are mandatory
+
+The full pinned-source audit is in docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §17. It covered all 157 src/ JavaScript files, 21 scripts/ JavaScript files, 57 JavaScript tests and raw collection/bulk-write access. Repeat it at the authorized implementation HEAD.
+
+- Generic House PATCH must not set House.status; houseService.update() must not apply occupancy status as a generic field. Do not deactivate a House while it has a non-null tenant pointer or ACTIVE Tenancy.
+- Generic Tenant PATCH must not set status active without a new ACTIVE Tenancy. Move-out must carry exact expectedTenancyId.
+- Harden tenancyService.open() inside the caller session: exact Tenant/House/Estate ownership, active House, null House pointer, no existing ACTIVE Tenancy for that Tenant, and Tenant.updateOne().matchedCount===1. Never accept a stale same-Tenant pointer as a repair opportunity.
+- Confirm the one-ACTIVE-Tenancy-per-Tenant invariant. The existing unique partial index is per House only. The proposed {clientId, tenantId} partial ACTIVE index is not installable until owner confirmation, duplicate preflight and migration authorization.
+- Demo seed Houses start vacant; tenancy opening is the only operation that marks them occupied. Seed paths stay G5-disabled.
+- Preserve ledgerRev write fences in accountingPosting, ledger and reconciliation. They are not occupancy mutations and are part of G3 financial serialization.
+- Direct test fixture creation may construct historical intervals, but lifecycle behaviour tests must exercise production lifecycle services and assert House/Tenant/Tenancy atomicity.
+
+No source code, index, migration, provider configuration, key or test environment change is authorized by this documentation audit.

@@ -171,3 +171,11 @@ Grok's independent verdict was **APPROVE WITH REQUIRED CHANGES**. Corrections ar
 - D11 records the in-flight stale-URL risk; D14, B08 and D17 remain unresolved. B09 concerns Daraja API credentials, not non-secret Till instructions.
 
 **Current gate:** documentation correction complete; G5.2 implementation remains NO-GO pending explicit bounded owner authorization and relevant operational decisions.
+
+## G5.2.2 full lifecycle audit (12 November 2026)
+
+All 157 pinned src/ JavaScript files, 21 scripts/ JavaScript files and 57 JavaScript tests were fetched and scanned without errors. No hidden raw collection/bulk-write occupancy writer was found. Accounting Tenancy.updateOne() calls only increment ledgerRev.
+
+Two missed API paths are now explicit: House PATCH can change occupancy status/isActive without checking a live Tenancy, and Tenant PATCH can set status active without opening a Tenancy. tenancyService.open() also needs exact Tenant/House/Estate checks, matched-count enforcement and a Tenant-wide ACTIVE uniqueness barrier. See G5-D19/D20, G5.2 §17 and the proposed G5.1 partial index.
+
+**Implementation remains NO-GO.** Remove generic occupancy mutation and harden the existing lifecycle primitive before adding G5 link/outbox hooks.

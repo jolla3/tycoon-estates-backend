@@ -267,6 +267,12 @@ G5 is not production-ready until evidence demonstrates all of the following:
 29. Critical lifecycle audit records include the authenticated initiating actor and commit in the same Mongo transaction.
 30. Destination House pointer conflicts and old-House `matchedCount !== 1` fail closed; no House pointer is overwritten or cleared without matching the exact expected Tenant/Tenancy.
 
+31. Generic House PATCH cannot mutate the occupancy projection (House.status); House deactivation is rejected while an ACTIVE Tenancy or non-null tenant pointer exists. Only the tenancy lifecycle transaction writes House occupancy state.
+32. Generic Tenant PATCH cannot set status active without creating a new ACTIVE Tenancy. Any future reactivation must be a separate atomic lifecycle operation.
+33. tenancyService.open() revalidates exact Tenant, House and Estate in the same session; House must be active and have a null tenant pointer; Tenant must have no existing ACTIVE Tenancy; Tenant pointer update must match exactly one row.
+34. The supported Tenant aggregate has at most one ACTIVE Tenancy. A proposed unique partial { clientId, tenantId } index must pass owner-invariant confirmation and duplicate preflight before installation; the existing per-House unique index remains independently required.
+35. Demo seed Houses begin vacant and are marked occupied only inside the committed Tenant/Tenancy lifecycle operation. Seed code does not manufacture an occupied House before an occupant exists.
+
 ## 10. Blocking decisions and provider evidence required
 
 The following must be resolved before the relevant implementation slice is allowed to proceed. They must not be filled in by an agent's best guess.
@@ -334,6 +340,9 @@ The current `ledgerService.balanceForTenancy()` returns `historicalCoverage: 'UN
 | G5-D17 | Protected outbound recipient/body is encrypted while queued; the retention period after provider acceptance and for unknown outcomes is not yet approved. | Define clearing/hold policy for encrypted recipient/body. Do not invent a TTL or retain permanent bearer URLs indefinitely without an approved purpose/period. |
 | G5-D18 | Current `moved_out` fallback and old-House transfer pointer updates can write House occupancy pointers without matching the expected active Tenant; a stale request could clear or act on a later occupant. `tenantService.get()` also does not expose the ACTIVE Tenancy ID used internally for its Ledger lookup. | Expose a read-only exact `currentTenancyId` in tenant detail; require `expectedCurrentTenancyId` for moves and `expectedTenancyId` for move-out; compare source/destination House pointers to exact Tenancy ownership in the same transaction, require exact matched writes, and reject stale operations without mutating a newer occupancy. |
 
+| G5-D19 | Authenticated owner/admin PATCH /houses/:id accepts status occupied/vacant and isActive; houseService.update() persists these without checking House.tenantId or an ACTIVE Tenancy. paymentService.recordManual() uses House status to decide whether to create House charges. Generic PATCH /tenants/:id also accepts status active, which tenantService.update() writes without opening a new Tenancy. | Make House occupancy status lifecycle-owned: remove status from generic House PATCH/service allowlist, and reject deactivation while a pointer or ACTIVE Tenancy exists. Do not permit generic Tenant reactivation; any approved reactivation must create a new Tenancy and update House/Tenant atomically. |
+| G5-D20 | tenancyService.open() can accept a stale same-Tenant House pointer, does not require an active House, does not validate the Tenant exists and matches client/House/Estate inside the session, does not check the Tenant's other ACTIVE Tenancies, ignores the Tenant update matched count, and accepts caller Estate mismatch. Existing Tenancy uniqueness is per House only, not per Tenant. | Harden open() with exact session-bound ownership and null-pointer checks, verify Tenant update matched count, and require at most one ACTIVE Tenancy per Tenant. Confirm the current model invariant and add the proposed { clientId, tenantId } unique partial ACTIVE index after dry-run duplicate preflight. If simultaneous multi-House occupancy is required, redesign Tenant before implementation. |
+
 The public landing-page implementation/hosting owner is also not identified in the backend repository. Before G5.3, record whether the page belongs to a separate frontend repository or a separately deployed static application, and identify its owner. The browser requirements remain: fragment-only initial token transport, immediate fragment removal, no third-party analytics, no persistent browser storage, no-referrer, no-store, and restrictive CSP.
 
 These D-items are engineering/design gates, not replacements for owner decisions G5-B01 through G5-B10. No provider contract or business policy has been inferred from them.
@@ -370,3 +379,17 @@ The independent G5.2 review returned **APPROVE WITH REQUIRED CHANGES**. The norm
 - B09 concerns Daraja API credential scope. It does not block non-secret Till instructions once B01/B03 establish the actual destination. No provider/API credential may be included in an SMS.
 
 The review did not establish live database index state, merchant mapping/capability, Celcom status lookup, retention policy or owner risk acceptance. Those remain release gates. **G5.2 implementation remains NO-GO** until separate bounded owner authorization and relevant gates are satisfied.
+
+## 17. G5.2.2 full lifecycle call-site audit resolution (12 November 2026)
+
+The pinned main@204c8f9c3578f753af20727799aaa049b1545135 repository tree was fetched recursively with 282 entries and truncated=false. All 157 src/ JavaScript files, 21 scripts/ JavaScript files and 57 JavaScript tests were fetched by blob SHA; no retrieval/decode errors occurred. Raw collection and generic bulk-write scans found no hidden production Tenant/Tenancy/House occupancy writer.
+
+The production Tenancy occupancy writers are tenancyService.open(), close() and moveToHouse(). Other production Tenancy.updateOne() calls in accountingPosting, ledger and reconciliation only increment ledgerRev as financial write fences. The demo seeder is the only separate script caller of low-level tenancyService.open() found.
+
+The audit found two additional API mutation paths and an under-validated open primitive:
+- Generic House PATCH changes occupancy status and isActive without checking a live Tenancy/pointer. House.status affects manual-payment charge generation. Make occupancy status lifecycle-owned and block deactivation of occupied Houses.
+- Generic Tenant PATCH can set status active without opening a Tenancy. Remove generic reactivation; any future reactivation requires a dedicated atomic lifecycle operation.
+- tenancyService.open() permits a stale same-Tenant House pointer, accepts inactive Houses, lacks exact in-session Tenant ownership, ignores the Tenant update matched count, trusts caller Estate ID and does not prevent multiple ACTIVE Tenancies for one Tenant. Harden before G5 hooks.
+- The existing Tenancy unique partial index is per House only. A proposed per-Tenant partial unique index is recorded in G5_1_SCHEMA_INDEX_DESIGN.md §12, subject to owner confirmation and duplicate preflight.
+
+The detailed source paths, required corrections and test gaps are in G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §17. G5.2 remains **NO-GO for implementation**. No application code, database, migration, provider, key or test environment was changed.

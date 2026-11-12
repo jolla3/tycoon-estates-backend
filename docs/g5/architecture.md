@@ -1068,3 +1068,15 @@ The independent review verdict is **APPROVE WITH REQUIRED CHANGES**. The correct
 The live smsmessages.idempotencyKey index has not been inspected. Verify exact unique index keys and duplicate state before relying on it; schema unique:true does not establish database readiness. Celcom's third idempotency argument is ignored by its two-argument adapter. Keep unknown non-retryable pending B08. D14 must define maximum commit-to-first-dispatch latency; D17 defines encrypted outbound payload retention. B01/B03 prove merchant mapping/capability. B09 is limited to Daraja API credential ownership and never authorizes sending credentials in an SMS.
 
 **Status:** G5.2 documentation corrections incorporated; **NO-GO for implementation** until explicit owner authorization names a bounded slice and relevant decisions/readiness checks are satisfied.
+
+## 28. G5.2.2 full lifecycle call-site audit (12 November 2026)
+
+The pinned-source audit is recorded in docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §17. The recursive tree contained 282 entries and was not truncated. All 157 src/ JavaScript files, 21 scripts/ JavaScript files and all 57 JavaScript tests were fetched by blob SHA without errors. Raw collection and generic bulk-write scans found no hidden production occupancy mutator.
+
+The generic houseService.update() route can change House.status and isActive without checking tenantId or an ACTIVE Tenancy. House.status also affects manual-payment charge generation in paymentService.recordManual(). Generic tenantService.update() can set Tenant.status=active without creating a Tenancy. These are G5-D19.
+
+tenancyService.open() accepts a stale same-Tenant House pointer, does not require House.isActive, does not prove exact in-session Tenant ownership, ignores Tenant update matchedCount, trusts caller Estate ID and does not prevent another ACTIVE Tenancy for that Tenant. The current schema has per-House ACTIVE uniqueness only. G5-D20 requires open() hardening and proposes a second partial unique index on {clientId, tenantId}, subject to owner invariant confirmation and duplicate preflight.
+
+Other production Tenancy.updateOne() calls in accountingPosting, ledger and reconciliation only increment ledgerRev inside financial transactions. Preserve these G3 accounting serialization fences. Direct Tenancy rows/status changes in integration tests are historical fixture setup, not additional production writers. The demo seeder is the only separate script caller of low-level open(); it must create Houses vacant and let transactional open() mark them occupied.
+
+**Gate:** remove generic occupancy mutation, harden open(), confirm one ACTIVE Tenancy per Tenant and its proposed index, then rerun the scan at the exact authorized implementation HEAD. No implementation is authorized by this audit.

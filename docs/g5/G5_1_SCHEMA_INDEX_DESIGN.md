@@ -347,3 +347,19 @@ The four values are deliberately separate:
 | notificationVersion | Outbound template/content contract. | Change only when the approved template changes; independent of token rotation and worker retries. |
 
 Do not overload one field for another domain. The live smsmessages.idempotencyKey index remains unverified until a read-only database preflight confirms its exact unique key and duplicate state; the Mongoose unique:true declaration is not sufficient evidence.
+
+## 12. G5.2.2 follow-on ACTIVE Tenancy uniqueness proposal
+
+The current Tenancy schema has a partial unique index on houseId for status ACTIVE. Tenant has one mutable houseId, moveToHouse() resolves one active Tenancy by clientId+tenantId+ACTIVE, and the G5 API exposes one currentTenancyId.
+
+To enforce that one-current-occupancy contract under concurrent opens, propose one additional partial unique index on the existing tenancies collection:
+
+| Collection | Proposed keys | Partial filter | Proposed name | Gate |
+|---|---|---|---|---|
+| tenancies | { clientId: 1, tenantId: 1 } unique | { status: 'ACTIVE' } | uniq_active_tenancy_per_client_tenant | Owner confirms one ACTIVE Tenancy per Tenant; dry-run duplicate preflight and live index inspection pass before migration. |
+
+This is an additional constraint on an existing G3 collection, not a sixth G5 model. It does not replace the per-House unique index.
+
+If a Tenant may lease multiple Houses concurrently, do not install this index. The current Tenant.houseId, moveToHouse() and currentTenancyId contract cannot represent that workflow; stop and redesign the occupancy model first.
+
+No index creation or migration is authorized by this proposal.
