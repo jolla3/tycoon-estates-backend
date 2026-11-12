@@ -1,6 +1,6 @@
 # G5 — Architecture Summary and Engineering Handoff
 
-**State:** Revised G5.0 design baseline. G5 code does not exist.
+**State:** G5.1.1 corrected design baseline. G5 code does not exist.
 
 **Workspace verification (2026-11-12 construction init):**
 - Repository `https://github.com/jolla3/tycoon-estates-backend`, branch `main`.
@@ -32,10 +32,10 @@ G5 attributes ordinary customer-to-merchant M-PESA Buy Goods / Till rent receipt
 2. **Third-party payer:** the link identifies the intended tenancy, not the human submitter. Payer MSISDN need not equal tenant phone.
 3. **Secret handling:** token has at least 256 bits of randomness; the database stores only its hash/digest. The temporary SMS payload is encrypted and excluded from API/history/log surfaces. Secret rotation/revocation does not change the tenancy binding.
 4. **Two independent evidence sources:** automatic posting requires a submitted confirmation SMS and a matching canonical Daraja merchant transaction. SMS alone and callback alone are insufficient.
-5. **One transaction identity:** callback and Pull Transactions use one normalization/upsert path and one unique `(merchantProfileId, receiptNumber)` canonical record.
-6. **One receipt, one payment:** MongoDB uniqueness and transaction checks prevent a canonical receipt from posting more than once or switching tenancies.
+5. **One transaction identity:** callback and Pull Transactions use one normalization/upsert path and one canonical `(merchantProfileId, receiptNumber)` record only after B01/B02 prove that scope and the exact unique index is installed and verified. Before that, duplicate candidates remain quarantined and non-postable.
+6. **One receipt, one payment:** the external receipt unique index prevents duplicate canonical records; `Payment.mpesaReceiptId` separately prevents two Payments referencing one internal transaction `_id`. The latter alone cannot prevent duplicate external receipts across two transaction documents.
 7. **G3 only:** `Payment.origin = 'MPESA'`; `Payment.mpesaReceiptId` is an ObjectId reference to `MpesaTransaction._id`, never the external receipt string. Extend `accountingPosting.service.js`; do not create a parallel ledger.
-8. **Atomic financial effect:** Payment, allocations, charge projections, Ledger PAYMENT, and claim/transaction POSTED state commit or roll back in one MongoDB transaction.
+8. **Atomic financial effect:** Payment, allocations, charge projections, Ledger PAYMENT, and transaction `paymentId`/POSTED state commit or roll back in one MongoDB transaction. The transaction claim is stored on `MpesaTransaction`, not a separate claim collection.
 9. **Closed tenancy:** late payment uses the original link-bound tenancy and only its already-existing eligible charges. No new old-tenancy charges, no credit transfer to a new tenancy. Unapplied amount remains old-tenancy credit or goes to review if G3 cannot safely represent it.
 10. **G4 isolation:** do not change the shared `tenancyContains()` rule or G4 bank reconciliation to accommodate G5 arrears.
 11. **Unknown means blocked:** no invented Daraja methods, payload fields, signatures, callback acknowledgments, merchant mappings, timestamp tolerance, or enablement claims.
@@ -62,9 +62,8 @@ G5 attributes ordinary customer-to-merchant M-PESA Buy Goods / Till rent receipt
 - `MpesaMerchantProfile`: Daraja application/merchant configuration and verified client/estate/store ownership mapping.
 - `MpesaSubmissionLink`: token hash, exact historical tenancy snapshot, lifecycle state, revocation/rotation metadata.
 - `MpesaSmsSubmission`: encrypted original message if retention is approved, digest, parsed normalized evidence, parser version and state.
-- `MpesaTransaction`: one normalized provider receipt per merchant profile, independent ingestion provenance and posting state.
-- `MpesaPaymentClaim`: claim between one SMS/link and one canonical M-PESA transaction; fenced state and G3 posting reference.
-- `MpesaCallbackEvent`: durable callback inbox/quarantine, idempotency metadata and redacted/encrypted evidence as required.
+- `MpesaIngestionEvent`: durable callback/Pull inbox and quarantine, source identity/digest, normalized transaction link, and fenced processing lease.
+- `MpesaTransaction`: one normalized provider receipt per verified merchant profile, winning claim fields, posting lease/state, and G3 Payment reference. There is no separate `MpesaPaymentClaim` record in the initial five-record model.
 
 Exact schema fields, key patterns and migration definitions are provisional until current source and the real Daraja payloads are re-verified.
 
@@ -72,6 +71,8 @@ Exact schema fields, key patterns and migration definitions are provisional unti
 
 - Create link + protected notification outbox in the same transaction as the exact Tenancy.
 - Send SMS only after commit through the existing scheduler-driven Celcom queue drain (not a dedicated worker process).
+- An accepted public submission must conditionally write the same link document using its current token hash/version and increment `submissionRevision` inside the submission transaction; token rotation/revocation must write that same document.
+- Ingestion and posting workers use separate write-bearing leases/fencing tokens; no read-only lease check can authorize financial posting.
 - On move, create a new link for the new Tenancy; old link becomes `ARREARS_ONLY` when debt or claims may remain. Never reassign it.
 - Closed-tenancy payments use `link.tenancyId`; allocate only to existing charges of that same Tenancy. Do not invoke the bank date-based tenancy rule and do not create new charges.
 - Excess payment cannot be lost or transferred. Prove G3's unapplied-credit behaviour before automatic overpayment posting; otherwise review.
@@ -114,8 +115,22 @@ New technical design gates G5-D13–D15 are recorded in the PRD and architecture
 
 The proposed five-record schema and index decision record is [G5_1_SCHEMA_INDEX_DESIGN.md](G5_1_SCHEMA_INDEX_DESIGN.md).
 
-**Status:** GO for documentation/design review only. NO-GO for application implementation or migrations.
+**Status:** CONDITIONAL GO for corrected documentation/design only. NO-GO for application implementation or migrations.
 
-The initial proposal omits a separate PaymentClaim collection: the canonical MpesaTransaction owns its one-winning claim and fenced posting state. A generic provider-ingestion inbox handles callback durability/quarantine; Pull checkpoint schema is deferred until the authenticated contract defines the checkpoint unit. Merchant identity and receipt uniqueness remain provisional under B01/B02, credentials under B09, and retention under B05.
+The initial proposal omits a separate PaymentClaim collection: the canonical MpesaTransaction owns its one-winning claim and fenced posting state. A generic MpesaIngestionEvent inbox handles callback/Pull durability and quarantine; Pull checkpoint schema is deferred until the authenticated contract defines the checkpoint unit. Merchant identity and receipt uniqueness remain provisional under B01/B02, credentials under B09, and retention under B05. MPESA financial posting is disabled until the exact provider-scoped receipt unique index is installed and runtime-verified; the Payment ObjectId index alone cannot prove external receipt uniqueness.
 
 Source of truth for G5 documentation and shared review is the live GitHub feature branch accessed through Composio. A hosted agent's local workbench may be stale or divergent and must be reconciled without destructive Git operations.
+
+## G5.1.1 independent schema review follow-up (12 November 2026)
+
+The independent review supported the five-record model and conditional claim-on-`MpesaTransaction` approach, but the repository handoff was not fully synchronized. This revision records the following corrections:
+
+- `MpesaIngestionEvent` collection spelling is corrected to `mpesaingestionevents`. The transaction collection name `mpesatransactions` was already correct; the review's alternative `mpesatransed` was an erroneous report typo and was not adopted.
+- Removed the separate `MpesaPaymentClaim` and `MpesaCallbackEvent` aggregates from architecture diagrams, field/state descriptions, and index matrices. Callback and Pull ingress share `MpesaIngestionEvent`; the winning claim resides on the canonical transaction.
+- Removed the unbounded `sourceEventIds[]` reverse array. Source events retain `normalizedTransactionId`.
+- `Payment.mpesaReceiptId` protects one Payment per internal `MpesaTransaction._id`; it does not prevent duplicate internal transaction documents for one physical M-PESA receipt. Therefore posting is fail-closed until B01/B02 prove the external receipt identity scope and the exact provider-scoped unique index passes runtime readiness.
+- Link submission versus rotation/revocation now requires a write-bearing conditional update on the same link document inside the submission transaction. A read-only token-version recheck is insufficient under snapshot reads.
+- Ingestion-event processing has its own reclaimable lease. Transaction posting has a separate fencing token and a write-bearing conditional operation in the same G3 session. Lease expiry semantics are defined as takeover eligibility, not cancellation of a transaction that already holds the document write fence.
+- `claimState` no longer duplicates `POSTED`; posting completion belongs to `postingState`. SHA-256 of a uniformly random 256-bit token is the default; HMAC pepper is not presumed easier to rotate.
+
+**Review outcome:** CONDITIONAL GO for the corrected G5.1 design record. Application implementation and migrations remain NO-GO. No code, database, migration, provider, or test environment was changed or exercised by this review.

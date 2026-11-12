@@ -210,7 +210,7 @@ A verified late payment may settle only existing obligations of the exact histor
 ## 8. Non-functional requirements
 
 - **Financial integrity:** Financial writes require MongoDB transactions and verified replica-set/sharded transaction support.
-- **Idempotency:** Callback duplicates, pull overlap, SMS resubmission, retry, and concurrent claims create at most one canonical transaction, claim, Payment, and Ledger PAYMENT effect.
+- **Idempotency:** Callback duplicates, pull overlap, SMS resubmission, retry, and concurrent claims create at most one canonical transaction, winning claim association, Payment, and Ledger PAYMENT effect. This guarantee is conditional on the provider receipt uniqueness scope being proven and its exact unique index passing runtime readiness; while B01/B02 are unresolved, duplicate candidates are quarantined and must not post.
 - **Concurrency:** Use MongoDB unique constraints, conditional updates, and fenced claim tokens. Redis locks coordinate workers only; Redis is not financial truth.
 - **Isolation:** Scope by client, merchant profile, allowed estate/store mapping, and exact tenancy. Never trust user-supplied ownership identifiers.
 - **Confidentiality:** Hash-only link storage; encrypted temporary outbound payload; raw SMS retention policy; log/request-trace redaction; least-privilege decryption.
@@ -229,10 +229,10 @@ G5 is not production-ready until evidence demonstrates all of the following:
 4. A revoked/rotated token cannot be used, and token-bearing content is absent from ordinary database/API/history/log surfaces.
 5. A third-party payer can submit the receipt without matching the tenant phone number.
 6. A fabricated or edited SMS with no matching Daraja record cannot create a Payment.
-7. Callback and pull copies of the same receipt converge to one canonical `MpesaTransaction`.
+7. Callback and Pull copies of the same receipt converge to one canonical `MpesaTransaction` only after B01/B02 establish the provider receipt identity scope and its unique index is installed and runtime-verified; before that, ambiguous/duplicate candidates remain quarantined and non-postable.
 8. A transaction arriving before the SMS and an SMS arriving before the transaction both converge safely.
 9. A receipt submitted through two tenancy links cannot silently switch or post twice.
-10. Concurrent submissions, callbacks, pulls, worker retries, and claim lease takeover produce at most one Payment and one Ledger PAYMENT movement.
+10. Concurrent submissions, callbacks, pulls, worker retries, and claim lease takeover produce at most one Payment and one Ledger PAYMENT movement, including when duplicate provider events could otherwise create more than one internal transaction candidate.
 11. Payment/allocation/charge/Ledger/claim state is atomic under injected failures.
 12. BANK and MANUAL G3 regression suites pass unchanged.
 13. A closed-tenancy late payment allocates only to existing old-tenancy charges, creates no new charges, and does not reduce the new tenancy balance.
@@ -242,6 +242,7 @@ G5 is not production-ready until evidence demonstrates all of the following:
 17. Live merchant readiness is confirmed for the actual Till/Store/Head Office configuration. Public documentation alone is insufficient.
 18. All financial tests use a dedicated disposable `tycoon_test_*` MongoDB replica-set/sharded test database and the repository's explicit destructive-test safeguards.
 19. Existing G3 and G4 regression suites pass.
+20. MPESA posting is fail-closed if the canonical `{ merchantProfileId, receiptNumber }` uniqueness scope is unresolved, if duplicate candidates exist, or if the exact live unique index/readiness check is missing or misaligned. The existing `Payment.mpesaReceiptId` index alone is not accepted as proof of external-receipt uniqueness.
 
 ## 10. Blocking decisions and provider evidence required
 
@@ -316,4 +317,4 @@ These D-items are engineering/design gates, not replacements for owner decisions
 
 The schema and index proposal is maintained in [G5_1_SCHEMA_INDEX_DESIGN.md](G5_1_SCHEMA_INDEX_DESIGN.md). It is documentation-only and does not authorize model or migration implementation.
 
-The proposal deliberately starts with five core records and stores the one-winning claim/processing lease on the canonical transaction rather than creating a separate claim collection. B01/B02 still block final merchant and receipt uniqueness keys; B09 blocks credential ownership; B05 blocks retention/TTL decisions. The design review may proceed without resolving unrelated provider contracts, but no operational feature may rely on those unresolved values.
+The proposal deliberately starts with five core records and stores the one-winning claim/processing lease on the canonical transaction rather than creating a separate claim collection. The claim design is valid only after canonical provider-receipt identity is uniquely enforced. B01/B02 still block final merchant and receipt uniqueness keys; MPESA financial posting therefore remains disabled until the exact unique index is installed and verified. B09 blocks credential ownership; B05 blocks retention/TTL decisions. No operational feature may bypass these unresolved gates.

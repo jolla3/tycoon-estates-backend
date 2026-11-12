@@ -1,8 +1,8 @@
 # G5.1 — Schema and Index Design Decision Record
 
-**Status:** Documentation-only proposal. No model, migration, index, route, worker, credential, or runtime change is authorized by this document.  
+**Status:** G5.1.1 documentation-only correction after independent review. No model, migration, index, route, worker, credential, or runtime change is authorized by this document.  
 **Prepared against:** `main@204c8f9c3578f753af20727799aaa049b1545135`  
-**G5 documentation baseline:** `feature/g5-construction@a927eaca6bd82d387264d8baf42d28b1fc3cb252`  
+**G5 documentation baseline:** `feature/g5-construction@5385d5d4502f6527834c5b985ae8273ead4d562a`  
 **Decision class:** PROPOSED unless explicitly marked VERIFIED-SOURCE or OWNER-DECISION.
 
 ## 1. Purpose and boundary
@@ -23,10 +23,16 @@ G5 remains Buy Goods / Till receipt attribution. PayBill is outside scope. G3 re
 | S06 | A unique canonical transaction key is not final until B01/B02 establish receipt uniqueness scope and merchant/Store identity. | BLOCKED/UNKNOWN | Do not create or rely on a speculative unique index. |
 | S07 | Daraja credential storage and reference ownership are not selected until B09 is resolved. | BLOCKED/UNKNOWN | No credential fields, secret records, or startup requirements in the first schema proposal. |
 | S08 | Existing `Payment.mpesaReceiptId` remains the internal ObjectId relationship to the canonical M-PESA Transaction, not the external receipt string. | VERIFIED-SOURCE + fixed G5 invariant | Recheck live database index and all callers before implementation. |
+| S09 | Claim-on-Transaction is acceptable only after one canonical provider-receipt identity is proven and enforced. | PROPOSED | The claim fields are not a substitute for cross-document external receipt uniqueness. |
+| S10 | No MPESA financial posting is allowed while B01/B02 leave canonical receipt uniqueness unresolved or the exact unique index is not ready. | PROPOSED / safety gate | Ingest and quarantine evidence; fail closed before G3 posting. |
+| S11 | Omit `sourceEventIds[]` from v1; retain event-to-transaction linkage on `MpesaIngestionEvent.normalizedTransactionId`. | PROPOSED | Avoid an unbounded reverse-reference array and dual-write contention. |
+| S12 | Token submission/rotation and inbox/posting workers require write-bearing conditional fences, not read-only state checks. | PROPOSED | Serialize against the same document inside the relevant MongoDB transaction. |
 
 ### Why no separate MpesaPaymentClaim initially?
 
-The canonical Transaction is already unique by provider receipt identity once the correct merchant scope is known. A single conditional state transition on that record can reserve its one permitted tenancy association and posting lease. It can carry `claimedLinkId`, `claimedSubmissionId`, `matchedTenancyId`, `processingClaimToken`, `processingClaimExpiresAt`, and `paymentId`.
+Once B01/B02 prove the correct merchant receipt scope and the exact unique `{ merchantProfileId, receiptNumber }` index is installed and passes runtime readiness, one conditional state transition on the canonical Transaction can reserve its one permitted tenancy association and posting lease. It can carry `claimedLinkId`, `claimedSubmissionId`, `matchedTenancyId`, `processingClaimToken`, `processingClaimExpiresAt`, and `paymentId`.
+
+This claim gate is not itself the external-receipt uniqueness barrier. The existing unique partial `Payment.mpesaReceiptId` index can prevent two Payment documents from referencing the same internal `MpesaTransaction._id`; it cannot prevent two duplicate `MpesaTransaction` documents representing one physical Safaricom receipt from each receiving a Payment. Therefore automatic MPESA posting MUST remain disabled until B01/B02 establish the canonical receipt key and the exact database unique index is present and verified. Before that gate is satisfied, provider events may be durably ingested or quarantined for review, but duplicate candidates must not become financially postable.
 
 A second submission against another link is still durably represented by its own SmsSubmission and marked as conflict; it must not overwrite the first successful association. The transaction record is the one-winner gate. A separate claim collection would initially duplicate this identity and its state. Reintroduce it only if evidence shows claims need a distinct multi-record lifecycle or independent audit semantics that cannot be represented without bloating Transaction.
 
@@ -77,18 +83,22 @@ Candidate fields:
 |---|---|---|
 | `clientId`, `estateId`, `houseId`, `tenantId`, `tenancyId` | ObjectIds | Required ownership snapshot copied from the exact Tenancy at creation; immutable. |
 | `merchantProfileId` | ObjectId → MpesaMerchantProfile | Optional until B01 resolves whether the tenancy has one unambiguous merchant mapping. No link is operational while mapping is ambiguous. |
-| `tokenHash` | String | Required digest only; raw bearer token is returned once to notification delivery and is never persisted. |
+| `tokenHash` | String | Required SHA-256 digest of a uniformly random token with at least 256 bits of CSPRNG entropy; raw bearer token is returned once to protected notification delivery and is never persisted. Keep a digest on revoked records so a full unique index does not encounter multiple null/missing keys; revoked status makes it non-redeemable. |
 | `tokenVersion` | Integer | Starts at 1 and increments on rotation. |
+| `submissionRevision` | Integer | Starts at 0; incremented by the write-bearing compare-and-set in each accepted submission transaction to serialize submission against rotation/revocation. |
 | `status` | Enum | `ACTIVE`, `ARREARS_ONLY`, `REVOKED`, `MANUAL_REVIEW`; `SETTLED` is excluded until B07 is resolved and a verified-coverage mechanism exists. |
 | `rotatedAt`, `revokedAt` | Date | Nullable lifecycle metadata. |
 | `createdByUserId`, `updatedByUserId` | ObjectIds | Nullable actor references for system-created lifecycle events and authorized actions. |
-| `lifecycleRevision` | Integer | Optional monotonic CAS token if required after the tenancy lifecycle concurrency design. |
+
 
 Proposed uniqueness:
 
 - One link association per Tenancy: unique `tenancyId`. Rotation updates the secret/version on the same association; it does not create a new Tenancy or repoint the link.
-- Unique `tokenHash` across all links.
-- Keep old digests out of the active lookup collection unless the explicit security design requires a non-redeemable audit history. The old bearer token must become unusable after rotation.
+- Unique `tokenHash` across all links; every link document must retain one valid string digest, including revoked links.
+- Rotation replaces the current digest and increments `tokenVersion`; the old digest is not retained in the active lookup collection and becomes unusable.
+
+Submission/rotation serialization: after the initial token lookup, the submission transaction must issue a write-bearing `findOneAndUpdate` on the same link using `_id`, permitted status (`ACTIVE` or `ARREARS_ONLY`), the matched `tokenHash`, and `tokenVersion`; increment `submissionRevision` and insert the `MpesaSmsSubmission` in that same session. Rotation/revocation must update that same link document. If rotation/revocation wins first, the conditional update matches zero and submission fails. If submission obtains the write fence first, it is accepted before the later rotation/revocation.
+- SHA-256 is the v1 baseline because the secret is uniformly random and at least 256 bits. HMAC with a server pepper is optional defense-in-depth only if the threat model requires it; it is not automatically preferred. Pepper rotation cannot rehash existing tokens without the raw tokens, so it requires a versioned key ring/overlap or forced link rotation.
 
 A tenancy that maps ambiguously to more than one merchant profile remains non-operational; do not solve that ambiguity by letting the public submitter choose a merchant profile.
 
@@ -122,9 +132,9 @@ Privacy rules:
 - Do not persist the raw confirmation text in a normal String field.
 - Payer name/phone are descriptive evidence only. They are not required to equal the Tenant phone.
 - Do not add a TTL duration until B05 defines retention and dispute holds.
-- Do not make a raw-message digest unique until canonicalization, key custody, and intended resubmission semantics are defined. The canonical transaction and winning claim remain the financial duplicate barriers.
+- Do not make a raw-message digest unique until canonicalization, key custody, and intended resubmission semantics are defined. The canonical transaction and winning claim are financial duplicate barriers only after the provider receipt identity scope is proven and the corresponding unique index is installed and verified. Until then, duplicate provider candidates must remain non-postable.
 
-### 3.4 MpesaIngestionEvent — `mpesainestionevents`
+### 3.4 MpesaIngestionEvent — `mpesaingestionevents`
 
 Purpose: durable provider-ingress inbox and quarantine record. This combines the proposed callback inbox and quarantine instead of creating separate collections for normal and rejected callback events.
 
@@ -140,11 +150,14 @@ Candidate fields:
 | `payloadDigest` | String | Digest of the exact accepted payload representation; no credentials or auth headers. |
 | `payloadEnvelope` | Encrypted envelope, optional | Only if forensic/recovery retention is approved; otherwise retain normalized minimum fields and redacted evidence. |
 | `normalizedTransactionId` | ObjectId → MpesaTransaction | Nullable until ingestion succeeds. |
-| `state` | Enum | `RECEIVED`, `PROCESSED`, `QUARANTINED`, `FAILED_RETRYABLE`, `FAILED_TERMINAL`. |
+| `state` | Enum | `RECEIVED`, `PROCESSING`, `PROCESSED`, `QUARANTINED`, `FAILED_RETRYABLE`, `FAILED_TERMINAL`. |
 | `quarantineCategory`, `reasonCode` | String/enum | Sanitized, bounded diagnostics; no raw request body in logs. |
-| `attempts`, `nextAttemptAt`, `processingStartedAt` | Number/Date | Retry scheduling and operational query fields; lease/fencing only where processing can affect financial posting. |
+| `attempts`, `nextAttemptAt`, `processingStartedAt` | Number/Date | Retry scheduling and operational query fields. |
+| `processingLeaseToken`, `processingLeaseExpiresAt` | String/Date | Required while `PROCESSING`; atomically acquired and renewed/reclaimed with a fencing token so a crash-stuck inbox event can be recovered without two workers normalizing it concurrently. |
 
 A callback must be durably accepted or quarantined before a successful acknowledgment is returned, but the exact acknowledgment and authentication rules are B02 blockers. The event inbox is not proof of a payment and cannot post to G3.
+
+Inbox workers must acquire `processingLeaseToken` and `processingLeaseExpiresAt` through a conditional update on the event. An expired lease makes the event reclaimable with a new token; completion/failure writes must require that token. This lease prevents two workers from concurrently normalizing the same inbox row, but it does not replace canonical receipt uniqueness across different events.
 
 For Pull, each response item may be recorded through the same ingestion boundary, but a page/window checkpoint is a separate recovery concern. Do not add speculative cursor fields here.
 
@@ -166,18 +179,19 @@ Candidate fields:
 | `direction` / `transactionType` | Strict enum | Required and populated only from the verified Daraja contract; unknown, debit, reversal, or ambiguous values cannot auto-post. |
 | `merchantIdentitySnapshot` | Strict subdocument | Preserve only verified Till/Store/shortcode identifiers used to establish scope. |
 | `sourceChannels` | Array of enum | Merge callback/Pull provenance without replacing the accepted transaction identity. |
-| `sourceEventIds` | Array of ObjectIds | Ingestion events that supplied this transaction. |
 | `payerEvidence` | Protected subdocument, optional | Minimize; not part of tenancy matching. |
 | `verificationState` | Enum | `UNVERIFIED`, `PENDING_EVIDENCE`, `MATCHED`, `CONFLICT`, `MANUAL_REVIEW`. |
-| `claimState` | Enum | `UNCLAIMED`, `CLAIMED`, `REVIEW`, `REJECTED`, `POSTED`. |
+| `claimState` | Enum | `UNCLAIMED`, `CLAIMED`, `REVIEW`, `REJECTED`. Posting completion is represented only by `postingState`; do not duplicate `POSTED` across state axes. |
 | `claimedLinkId`, `claimedSubmissionId`, `matchedTenancyId` | ObjectIds | Set together through one conditional winning claim transition; immutable once committed except a separately authorized correction process. |
 | `processingClaimToken` | String | Random fencing token for the current worker claim. |
-| `processingClaimExpiresAt` | Date | Lease expiry; must be checked conditionally inside the final G3 transaction. |
+| `processingClaimExpiresAt` | Date | Lease expiry; must be checked by a write-bearing conditional operation on this same transaction document inside the G3 session. |
 | `processingAttempts`, `lastProcessingErrorCode` | Number/String | Bounded operational diagnostics; no raw payload or secrets. |
 | `postingState` | Enum | `NOT_POSTED`, `PROCESSING`, `POSTED`, `FAILED_RETRYABLE`, `FAILED_TERMINAL`. |
 | `paymentId` | ObjectId → Payment | Set only when the G3 Payment commits in the same MongoDB transaction. |
 
-The winning claim transition must conditionally reserve one canonical transaction for one exact submission/link/tenancy. The final G3 transaction must conditionally consume the current fencing token and write Payment, allocations, charge projections, Ledger, transaction POSTED state, and Payment linkage atomically. A stale worker must not commit after takeover.
+The winning claim transition must be a conditional update from `UNCLAIMED` to `CLAIMED` that writes `claimedLinkId`, `claimedSubmissionId`, and `matchedTenancyId` together; require exactly one matched document. The final G3 transaction must perform a write-bearing conditional update on this same `MpesaTransaction` using `_id`, the exact claim/link/submission/tenancy tuple, the current `processingClaimToken`, and `processingClaimExpiresAt > now`. This write must occur inside the G3 session, before or as part of the financial write sequence, so it obtains the document write fence. Payment, allocations, charge projections, Ledger, `paymentId`, and `postingState: POSTED` then commit in that same session. A read-only token check is not sufficient.
+
+Lease semantics must be explicit: expiry makes the lease eligible for takeover; it does not magically cancel a transaction that already acquired the same document's write fence. A competing takeover waits or conflicts. After the transaction ends, the contender must re-read state and token; if the old transaction committed, the record is already POSTED, and if takeover won first, the stale transaction must abort. Do not claim that a wall-clock expiry predicate alone can cancel an already-running MongoDB transaction.
 
 ## 4. Index proposal
 
@@ -186,28 +200,52 @@ All indexes below are candidates. The actual MongoDB collection indexes must be 
 | Collection | Candidate index | Purpose | Readiness |
 |---|---|---|---|
 | `mpesamerchantprofiles` | `{ clientId: 1, operationalState: 1 }` non-unique | Admin/readiness listing | Can be designed now. |
-| `mpesasubmissionlinks` | `{ tokenHash: 1 }` unique | Bearer token lookup and collision barrier | Can be designed now. |
-| `mpesasubmissionlinks` | `{ tenancyId: 1 }` unique | One association per immutable Tenancy; rotation updates same record | Can be designed now, subject to confirming the one-link-per-tenancy invariant remains the product rule. |
+| `mpesasubmissionlinks` | `{ tokenHash: 1 }` unique | Bearer token lookup and collision barrier | PROPOSED; require a valid string digest on every record and run duplicate/type preflight. |
+| `mpesasubmissionlinks` | `{ tenancyId: 1 }` unique | One association per immutable Tenancy; rotation updates same record | PROPOSED; validate the one-link-per-tenancy product invariant and run duplicate/type preflight. |
 | `mpesasubmissionlinks` | `{ clientId: 1, estateId: 1, status: 1 }` non-unique | Scoped admin lifecycle queries | Can be designed now. |
 | `mpesasmsubmissions` | `{ linkId: 1, submittedAt: -1 }` non-unique | Submission history for a tenancy link | Can be designed now. |
 | `mpesasmsubmissions` | `{ reconciliationState: 1, submittedAt: 1 }` non-unique | Pending evidence work | Can be designed now. |
-| `mpesainestionevents` | `{ state: 1, nextAttemptAt: 1, receivedAt: 1 }` non-unique | Durable inbox recovery | Can be designed now. |
-| `mpesainestionevents` | `{ merchantProfileId: 1, sourceChannel: 1, receivedAt: -1 }` non-unique | Provider provenance queries | Can be designed now. |
-| `mpesainestionevents` | `{ merchantProfileId: 1, providerEventId: 1 }` unique partial | Event replay dedupe only if a stable provider event ID is guaranteed | BLOCKED by B02. |
-| `mpesatransactions` | `{ merchantProfileId: 1, receiptNumber: 1 }` unique | Callback/Pull canonical identity | BLOCKED by B01/B02; exact uniqueness scope must be proven. |
+| `mpesaingestionevents` | `{ state: 1, nextAttemptAt: 1, receivedAt: 1 }` non-unique | Ready/retryable inbox work | Candidate; validate against the actual worker query. |
+| `mpesaingestionevents` | `{ state: 1, processingLeaseExpiresAt: 1, receivedAt: 1 }` non-unique | Expired inbox lease recovery | Candidate; validate against the actual recovery query. |
+| `mpesaingestionevents` | `{ merchantProfileId: 1, sourceChannel: 1, receivedAt: -1 }` non-unique | Provider provenance queries | Candidate; validate against a real query. |
+| `mpesaingestionevents` | `{ merchantProfileId: 1, providerEventId: 1 }` unique partial on string `providerEventId` and ObjectId `merchantProfileId` | Event replay dedupe only if a stable provider event ID and its scope are guaranteed | BLOCKED by B01/B02. |
+| `mpesatransactions` | `{ merchantProfileId: 1, receiptNumber: 1 }` unique | Callback/Pull canonical identity | BLOCKED by B01/B02; exact uniqueness scope must be proven. Mandatory before any automatic posting. |
 | `mpesatransactions` | `{ postingState: 1, processingClaimExpiresAt: 1 }` non-unique | Reconciliation/recovery lease scans | Can be designed now. |
 | `mpesatransactions` | `{ verificationState: 1, transactionAt: -1 }` non-unique | Pending transaction review | Can be designed now. |
 | `payments` | Existing unique partial `{ mpesaReceiptId: 1 }` for ObjectId values | One Payment per internal canonical Transaction ID | VERIFIED-SOURCE schema declaration; live DB definition must be inspected. |
+
+### Read-only preflight examples for link uniqueness
+
+Before creating the full unique link indexes, run duplicate-group queries against the exact collection and key, then separately verify that every document has the required BSON type. These examples are read-only and are not migration commands:
+
+```javascript
+db.mpesasubmissionlinks.aggregate([
+  { $match: { tokenHash: { $type: "string" } } },
+  { $group: { _id: "$tokenHash", n: { $sum: 1 } } },
+  { $match: { n: { $gt: 1 } } }
+])
+
+db.mpesasubmissionlinks.aggregate([
+  { $match: { tenancyId: { $type: "objectId" } } },
+  { $group: { _id: "$tenancyId", n: { $sum: 1 } } },
+  { $match: { n: { $gt: 1 } } }
+])
+```
+
+Also report any document where `tokenHash` is not a BSON string or `tenancyId` is not an ObjectId; duplicate groups alone do not prove required fields are populated. The exact migration must fail on either duplicates or malformed/missing required values.
 
 ### Indexes deliberately not proposed yet
 
 - No unique merchant identity key until B01/B02 determine the true identity tuple and scope.
 - No unique receipt key on external receipt alone.
+- No automatic MPESA financial posting while `{ merchantProfileId, receiptNumber }` uniqueness is blocked or the exact live index/readiness check is absent.
+- No `sourceEventIds[]` array on MpesaTransaction; query `MpesaIngestionEvent.normalizedTransactionId` when reverse provenance lookup is needed.
+- No default HMAC pepper requirement for high-entropy bearer tokens; document a full versioned-key rotation plan before choosing it.
 - No unique SMS digest key until digest construction and resubmission semantics are proven.
 - No Pull checkpoint unique key until B02 identifies the checkpoint unit.
 - No TTL index for links, SMS submissions, provider events, or transactions while B05 retention/dispute rules are unresolved.
 - No separate unique `MpesaPaymentClaim` index because the initial design stores the one-winning claim on MpesaTransaction.
-- No new Payment index until existing database index options and data are inspected. Reuse the existing `mpesaReceiptId` identity path.
+- No new Payment index until existing database index options and data are inspected. Reuse the existing `mpesaReceiptId` internal ObjectId path only for per-transaction Payment idempotency; it does not replace the external receipt unique index.
 
 ## 5. Existing G3 contracts to preserve
 
@@ -236,7 +274,7 @@ Before G5.7 auto-post, real Mongo integration tests must cover closed-tenancy ar
 3. Scan existing Payment data for malformed values and duplicate ObjectId references before relying on the existing unique constraint.
 4. For every new unique index, perform a duplicate preflight against the exact candidate key and partial filter before creating it.
 5. Execute index mutations only through an explicit guarded migration with target database and host allowlists. No index creation/drop/rebuild during normal server startup.
-6. Add read-only runtime readiness that compares exact index name/key/order/unique/partial predicate. Financial posting remains fail-closed if required identities are absent or misaligned.
+6. Add read-only runtime readiness that compares exact index name/key/order/unique/partial predicate. Financial posting remains fail-closed if required identities are absent or misaligned. In particular, MPESA posting remains disabled until the canonical external receipt identity unique index is proven and ready. The Payment ObjectId index alone is not sufficient.
 7. Keep ordinary query indexes separate from financial identity indexes. Query indexes may be installed through the reviewed migration strategy; they must not silently create or replace unique financial constraints.
 8. Never use `dropIndexes`, blanket index cleanup, or automatic receipt conversion.
 
@@ -266,6 +304,9 @@ Technical gates:
 
 G5.1 DESIGN is complete when:
 - the five-record logical model and decision not to create a separate claim collection are independently reviewed;
+- the exact canonical external-receipt uniqueness gate is explicit and prevents duplicate transaction documents from posting before B01/B02 are resolved;
+- token rotation/submission and ingestion/posting leases use write-bearing conditional fences;
+- `claimState` and `postingState` do not duplicate the `POSTED` terminal state;
 - merchant/profile cardinality and receipt uniqueness remain clearly provisional pending B01/B02;
 - no provider contract, credential ownership, timestamp tolerance, or retention duration is invented;
 - indexes are classified as implementable-now, provisional, or blocked;
@@ -277,7 +318,7 @@ G5.1 APPLICATION IMPLEMENTATION remains NO-GO until the owner gives explicit aut
 
 ## 9. Review verdict
 
-**GO for G5.1 schema/index DESIGN ONLY.**  
+**CONDITIONAL GO for G5.1 schema/index DESIGN ONLY, after the corrections in this record.**  
 **NO-GO for G5.1 application implementation or migrations.**
 
-This is a proposal for review. It is not proof of live merchant capability, final database index state, or production readiness.
+This is a proposal for review. `mpesaingestionevents` is the corrected proposed ingestion collection name; `mpesatransactions` was already the correct proposed transaction collection name and does not need renaming. This is not proof of live merchant capability, final database index state, or production readiness. Implementation and migrations remain NO-GO.

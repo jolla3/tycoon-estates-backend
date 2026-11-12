@@ -71,11 +71,11 @@ Never run `git reset --hard`, `git clean`, force-push, broad restore/checkout, w
 
 ## 5. Financial invariants that code must enforce
 
-1. **Historical identity:** every link, SMS submission, claim and posted Payment resolves to one exact `Tenancy._id` plus immutable `clientId`, `estateId`, `houseId`, and `tenantId` scope.
+1. **Historical identity:** every link, SMS submission, winning transaction claim and posted Payment resolves to one exact `Tenancy._id` plus immutable `clientId`, `estateId`, `houseId`, and `tenantId` scope. The winning claim is transaction fields, not a separate initial claim collection.
 2. **Third-party payer:** payer name/phone are evidence attributes, not the tenancy lookup key. Do not require payer phone = tenant phone.
 3. **No fuzzy assignment:** no amount-only, phone-only, current-house, current-tenant, date-only, or nearest-match fallback.
-4. **Canonical receipt:** callback and pull converge to one canonical transaction, uniquely scoped by verified merchant identity and external receipt number.
-5. **One receipt, one claim/payment:** concurrency must be enforced by MongoDB uniqueness and conditional state transitions, not only Redis locks.
+4. **Canonical receipt:** callback and Pull converge to one canonical transaction, uniquely scoped by verified merchant identity and external receipt number. Until B01/B02 prove the scope and the exact unique index is installed and readiness-verified, candidates are non-postable.
+5. **One receipt, one claim/payment:** concurrency must be enforced by the external receipt unique index, the Payment-to-internal-transaction unique index, and conditional state transitions, not only Redis locks. The Payment index alone does not prevent duplicate transaction documents for one external receipt.
 6. **G3 remains authority:** `Payment.origin = 'MPESA'`; `Payment.mpesaReceiptId` points to the internal `MpesaTransaction._id`; do not put the external alphanumeric receipt in an ObjectId field.
 7. **Atomic commit:** Payment, PaymentAllocation rows, RentCharge projections, Ledger PAYMENT, and claim/transaction POSTED state commit or roll back in the same Mongo transaction.
 8. **Exact allocation scope:** no allocation crosses the link-bound tenancy or client/estate/house scope.
@@ -166,11 +166,12 @@ Lifecycle transitions affecting Tenant, Tenancy, MpesaSubmissionLink and protect
 
 ## 11. Index, migration, and worker rules
 
-- Design unique identities before implementation. Candidate uniqueness: link token digest; merchant identity within verified scope; `(merchantProfileId, receiptNumber)`; one successful claim per canonical transaction; one Payment per canonical transaction.
+- Design unique identities before implementation. Candidate uniqueness: link token digest; one link per Tenancy; merchant identity within verified scope; `(merchantProfileId, receiptNumber)`; one Payment per internal canonical transaction. The winning claim is a conditional state transition on `MpesaTransaction`, not a separate unique claim collection.
+- MPESA financial posting must fail closed until the exact external receipt unique index is proven, installed, and runtime-verified; do not treat `Payment.mpesaReceiptId` as a cross-document external receipt constraint.
 - Treat candidate key patterns as provisional until the actual Till/Store hierarchy and current schemas are verified.
 - Guard every unique-index migration with duplicate preflight, exact index inspection, explicit migration execution and readiness verification.
 - Do not place destructive financial index mutation in ordinary application startup.
-- Use Mongo conditional updates/claim tokens with lease expiry and fencing. A stale worker must be unable to post after a newer worker takes ownership.
+- Use Mongo conditional updates/claim tokens with lease expiry and fencing. Link submission/rotation must write-fence the same `MpesaSubmissionLink`; ingestion workers must have reclaimable inbox leases; posting must write-fence the same `MpesaTransaction` inside the G3 session. A read-only snapshot check is insufficient. A stale worker must be unable to post after a newer worker takes ownership.
 - Redis is for scheduler coordination only. It cannot be the source of financial truth or the only duplicate barrier.
 - Pull checkpoints advance only after every item in the page/window is durably ingested or quarantined.
 - Do not advance a failed pull checkpoint to hide a gap. Monitor age relative to the confirmed provider retention horizon.
@@ -180,7 +181,7 @@ Lifecycle transitions affecting Tenant, Tenancy, MpesaSubmissionLink and protect
 
 ### Unit tests
 
-- Token generation/hash/revocation/rotation and leakage prevention.
+- Token generation/hash/revocation/rotation and leakage prevention, including a concurrent submission-vs-rotation CAS test.
 - Deterministic SMS templates, parser versions, invalid/truncated messages, amount/time normalization, unsupported templates.
 - Daraja adapter against actual sanitized callback/pull fixtures, including malformed/unknown fields and merchant variants.
 - Verification matrix: exact match, wrong amount, wrong merchant, time outside approved tolerance, third party, duplicate, reversal/debit, missing provider record.
@@ -194,9 +195,12 @@ Lifecycle transitions affecting Tenant, Tenancy, MpesaSubmissionLink and protect
 - Close/move and claim/post serialize against the correct tenancy revision.
 - moved_out path is transactional.
 - Protected SMS payload never appears in API/history/serialization/logs.
-- Callback and pull overlap create one canonical transaction.
+- Callback and Pull overlap create one canonical transaction when the exact external identity index is ready; otherwise duplicate candidates remain non-postable.
 - SMS-before-Daraja and Daraja-before-SMS both converge.
 - One receipt submitted against two links never posts twice or switches tenancy.
+- Duplicate internal transaction candidates for one external receipt cannot post while external receipt uniqueness is unavailable.
+- Inbox worker lease expiry and reclaim cannot cause duplicate normalization.
+- A submission racing token rotation/revocation serializes through a write-bearing link update; read-only token revalidation is rejected.
 - Concurrent callback, pull, submission, and retries create one Payment and one Ledger movement.
 - Crash/failure at every step between Payment insert, allocation insert, Ledger insert, and claim update produces all-or-nothing state.
 - Stale claim worker cannot commit after lease takeover.
