@@ -20,6 +20,7 @@ import { generalApiRateLimiter } from './middlewares/rateLimiter.js';
 import { User } from './models/User.js';
 import apiRoutes from './routes/index.js';
 import webhookRoutes from './routes/webhook.routes.js';
+import darajaWebhookRoutes from './routes/darajaWebhook.routes.js';
 import { openApiSpec } from './docs/openapi.js';
 
 // Track per-app Mongo-backed session stores so their owning process can
@@ -129,6 +130,7 @@ export function createApp() {
   });
   app.use('/api/v1', generalApiRateLimiter);
   app.use('/api/v1/webhooks', webhookRoutes); // no CSRF — bank auth handles this
+  app.use('/api/v1/webhooks', darajaWebhookRoutes); // G5.3 Daraja C2B/Pull callbacks
   app.use('/api/v1', csrfProtection, apiRoutes);
 
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
