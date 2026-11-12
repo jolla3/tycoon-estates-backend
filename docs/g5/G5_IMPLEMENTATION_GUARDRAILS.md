@@ -332,7 +332,7 @@ The independent verdict was **APPROVE WITH REQUIRED CHANGES**. The correction re
 - For an active Tenant, currentTenancyId requires exactly one tenant-scoped ACTIVE Tenancy and matching Tenant/House ownership. Zero/multiple rows or pointer mismatch is a conflict.
 - Pass actor identity into create/move/move-out lifecycle services and same-session audit writes.
 - Extend strict SMS enums for g5_onboarding_link, cancelled and suppressed before inserting those values.
-- Keep mutually exclusive claim branches: standard excludes G5_PROTECTED while preserving missing legacy fields; protected requires G5_PROTECTED and SEND. Protected messages never use plaintext fallback.
+- Keep mutually exclusive claim branches: standard positively allows only deliveryMode absent or STANDARD and dispatchMode absent or SEND (explicit null/malformed values are excluded); protected requires exact G5_PROTECTED and SEND. Protected messages never use plaintext fallback.
 - Reclaim expired protected work only before send-start and after link/version validation. Post-send-start expiry is unknown, never automatic requeue. Every transition is fenced by the attempt token.
 - submissionRevision, dispatchRevision, tokenVersion and notificationVersion are distinct. Send-start uses observed dispatchRevision CAS paired with SMS row update in one transaction.
 - Verify the live smsmessages.idempotencyKey unique index and duplicate state. Mongoose unique:true is not live proof.

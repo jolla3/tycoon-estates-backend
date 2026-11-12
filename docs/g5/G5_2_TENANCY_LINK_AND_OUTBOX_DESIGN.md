@@ -175,7 +175,7 @@ Add `dispatchRevision: Number`, default `0`, to the proposed `MpesaSubmissionLin
 
 ## 7. Dispatcher claim, lease and crash recovery
 
-The existing scheduler-driven SMS drain remains the only dispatcher and the same `SmsMessage` collection remains the only queue. `processQueuedBatch()` must partition its atomic claim queries by delivery mode: the legacy standard branch claims only `status: queued`, `deliveryMode: { $ne: 'G5_PROTECTED' }` and `dispatchMode: { $ne: 'SUPPRESSED' }` (missing legacy fields remain compatible), while the protected branch claims only `status: queued`, exact `deliveryMode: 'G5_PROTECTED'` and exact `dispatchMode: 'SEND'`. A protected row with missing or malformed dispatch mode is ineligible. A `G5_PROTECTED` row must never be returned by the legacy plaintext `phoneNumber`/`message` send branch. The protected path requires a durable lease and fencing token; a Redis scheduler lock alone is not enough.
+The existing scheduler-driven SMS drain remains the only dispatcher and the same `SmsMessage` collection remains the only queue. `processQueuedBatch()` must partition its atomic claim queries by delivery mode: the legacy standard branch claims only `status: queued`, with `deliveryMode` either absent (legacy) or exactly `STANDARD`, and `dispatchMode` either absent (legacy) or exactly `SEND`, while the protected branch claims only `status: queued`, exact `deliveryMode: 'G5_PROTECTED'` and exact `dispatchMode: 'SEND'`. A protected row with missing or malformed dispatch mode is ineligible. A `G5_PROTECTED` row must never be returned by the legacy plaintext `phoneNumber`/`message` send branch. The protected path requires a durable lease and fencing token; a Redis scheduler lock alone is not enough.
 
 Proposed transition model:
 
@@ -198,7 +198,7 @@ Lease duration must exceed the configured provider request timeout plus dispatch
 
 ### 7.1 Exact claim predicates and expired-lease recovery
 
-The claim filters in §7 are normative. The standard branch uses deliveryMode != G5_PROTECTED and dispatchMode != SUPPRESSED, deliberately allowing legacy records where those fields do not exist. The protected branch requires exact deliveryMode G5_PROTECTED and dispatchMode SEND; missing or malformed protected dispatch mode is not eligible.
+The claim filters in §7 are normative. The standard branch is a positive allowlist: deliveryMode and dispatchMode must each be absent (legacy row) or exactly STANDARD and SEND respectively; explicit nulls and malformed values are excluded. The protected branch requires exact deliveryMode G5_PROTECTED and dispatchMode SEND; missing or malformed protected dispatch mode is not eligible.
 
 For a protected row whose lease expires before send-start, the reclaimer must match status processing, deliveryMode G5_PROTECTED, dispatchMode SEND, the exact dispatchLeaseToken, dispatchLeaseExpiresAt <= now, and sendStartedAt null/missing. It revalidates exact linkId, tokenVersion and eligible link state. A still-current row may return to queued with the old lease fields cleared; the next claimant generates a new lease token. A stale/rotated/revoked link makes the row cancelled. The later send-start transaction must independently repeat its write-bearing link/version CAS.
 
@@ -380,7 +380,7 @@ This record is a design proposal, not proof that the actual merchant mapping, Ce
 
 The pinned SmsMessage schema currently has strict type and status enums. Before creating protected rows, add type g5_onboarding_link and status values cancelled and suppressed. Never insert suppressed/cancelled before the enum supports them. A seed/test row must have status suppressed and dispatchMode SUPPRESSED. Seed code must not trigger G5 provisioning.
 
-The following predicates are normative. The standard branch intentionally accepts missing deliveryMode/dispatchMode on legacy rows. The protected branch requires explicit G5_PROTECTED and SEND and fails closed if either is missing.
+The following predicates are normative. The standard branch is a positive allowlist: deliveryMode and dispatchMode must each be absent (legacy row) or exactly STANDARD and SEND respectively. Explicit nulls and malformed values are excluded. The protected branch requires explicit G5_PROTECTED and SEND and fails closed if either is missing.
 
     const due = [
       { nextRetryAt: null },
@@ -389,9 +389,11 @@ The following predicates are normative. The standard branch intentionally accept
     ];
     const standardClaim = {
       status: 'queued',
-      deliveryMode: { $ne: 'G5_PROTECTED' },
-      dispatchMode: { $ne: 'SUPPRESSED' },
-      $or: due,
+      $and: [
+        { $or: [{ deliveryMode: { $exists: false } }, { deliveryMode: 'STANDARD' }] },
+        { $or: [{ dispatchMode: { $exists: false } }, { dispatchMode: 'SEND' }] },
+        { $or: due },
+      ],
     };
     const protectedClaim = {
       status: 'queued',

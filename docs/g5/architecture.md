@@ -1057,7 +1057,7 @@ The independent review verdict is **APPROVE WITH REQUIRED CHANGES**. The correct
 ### Protected SMS dispatch
 
 - Extend the strict SmsMessage enum with g5_onboarding_link, cancelled and suppressed before creating G5 rows.
-- Standard claim: queued + deliveryMode != G5_PROTECTED + dispatchMode != SUPPRESSED, plus retry-due condition. Missing new fields remain compatible for legacy standard rows.
+- Standard claim: queued + deliveryMode absent or exactly STANDARD + dispatchMode absent or exactly SEND, plus retry-due condition. This positive allowlist preserves missing legacy fields but excludes explicit null/malformed values.
 - Protected claim: queued + deliveryMode === G5_PROTECTED + dispatchMode === SEND, plus retry-due condition. No missing-field fallback. Decrypt under a valid lease; never send ordinary message/phoneNumber.
 - Expired pre-send leases requeue only after exact link/version validation and an SMS CAS on the current lease token. Expired post-send-start leases become unknown, preserve the attempt token and are never blindly requeued. Late responses are accepted only for the same attempt token.
 - Send-start conditionally increments the observed dispatchRevision on the exact link and writes sendStartedAt on the SMS row under the current unexpired lease in one session. This serializes with token rotation/revocation. Messages already past this boundary may still arrive with an invalid URL; D11 must record owner acceptance and support handling.

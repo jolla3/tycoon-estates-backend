@@ -164,7 +164,7 @@ Grok's independent verdict was **APPROVE WITH REQUIRED CHANGES**. Corrections ar
 
 - Exact expected Tenancy IDs are mandatory. Old-House pointer clear and tenancyService.close() require exact tenant match plus matchedCount === 1. Any non-null destination House pointer conflicts.
 - Move-out is one transaction. An already CLOSED MOVE_OUT expected Tenancy is an idempotent no-op and cannot affect a later occupant. currentTenancyId requires exactly one tenant-scoped ACTIVE Tenancy plus Tenant/House integrity checks.
-- Add g5_onboarding_link, cancelled and suppressed to strict SMS enums before use. Legacy claim retains rows missing new fields; protected claim requires exact G5_PROTECTED + SEND.
+- Add g5_onboarding_link, cancelled and suppressed to strict SMS enums before use. Standard claim allows only deliveryMode absent or STANDARD and dispatchMode absent or SEND; explicit null/malformed values are excluded. Protected claim requires exact G5_PROTECTED + SEND.
 - Pre-send lease expiry may requeue only after link validation; post-send-start expiry becomes unknown, never auto-retry. All transitions are fenced by the current attempt token.
 - submissionRevision, dispatchRevision, tokenVersion and notificationVersion are distinct. Send-start uses the observed dispatchRevision CAS paired with the SMS write.
 - Live SMS unique-index state is unverified; preflight it. Celcom does not provide idempotency through the ignored third argument. Seed fixtures require suppressed status/mode and zero provider calls.
