@@ -2,9 +2,21 @@
 //
 // G5.3 — Read-only readiness for M-PESA collections.
 // Does not create indexes. Schema declarations are not live DB proof.
+// Verifies exact key order, uniqueness and preferred index names where required.
 
 import mongoose from 'mongoose';
 import { logger } from '../config/logger.js';
+
+function isExactIndex(indexes, { key, unique = false, name = null }) {
+  if (!Array.isArray(indexes)) return false;
+  return indexes.some((idx) => {
+    if (!idx?.key) return false;
+    const keyOk = JSON.stringify(idx.key) === JSON.stringify(key);
+    const uniqueOk = Boolean(idx.unique) === Boolean(unique);
+    const nameOk = name == null || idx.name === name;
+    return keyOk && uniqueOk && nameOk;
+  });
+}
 
 export async function inspectMpesaIndexes() {
   if (!mongoose.connection?.db) {
@@ -12,6 +24,12 @@ export async function inspectMpesaIndexes() {
       ready: false,
       reason: 'no_database_connection',
       collections: {},
+      gates: {
+        durableInbox: false,
+        merchantRegistration: false,
+        canonicalReceiptIdentity: false,
+        pullReconciliation: false,
+      },
     };
   }
 
@@ -38,27 +56,28 @@ export async function inspectMpesaIndexes() {
 
   report.collections.mpesamerchantprofiles = await list('mpesamerchantprofiles');
   report.collections.mpesaingestionevents = await list('mpesaingestionevents');
-  report.collections.mpesatransactions = await list('mpesatransactions');
+  report.collections.mpesatransactions = await list('mpesatransed');
   report.collections.mpesapullcheckpoints = await list('mpesapullcheckpoints');
 
-  const has = (indexes, keyFields) => {
-    if (!Array.isArray(indexes)) return false;
-    return indexes.some((idx) => {
-      const keys = Object.keys(idx.key || {});
-      return keyFields.every((k, i) => keys[i] === k);
-    });
-  };
-
   const merchant = report.collections.mpesamerchantprofiles;
-  report.gates.merchantRegistration = has(merchant, ['clientId', 'businessShortCode']);
+  report.gates.merchantRegistration = isExactIndex(merchant, {
+    key: { clientId: 1, businessShortCode: 1 },
+    unique: true,
+    name: 'uniq_client_business_shortcode',
+  });
 
   const events = report.collections.mpesaingestionevents;
-  report.gates.durableInbox = Array.isArray(events) && events.length > 0;
+  report.gates.durableInbox =
+    Array.isArray(events)
+    && events.some((idx) => idx.key && Object.keys(idx.key)[0] === 'state');
 
   const checkpoints = report.collections.mpesapullcheckpoints;
-  report.gates.pullReconciliation = has(checkpoints, ['merchantProfileId']);
+  report.gates.pullReconciliation = isExactIndex(checkpoints, {
+    key: { merchantProfileId: 1 },
+    unique: true,
+    name: 'uniq_mpesa_pull_checkpoint_profile',
+  });
 
-  // Canonical identity intentionally not ready until B01/B02 + guarded migration approval
   report.gates.canonicalReceiptIdentity = false;
 
   report.ready = report.gates.durableInbox && report.gates.merchantRegistration;
