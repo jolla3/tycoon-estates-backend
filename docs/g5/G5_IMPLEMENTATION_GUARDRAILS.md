@@ -246,3 +246,26 @@ Return:
 7. A clear **GO / NO-GO for G5.1**, with reasons. A GO is not authorization to implement unless the owner separately authorizes it.
 
 The review phase ends with documents and evidence only. No source code, migration, credentials, SMS sends, provider registration, or deployment.
+
+
+## 15. G5.0.2 source-review additions and Git safety (12 November 2026)
+
+### Public bearer submission route
+
+The normal `/api/v1` router is behind `csrfProtection`; only signup/login are exempt. Do not add a broad CSRF bypass. A G5 bearer-token submission route must be separately mounted before the authenticated CSRF boundary, must not create or depend on a cookie session, and must not be mixed into the provider webhook namespace. Its strict, bounded JSON parser must run before the existing global JSON parser. The current Redis rate-limit store fails open on Redis errors, so specify fail-closed or independent upstream abuse controls for this public route.
+
+### SMS dispatch recovery
+
+The existing SMS queue is drained by `smsReminderJob` every 15 minutes from the API-process scheduler. It is not a dedicated worker process. The existing claim function selects `queued` records only; stale `processing` jobs are not reclaimed in the inspected queue path. Do not requeue an expired protected-link job blindly because Celcom may already have accepted it. Keep Celcom `unknown` in controlled resolution until an evidence-based status/retry policy exists. Extend the existing provider queue; do not create a second queue.
+
+### G3 credit and historical coverage
+
+G3 already exposes tenancy-scoped positive `knownCreditCents` and avoids netting credit between different tenancies in the house projection. Overpayment can appear as an `OVERPAID` charge or as an unapplied Payment remainder. This does not authorize refunds or cross-tenancy transfers. Current tenancy-balance helpers still return `historicalCoverage: 'UNVERIFIED'`; no link may be marked `SETTLED` from a zero projection.
+
+### Tenancy lifecycle
+
+The `moved_out` update currently writes Tenant and closes Tenancy separately. Refactor to one transaction before adding link/outbox state. `tenancyService.moveToHouse()` already uses a transaction for old/new occupancy changes; include link transitions and outbox there. The demo seed path opens Tenancies directly and must be explicitly no-send.
+
+### Git branch protection evidence
+
+The GitHub branch API reported `protected: false` for `main` during this review. The classic branch-protection detail endpoint returned 403 to the connected integration, and the visible repository rulesets query returned an empty list. Therefore repository protection is **not verified** by this session. Treat the no-touch rule for `main` as an absolute workflow policy, not as something GitHub is known to enforce. Before any push, re-read the live feature-branch HEAD and use a non-force fast-forward update with the expected prior SHA. All G5 changes remain documentation-only until a separate explicit implementation authorization.

@@ -277,3 +277,36 @@ G5 must pass these gates in order:
 ## 12. G5.0 scope and non-claims
 
 G5.0 is documentation and source-audit work only. It does not create models, routes, migrations, workers, Daraja credentials, SMS behaviour, accounting code, or production configuration. No G5 tests have been run because G5 code does not exist. Existing repository test counts reported elsewhere are historical G3/G4 evidence and must not be presented as G5 test results.
+
+
+## 13. G5.0.2 follow-up source review (12 November 2026)
+
+This documentation-only addendum records a second source review against `main` at `204c8f9c3578f753af20727799aaa049b1545135`. The G5 documentation branch was at `addd0b39e7c5357c1b7f397ba82b53997ec14e67` before this amendment. No application code, database, migration, provider account, or test environment was changed or exercised.
+
+### Clarification to G5-B06 — G3 credit is partly represented already
+
+The current G3 source does not leave all overpayment behaviour undefined:
+
+- `rentService.outstandingChargesForTenancy()` selects only rows for the exact tenancy and statuses `UNPAID`, `PARTIAL`, and `OVERPAID`.
+- `planAllocation()` can allocate excess into the final target charge, after which the charge projection can become `OVERPAID`.
+- When there are no eligible outstanding charge rows, the allocation plan is empty. The shared posting path still writes the full confirmed amount to the Payment and tenancy-scoped Ledger PAYMENT entry; the returned result exposes the unallocated remainder as `unappliedCents`.
+- `ledgerService.balanceForTenancy()` exposes positive `knownCreditCents` from that exact tenancy's Ledger sum. The house projection groups by tenancy and totals positive credits separately from arrears; it does not net one tenancy's credit against another tenancy's debt.
+- Existing G3 tests cover an OVERPAID charge or an unapplied remainder and recognize a legitimate unapplied Payment remainder as informational rather than corruption.
+
+This proves an existing accounting representation, not a complete approved credit policy. There is no approved G5 right to refund, spend, transfer, or silently consume an old-tenancy credit. B06 remains open for owner approval of the operational treatment and reconciliation of credit, with automatic posting still gated on closed-tenancy integration tests proving the complete receipt remains accounted for and never benefits a later tenancy.
+
+### Clarification to G5-B07 — current helper cannot prove historical completeness
+
+The current `ledgerService.balanceForTenancy()` returns `historicalCoverage: 'UNVERIFIED'` and `verifiedFullObligation: false`. The same provisional status is returned by the house-level projection. A zero known balance therefore does not satisfy the G5 `SETTLED` condition. No current helper inspected in this review supplies the missing verified-coverage result. B07 remains open; G5 must keep a closed link non-terminal until an auditable coverage mechanism or owner-approved attestation is defined.
+
+### New technical implementation gates
+
+| ID | Evidence-backed constraint | Required design response |
+|---|---|---|
+| G5-D13 | The normal `/api/v1` router is mounted behind `csrfProtection`; only auth signup/login are exempt. The current global JSON parser runs before route mounting and applies a 1 MB cap. The current Redis rate-limit store deliberately fails open on Redis errors. | The public bearer submission endpoint must be a narrow, separately mounted route before the authenticated CSRF boundary, must not depend on a cookie session, and must have an explicit bounded body parser that runs before the global parser (or a reviewed parser-order change). Do not rely only on the fail-open Redis limiter; specify fail-closed or independent upstream abuse protection. Do not put the public submission endpoint in the provider-webhook namespace. |
+| G5-D14 | The existing SMS queue is drained by `smsReminderJob()`, which the API-process scheduler runs every 15 minutes. `_claimNextBatch()` marks records `processing` but does not reclaim an expired/stale processing record. Celcom `unknown` is retained as `unknown`, not safely retried. | Reuse the existing queue/provider, but design a durable dispatch-attempt/lease recovery rule. A crash-stuck job must be recoverable without blindly resending a message that may already have reached Celcom. Define the acceptable onboarding-SMS latency; do not describe the current arrangement as a separate worker process. |
+| G5-D15 | `tenantService.create()` and `tenancyService.moveToHouse()` use transaction boundaries, but `tenantService.update(status='moved_out')` updates Tenant first and closes Tenancy in a separate operation. The demo seed script also opens Tenancy directly. | Centralize the moved-out operation in one transaction before linking lifecycle state. Explicitly exclude non-operational demo/seed data from real SMS delivery, or provide a clearly isolated seed policy. |
+
+The public landing-page implementation/hosting owner is also not identified in the backend repository. Before G5.3, record whether the page belongs to a separate frontend repository or a separately deployed static application, and identify its owner. The browser requirements remain: fragment-only initial token transport, immediate fragment removal, no third-party analytics, no persistent browser storage, no-referrer, no-store, and restrictive CSP.
+
+These D-items are engineering/design gates, not replacements for owner decisions G5-B01 through G5-B10. No provider contract or business policy has been inferred from them.

@@ -891,3 +891,86 @@ G5.0 is ready for independent design review only when:
 - no G5 code/migration/test result is claimed.
 
 G5.0 does not modify application code or run migrations. G5.1 starts only after review blockers and explicit owner authorization.
+
+
+## 24. G5.0.2 follow-up source audit and design corrections (12 November 2026)
+
+### 24.1 Review boundary and source evidence
+
+This pass re-read the live GitHub source at `main` commit `204c8f9c3578f753af20727799aaa049b1545135` and the G5 documents at the previous feature-branch HEAD `addd0b39e7c5357c1b7f397ba82b53997ec14e67`. It was a static source/documentation review only. No test command was run, no MongoDB database was accessed, and no Daraja or Celcom request was made.
+
+| Finding | Source evidence | Status |
+|---|---|---|
+| Payment ObjectId link and missing MPESA posting branch | `src/models/Payment.js`, `src/services/accountingPosting.service.js` | VERIFIED-SOURCE |
+| Allocation/overpayment representation | `src/utils/allocation.js`, `src/services/rent.service.js`, `src/services/accountingPosting.service.js`, `tests/integration/g3.accounting.test.js` | VERIFIED-SOURCE; owner policy still open |
+| Historical coverage helper | `src/services/ledger.service.js` | VERIFIED-SOURCE: returns UNVERIFIED |
+| Public middleware order and CSRF | `src/app.js`, `src/middlewares/csrf.js` | VERIFIED-SOURCE |
+| Rate-limit outage behaviour | `src/middlewares/rateLimiter.js` | VERIFIED-SOURCE: Redis errors fail open |
+| SMS scheduling and stale processing | `src/jobs/scheduler.js`, `src/jobs/smsReminder.job.js`, `src/services/sms.service.js` | VERIFIED-SOURCE |
+| Celcom ambiguous result | `src/services/sms/providers/celcom/celcom.provider.js` | VERIFIED-SOURCE |
+| Tenant/tenancy lifecycle | `src/services/tenant.service.js`, `src/services/tenancy.service.js`, `scripts/seedDemoClient.js` | VERIFIED-SOURCE |
+
+### 24.2 G3 credit and overpayment: precise current behaviour
+
+The current implementation provides more than a generic “unknown” result, but less than a complete approved credit policy:
+
+1. `outstandingChargesForTenancy()` is scoped by `clientId` and exact `tenancyId`; it selects `UNPAID`, `PARTIAL`, and `OVERPAID` rows.
+2. `planAllocation()` distributes across positive balances and can put a remainder on its final target. `statusAfterPayment()` labels a charge `OVERPAID` when allocations exceed its due amount.
+3. When the outstanding-charge query returns no eligible rows, the allocation plan is empty. The payment amount is still posted in full to the old tenancy's Ledger; the posting result reports the unapplied remainder.
+4. `ledgerService.balanceForTenancy()` calculates `knownCreditCents = max(0, tenancy Ledger sum)`. The house aggregation groups by `tenancyId` and separately sums positive credits and negative arrears, so credits are not netted across different tenancies.
+5. The G3 integration tests exercise overpayment/unapplied cases and verify that a legitimate unapplied remainder is not classified as allocation corruption.
+
+**Design consequence:** do not add a G5 wallet, transfer table, or alternative Ledger merely because B06 is open. Reuse the existing tenancy-scoped Payment/Ledger representation. Before automatic G5 posting, add real-transaction integration cases for a closed Tenancy with (a) open arrears plus excess, (b) only OVERPAID rows, (c) no eligible charge rows, and (d) a subsequent new Tenancy in the same House. Prove the full Payment, allocation sum, charge projection, Ledger balance, `unappliedCents`, and next-tenancy balance. B06 remains open for the business treatment of the resulting credit; automatic refund, spending, or cross-tenancy transfer is out of scope.
+
+### 24.3 Historical coverage: SETTLED is currently unreachable by the audited balance helper
+
+The current `ledgerService.balanceForTenancy()` and house projection explicitly return `historicalCoverage: 'UNVERIFIED'` and `verifiedFullObligation: false`. No current inspected code establishes complete historical coverage. Therefore, a closed G5 link cannot safely become `SETTLED` from the current balance helper, even if its known Ledger sum is zero and all current RentCharge rows appear paid.
+
+B07 remains a genuine design/owner gate. Define the auditable proof source (for example, a verified historical reconciliation scan or explicit owner-approved attestation with evidence and actor) before any automatic terminal transition. Until then, use `ARREARS_ONLY` or manual review.
+
+### 24.4 Public endpoint placement is a security boundary, not just a route choice
+
+Current Express assembly has these relevant properties:
+
+- `express.json({ limit: '1mb' })` is installed before API routes.
+- `issueCsrfCookie`, the session middleware, and current-user lookup are global.
+- `generalApiRateLimiter` runs before both the webhook mount and the ordinary API router.
+- `/api/v1/webhooks` is mounted outside CSRF protection, then ordinary `apiRoutes` are mounted behind `csrfProtection`.
+- `CSRF_EXEMPT_PATHS` contains only `/auth/signup` and `/auth/login`.
+- The Redis rate-limit store returns an allow result on Redis error/timeout and logs that it is failing open.
+
+The public tenancy-link submission endpoint is not a provider callback. Do not put it in `/api/v1/webhooks` and do not add a broad CSRF exemption. Mount a narrowly scoped bearer-only router before the authenticated CSRF boundary, without creating or requiring a cookie session. Its strict content-type, schema, and small explicit body-size limit must be applied before the existing global JSON parser consumes the request; this may require a reviewed parser/middleware reordering in `app.js`. The final body limit must be selected from the supported SMS format and request schema, not guessed.
+
+The existing Redis limiter alone is insufficient for this public surface during a Redis outage because it fails open. Specify an explicit policy: either fail the public request closed when its shared limiter is unavailable, or enforce independent upstream edge/WAF protection with documented outage behaviour. Do not claim the current fail-open limiter provides abuse protection under Redis failure. Keep bearer token values out of path/query strings, logs, proxy access logs, traces, referrers, analytics and error reports.
+
+The backend repository does not identify the owner or deployment location of the public browser page. Record whether the page is maintained in a separate frontend repository or deployed as a separately owned static application before G5.3. Apply CSP at the actual page host; backend response headers alone do not prove the frontend policy.
+
+### 24.5 Existing SMS path is a scheduled queue drain, with two recovery gaps
+
+The current `server.js` starts the API-process background scheduler. `scheduler.js` runs `smsReminderJob` every 15 minutes under a Redis lock. `smsReminderJob` performs reminder work and then calls `smsService.processQueuedBatch()`. The source does not show a dedicated SMS worker process.
+
+The existing queue has two distinct recovery concerns:
+
+- `_claimNextBatch()` atomically changes `queued` to `processing` and records `processingStartedAt`, but the claim filter selects only `queued` rows. No stale-`processing` reclaimer was found in the inspected queue path. A process crash can therefore leave a job stuck in `processing`.
+- Celcom returns `unknown` when the request outcome is ambiguous (for example, no response or a 5xx). The queue records `unknown` and does not automatically requeue it. This is the correct no-blind-resend default, but the controlled resolution process remains B08.
+
+For a protected permanent-link SMS, a stale processing record must not be blindly moved back to `queued`: the process may have crashed after Celcom accepted the message but before Tycoon persisted the provider result. Add a durable dispatch-attempt/lease model that distinguishes a provably pre-send crash from an ambiguous external outcome. Only the former can be retried automatically. The target onboarding delivery SLA must account for the existing 15-minute scheduler cadence or a separately measured queue-drain cadence change; do not create a second SMS queue.
+
+The existing `queueSms()` path and `withIdempotency()` helper do not accept a Mongo session. Protected outbox creation cannot be made atomic with Tenant/Tenancy/link creation by calling the current helper unchanged. Add a session-aware, idempotent enqueue path or an equivalent reviewed integration, and decrypt the protected payload only immediately before provider dispatch.
+
+### 24.6 Tenancy lifecycle integration must fix a pre-existing split write
+
+The current source confirms:
+
+- `tenantService.create()` creates the Tenant and calls `tenancyService.open()` in the same Mongo transaction/session.
+- `tenancyService.moveToHouse()` closes the prior Tenancy and creates the new Tenancy within one transaction. G5 must add old-link transition and new-link/outbox creation to that same transaction.
+- `tenantService.update(status='moved_out')` first updates Tenant via `findOneAndUpdate()`, then calls `tenancyService.close()` as a separate transaction. A close failure can leave Tenant marked moved out while the Tenancy remains ACTIVE. Centralize this lifecycle transition in one transaction before G5 binds link/outbox state to it.
+- `scripts/seedDemoClient.js` calls `tenancyService.open()` directly. This non-production seed path must be explicitly excluded from real bearer-link SMS delivery or use a dedicated no-send seed policy. Never let a demo seed operation send live tenancy links.
+
+No alternate direct production Tenancy create/status write was identified in the controllers and service callsites inspected in this pass. That statement is limited to the reviewed source paths; re-run a complete callsite search at the implementation HEAD before modifying the lifecycle.
+
+### 24.7 Implementation order and review verdict
+
+Before G5.2, fix and test the `moved_out` transaction boundary and establish the seed/no-send policy. Before G5.3, design the public bearer endpoint middleware ordering, bounded body parser, abuse-control outage behaviour, frontend hosting owner, and Celcom queue recovery contract. Before G5.7, test the exact old-tenancy credit cases above and add MPESA idempotency through the existing G3 service.
+
+**G5.0.2 result: documentation review only. G5.1 implementation is NO-GO at this point.** The original owner authorization has not been supplied in this conversation, the final merchant identity/credential schema scope remains subject to B01/B09, and the security/lifecycle dependencies above need to be reflected in the design. This is not a claim that every B01–B10 decision blocks schema design; the blocker is the explicit authorization boundary plus the unresolved schema scope where those decisions matter. G5 remains code-free and migration-free.

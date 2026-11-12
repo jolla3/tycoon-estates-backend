@@ -71,7 +71,7 @@ Exact schema fields, key patterns and migration definitions are provisional unti
 ## Lifecycle and accounting rules
 
 - Create link + protected notification outbox in the same transaction as the exact Tenancy.
-- Send SMS only after commit through the existing provider worker.
+- Send SMS only after commit through the existing scheduler-driven Celcom queue drain (not a dedicated worker process).
 - On move, create a new link for the new Tenancy; old link becomes `ARREARS_ONLY` when debt or claims may remain. Never reassign it.
 - Closed-tenancy payments use `link.tenancyId`; allocate only to existing charges of that same Tenancy. Do not invoke the bank date-based tenancy rule and do not create new charges.
 - Excess payment cannot be lost or transferred. Prove G3's unapplied-credit behaviour before automatic overpayment posting; otherwise review.
@@ -94,3 +94,17 @@ Until proven, the safe behaviour is: profile not operational, transaction not au
 7. After explicit implementation authorization, implement one narrow G5 slice at a time with focused tests and evidence. Keep G3 BANK/MANUAL and G4 regressions intact.
 
 **First review deliverable:** a written critique and revised documents only. No code, migrations, credential changes, provider registration, or deployment.
+
+
+## G5.0.2 follow-up review (12 November 2026)
+
+The second source review confirmed several additional implementation constraints:
+
+- **G3 credit:** G3 already records the full Payment in the exact tenancy Ledger. Positive `knownCreditCents` is exposed; house projections keep arrears/credits grouped by Tenancy rather than netting across occupancies. Overpayment can be applied to a final charge as `OVERPAID`, or remain unapplied when no eligible charges exist. This is an existing accounting representation, not approval to refund, spend or transfer credit. B06 remains open for owner policy and closed-tenancy tests.
+- **Historical coverage:** `ledgerService.balanceForTenancy()` currently always reports `UNVERIFIED` and `verifiedFullObligation: false`. The current helper cannot authorize `SETTLED`.
+- **Public route:** the ordinary API router is behind CSRF protection; only signup/login are exempt. The global JSON parser runs before routes with a 1 MB limit. The Redis rate limiter fails open on outages. The public bearer submission route therefore needs a narrowly mounted pre-CSRF/pre-auth path, a strict body parser applied before the global parser, and an explicit limiter outage policy. It must not be placed in the provider webhook namespace.
+- **SMS delivery:** the current queue drain runs inside `smsReminderJob` every 15 minutes from the API-process scheduler; it is not a dedicated worker process. Claimed jobs left in `processing` are not reclaimed by the current queue path. Celcom `unknown` remains ambiguous and must not be blindly resent.
+- **Tenant lifecycle:** the moved-out path updates Tenant and closes Tenancy in separate operations; make it atomic before G5 lifecycle hooks. The demo seed script opens Tenancies directly and must never cause real link SMS delivery.
+- **Protected outbox:** existing `queueSms()` and `withIdempotency()` do not accept a Mongo session; they cannot be called unchanged for transactionally atomic G5 onboarding.
+
+New technical design gates G5-D13–D15 are recorded in the PRD and architecture: public endpoint security/middleware order, SMS dispatch recovery/SLA, and tenancy lifecycle/seed policy. No application code or migrations were changed and no G5 tests were run.
