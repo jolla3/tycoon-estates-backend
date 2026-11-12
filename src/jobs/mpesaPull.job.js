@@ -1,8 +1,8 @@
 // src/jobs/mpesaPull.job.js
 //
 // G5.3 — Operational Pull reconciliation for eligible merchant profiles.
-// Redis job lock from scheduler; MongoDB checkpoint lease is durable authority.
-// Advances checkpoint only after durable inbox persistence of returned rows.
+// Default OFF until query method, pagination and result delivery are confirmed.
+// Checkpoint advances only after durable inbox persistence of a recognized empty window.
 
 import crypto from 'crypto';
 import { MpesaMerchantProfile } from '../models/MpesaMerchantProfile.js';
@@ -18,7 +18,6 @@ import { env } from '../config/environment.js';
 import { logger } from '../config/logger.js';
 import { INGESTION_SOURCE } from '../services/mpesa/daraja.constants.js';
 
-/** 48h horizon is OWNER-REPORTED / secondary — do not claim entitlement without portal proof. */
 const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function formatDarajaDate(d) {
@@ -27,12 +26,18 @@ function formatDarajaDate(d) {
 }
 
 export async function mpesaPullJob() {
+  if (env.DARAJA_PULL_RECONCILIATION_ENABLED !== '1') {
+    logger.debug('mpesaPullJob skipped — DARAJA_PULL_RECONCILIATION_ENABLED is not 1');
+    return { ran: false, reason: 'pull_reconciliation_disabled' };
+  }
+
   const oauth = createDarajaOAuthClientFromEnv(env);
   if (!oauth) {
     logger.debug('mpesaPullJob skipped — Daraja OAuth not configured');
     return { ran: false, reason: 'no_oauth' };
   }
 
+  // pullCapability VERIFIED is an explicit ops gate — registration alone does not set it.
   const profiles = await MpesaMerchantProfile.find({
     operationalState: { $in: ['ACTIVE'] },
     pullCapability: 'VERIFIED',
@@ -59,6 +64,7 @@ export async function mpesaPullJob() {
 
       let offset = checkpoint?.lastOffsetValue || '0';
       let pages = 0;
+      let lastRowCount = 0;
       const maxPages = 20;
       let allOk = true;
 
@@ -87,20 +93,28 @@ export async function mpesaPullJob() {
           break;
         }
 
+        lastRowCount = ingest.rowCount;
         pages += 1;
-        const rows = ingest.rowCount;
-        if (rows === 0) break;
-        // Without verified next-offset field, do not invent pagination advancement.
+        if (ingest.rowCount === 0) break;
+        // Pagination unit BLOCKED — do not invent next offset.
         break;
       }
 
       if (allOk) {
-        await advancePullCheckpoint(profile._id, ownerId, fenceToken, {
-          windowStartAt: start,
-          windowEndAt: end,
-          lastOffsetValue: offset,
-        });
-        await releasePullLease(profile._id, ownerId, fenceToken, { status: 'SUCCEEDED' });
+        if (lastRowCount > 0) {
+          await releasePullLease(profile._id, ownerId, fenceToken, { status: 'UNCERTAIN' });
+          logger.info(
+            { shortCode: profile.businessShortCode, rows: lastRowCount },
+            'Pull page persisted; window not advanced — pagination unresolved'
+          );
+        } else {
+          await advancePullCheckpoint(profile._id, ownerId, fenceToken, {
+            windowStartAt: start,
+            windowEndAt: end,
+            lastOffsetValue: offset,
+          });
+          await releasePullLease(profile._id, ownerId, fenceToken, { status: 'SUCCEEDED' });
+        }
       } else {
         await releasePullLease(profile._id, ownerId, fenceToken, { status: 'FAILED' });
       }
