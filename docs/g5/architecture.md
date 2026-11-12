@@ -1040,7 +1040,7 @@ Source-specific corrections and design consequences:
 
 Official transaction references: [MongoDB Node.js Driver transactions](https://www.mongodb.com/docs/drivers/node/current/crud/transactions/), [MongoDB transaction application handling](https://www.mongodb.com/docs/manual/core/transactions-in-applications/), and [MongoDB stale-read/write-conflict considerations](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/).
 
-**G5.2 design verdict:** PROPOSED for independent review. NO-GO for lifecycle/SMS code, schema changes, migrations, key creation, worker changes or provider sends until explicit slice authorization.
+**G5.2 independent review verdict:** APPROVE WITH REQUIRED CHANGES; the reconciliation is in §27 and G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16. **Implementation remains NO-GO** for lifecycle/SMS code, schema changes, migrations, key creation, worker changes or provider sends until explicit bounded owner authorization.
 
 ## 27. G5.2.1 independent review resolution (12 November 2026)
 

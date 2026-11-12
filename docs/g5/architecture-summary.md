@@ -123,7 +123,7 @@ The initial proposal omits a separate PaymentClaim collection: the canonical Mpe
 
 The proposed lifecycle/outbox decision record is [G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md](G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md).
 
-**Status:** PROPOSED for independent design review. NO-GO for application implementation, model changes, migrations, key creation, dispatch-worker changes or Celcom sends.
+**Independent review verdict:** APPROVE WITH REQUIRED CHANGES; the corrections are recorded below and in G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16. **Implementation:** NO-GO for application changes, models, migrations, keys, workers or Celcom sends without separate bounded owner authorization.
 
 G5.2 keeps the existing Celcom queue/provider, but extends it with session-aware protected enqueue, a versioned encrypted payload, API/history redaction, dispatch lease fencing and conservative crash recovery. Tenant/Tenancy/link/outbox/critical audit commit together when trusted G5 provisioning is REQUIRED; DISABLED creates no new link/outbox but still transitions any old link when its Tenancy closes/transfers. `moved_out` must become atomic; move must accept a caller-owned session; demo SMS must be explicitly suppressed. Move/move-out requests require an exact expected Tenancy ID supplied by the authenticated tenant detail `currentTenancyId` field. B01/B03 merchant readiness, B05 inbound evidence retention, D17 protected outbox retention, B08 unknown-send recovery and D14 delivery SLA remain unresolved. D18 also requires an API contract change to expose and return exact expected Tenancy IDs.
 
