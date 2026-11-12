@@ -353,9 +353,9 @@ The current proposal uses trusted `DISABLED`/`REQUIRED` provisioning modes. When
 
 The existing SMS queue/provider remains the only dispatch path. Protected message content and destination are encrypted in a versioned G5 envelope with AAD, while ordinary SMS fields/history contain only redacted values. Dispatch leases are fenced; expiry before `sendStartedAt` may be safely reclaimed after link validation, while expiry after `sendStartedAt` is `unknown` and never blindly resent. Demo seed records must be suppressed, not queued.
 
-**G5.2 independent review verdict:** APPROVE WITH REQUIRED CHANGES; the resolution is recorded in §14 and G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16. **Implementation remains NO-GO** for lifecycle refactors, SmsMessage schema changes, encryption key creation, dispatch worker changes, migrations or Celcom sends until separate explicit bounded owner authorization. B01/B03, B05, B08, D11, D14 and D17 remain relevant gates.
+**G5.2 independent review verdict:** APPROVE WITH REQUIRED CHANGES; the resolution is recorded in §16 and G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16. **Implementation remains NO-GO** for lifecycle refactors, SmsMessage schema changes, encryption key creation, dispatch worker changes, migrations or Celcom sends until separate explicit bounded owner authorization. B01/B03, B05, B08, D11, D14 and D17 remain relevant gates.
 
-## 14. G5.2 independent review resolution (12 November 2026)
+## 16. G5.2 independent review resolution (12 November 2026)
 
 The independent G5.2 review returned **APPROVE WITH REQUIRED CHANGES**. The normative corrections are recorded in G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md §16 and are mandatory acceptance requirements:
 
