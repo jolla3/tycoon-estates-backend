@@ -2,6 +2,7 @@
 //
 // G5.3 — Merchant/shortcode configuration for Buy Goods ingestion.
 // Credential material is NOT stored here (B09). Operational flags are evidence-backed.
+// autoIndex: false — unique index is migration-controlled only.
 
 import mongoose from 'mongoose';
 
@@ -18,7 +19,6 @@ const MpesaMerchantProfileSchema = new Schema(
       enum: ['BUY_GOODS_TILL'],
     },
     displayName: { type: String, default: null },
-    /** Till / paybill shortcode as used by Daraja BusinessShortCode. */
     businessShortCode: { type: String, required: true },
     estateId: { type: Schema.Types.ObjectId, ref: 'Estate', default: null },
     callbackCapability: {
@@ -52,12 +52,16 @@ const MpesaMerchantProfileSchema = new Schema(
     createdByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     updatedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
   },
-  { timestamps: true }
+  { timestamps: true, autoIndex: false, collection: 'mpesamerchantprofiles' }
 );
 
+/**
+ * Unique {clientId, businessShortCode} is migration-controlled only.
+ * autoIndex: false — schema declaration documents intent; boot must not install it.
+ */
 MpesaMerchantProfileSchema.index(
   { clientId: 1, businessShortCode: 1 },
-  { unique: true }
+  { unique: true, name: 'uniq_client_business_shortcode' }
 );
 MpesaMerchantProfileSchema.index({ clientId: 1, operationalState: 1 });
 
