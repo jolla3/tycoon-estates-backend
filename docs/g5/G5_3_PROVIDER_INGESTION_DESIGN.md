@@ -1,83 +1,95 @@
 # G5.3 — Daraja Provider Ingestion Design (Buy Goods / Till)
 
-**Status:** Implemented in code on `feature/g5-construction` (sandbox-first).  
+**Status:** Corrected implementation on `feature/g5-construction` (sandbox-first).
 **Does not authorize:** Tenant attribution, SMS links, G3 Payment posting, production registration, or live financial ops.
 
 ## Boundary
 
-Provider verification only:
-
 ```
-OAuth → C2B register (operator) → C2B confirm callback
-OAuth → Pull register (operator) → Pull query / Pull result callback
-        ↓
-  MpesaIngestionEvent (durable raw observation)
-        ↓
-  MpesaTransaction (canonical receipt, provisional unique key)
+OAuth → Merchant Profile registration lifecycle
+             |
+     +-------+-------+
+     |               |
+C2B Registration  Pull Registration
+     |               |
+C2B Confirmation  Pull Reconciliation job
+     |               |
+     +-------+-------+
+             |
+   Durable MpesaIngestionEvent (persist → lease → process)
+             |
+   Canonical MpesaTransaction (provisional identity; non-postable)
+             |
+   UNVERIFIED | CONFLICT | MANUAL_REVIEW
 ```
 
-G3 remains untouched.
+G3 remains untouched. C2B + Pull share one inbox and one canonical reconciliation boundary.
 
-## Contract evidence
+## Contract evidence summary
 
 See `docs/provider-contracts/G5_DARAJA_C2B_PULL_EVIDENCE.md`.
 
-Key points:
+| Topic | Classification | Note |
+|-------|----------------|------|
+| C2B register path v1 vs v2 | BLOCKED/UNKNOWN | Default v1; override via `DARAJA_C2B_REGISTER_PATH` after portal verification |
+| Missing `BillRefNumber` on Till | OWNER-DECISION / product rule | Valid; not rejected |
+| Confirmation `TransactionType` | PROPOSED | Expect `Buy Goods` / `Buy Goods Online`; not simulator `CommandID` |
+| Pull query method POST | SECONDARY (SDK) | Portal docs describe GET; dual path not implemented |
+| 48h Pull horizon | SECONDARY | Not treated as guaranteed entitlement |
+| TransTime timezone | PROPOSED | Parsed as Africa/Nairobi wall → UTC |
+| Canonical receipt uniqueness | BLOCKED/UNKNOWN | Provisional shortcode+receipt index is **not** financial authority (B01/B02) |
 
-- C2B missing `BillRefNumber` is valid for Till.
-- External validation is not assumed enabled.
-- Callbacks are untrusted (no verified cryptographic signature).
-- Pull query is POST with offset pagination; 48h window is secondary evidence.
-- Pull sync vs callback-only response remains partially BLOCKED/UNKNOWN; both paths are wired.
-- Receipt uniqueness uses provisional `{ provider, businessShortCode, receiptNumber }` — not a final B01/B02 proof.
+## Inbox lifecycle (G5.1)
 
-## Models
+1. Validate basic structure.
+2. **Persist** `MpesaIngestionEvent` (`RECEIVED` or immediate `QUARANTINED`).
+3. Acknowledge provider **only after durable persist** (or durable quarantine of malformed body).
+4. **Claim** with `processingLeaseToken` / `processingLeaseExpiresAt` → `PROCESSING`.
+5. Resolve merchant with exact cardinality (none / exact / ambiguous / suspended).
+6. Upsert canonical candidate; complete event with token fence.
+7. Recover expired `PROCESSING` via new lease token.
 
-| Model | Role |
-|-------|------|
-| `MpesaMerchantProfile` | Shortcode ownership + registration state flags |
-| `MpesaIngestionEvent` | Immutable-ish ingress + quarantine (`mpesaingestionevents`) |
-| `MpesaTransaction` | Canonical receipt (`mpesatransactions`) |
-| `MpesaPullCheckpoint` | Per-profile Pull window/lease |
+`payloadDigest` is **diagnostic only** (non-unique index). It is not a provider event identity.
 
-No `MpesaPaymentClaim`. No G3 writes.
+## Canonical verification
 
-## Routes
+Matching C2B + Pull channels establishes provider-source consistency only.
+`verificationState` remains `UNVERIFIED` until later SMS/Tenant evidence (G5 product rule).
+Amount/time mismatch → `CONFLICT`. Ambiguous merchant → quarantine / review.
+Source channels updated with `$addToSet`.
 
-Mounted under `/api/v1/webhooks` (no CSRF), keyword-safe paths:
+`paymentIds[]` is reserved for future multi-Payment relationship; no G3 writes here.
+`MpesaTransaction` uses `autoIndex: false` so provisional unique is not installed on boot.
 
-- `POST /daraja/c2b/confirm`
-- `POST /daraja/c2b/validate`
-- `POST /daraja/pull/results`
+## Pull operations
 
-Exposure requires `DARAJA_CALLBACKS_ENABLED=1` (or non-prod `DARAJA_CALLBACKS_LAB=1`).
+- Job: `src/jobs/mpesaPull.job.js` via existing `scheduler.js` + Redis `withLock`.
+- MongoDB checkpoint lease with fencing token; BUSY when another worker holds a live lease.
+- Checkpoint advances only after durable inbox persistence of returned rows (`allPersisted`).
+- Empty valid response vs unsupported schema are distinguished (`responseShape`).
+- Pagination offset semantics remain BLOCKED without portal unit proof.
 
-## Env
+## Registration lifecycle
 
-```
-DARAJA_ENVIRONMENT=sandbox|production
-DARAJA_CONSUMER_KEY=
-DARAJA_CONSUMER_SECRET=
-DARAJA_CALLBACKS_ENABLED=0
-DARAJA_CALLBACKS_LAB=0
-```
+Operator-triggered `registerC2bUrls` / `registerPull` update:
 
-## Idempotency
+- `c2bRegistrationState` / `pullRegistrationState`
+- `REQUESTED` → `ACCEPTED` | `ALREADY_REGISTERED` | `REJECTED` | `UNCERTAIN`
+- Timeout → `UNCERTAIN` (not automatic `REJECTED`)
 
-1. Ingestion event unique on `{ provider, businessShortCode, sourceChannel, payloadDigest }`.
-2. Canonical txn unique on `{ provider, businessShortCode, receiptNumber }`.
-3. Conflicting amount/time → `verificationState=CONFLICT`, event quarantined; no silent overwrite.
-4. C2B + Pull same receipt → one canonical row; `sourceChannels` accumulates.
+Never auto-register on boot. Never register against production in this task.
 
-## Explicit non-goals in this slice
+## Index / readiness gates
 
-- SMS submission / link lifecycle (G5.2)
-- Tenant claim / G3 posting
-- Auto-register on boot
-- Production Go-Live
+| Gate | Status |
+|------|--------|
+| Durable inbox operational indexes | Implemented (non-unique) |
+| Merchant `{clientId, businessShortCode}` unique | Guarded migration script (dry-run default) |
+| Canonical receipt unique | **Blocked** until B01/B02; `autoIndex: false` |
+| Pull checkpoint per profile unique | Schema + readiness inspect |
 
-## Acceptance for sandbox milestone
+`src/utils/mpesaIndexReadiness.js` exposes separate readiness for inbox, merchant registration, canonical identity, and Pull.
 
-- Unit tests for OAuth cache/coalesce, normalize, Pull extract.
-- Code paths for register/query exist and are operator-gated.
-- Live sandbox API success is **optional** and reported separately when credentials exist.
+## Explicit non-goals
+
+- SMS / submission links / Tenant claim / G3 posting / PayBill / production Go-Live
