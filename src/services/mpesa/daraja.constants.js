@@ -21,6 +21,8 @@ export const DARAJA_PATHS = Object.freeze({
   oauth: '/oauth/v1/generate',
   /** Confirm app enablement for v1 vs v2 in the Daraja portal before production. */
   c2bRegisterUrl: '/mpesa/c2b/v1/registerurl',
+  /** Portal may expose v2; set DARAJA_C2B_REGISTER_PATH to override after verification. */
+  c2bRegisterUrlV2: '/mpesa/c2b/v2/registerurl',
   c2bSimulate: '/mpesa/c2b/v1/simulate',
   pullRegister: '/pulltransactions/v1/register',
   pullQuery: '/pulltransactions/v1/query',
@@ -52,6 +54,7 @@ export const INGESTION_SOURCE = Object.freeze({
 
 export const INGESTION_STATE = Object.freeze({
   RECEIVED: 'RECEIVED',
+  PROCESSING: 'PROCESSING',
   PROCESSED: 'PROCESSED',
   QUARANTINED: 'QUARANTINED',
   FAILED_RETRYABLE: 'FAILED_RETRYABLE',
