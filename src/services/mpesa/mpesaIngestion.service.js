@@ -1,8 +1,10 @@
 // src/services/mpesa/mpesaIngestion.service.js
 // G5.3 — Durable inbox persist + leased processing + canonical reconciliation.
-// Never creates G3 Payment / allocation / Ledger rows.
+// Stage 1 persist is outside the processing transaction (ack-after-persist).
+// Stage 2 processClaimedEvent commits canonical + event outcome together.
 
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import { MpesaIngestionEvent } from '../../models/MpesaIngestionEvent.js';
 import { MpesaTransaction } from '../../models/MpesaTransaction.js';
 import { MpesaMerchantProfile } from '../../models/MpesaMerchantProfile.js';
@@ -120,7 +122,40 @@ export async function completeIngestionEvent(
   );
 }
 
+/**
+ * Stage 2 — process claimed event. Without a session, wraps work in a MongoDB
+ * transaction so canonical mutation and event completion commit together.
+ */
 export async function processClaimedEvent(event, leaseToken, normalized, { session } = {}) {
+  if (!session) {
+    const ownSession = await mongoose.startSession();
+    try {
+      let outcome;
+      await ownSession.withTransaction(async () => {
+        outcome = await processClaimedEvent(event, leaseToken, normalized, {
+          session: ownSession,
+        });
+      });
+      return outcome;
+    } catch (err) {
+      logger.error(
+        { err: err.message, eventId: String(event._id) },
+        'processClaimedEvent transaction failed'
+      );
+      try {
+        await completeIngestionEvent(event._id, leaseToken, {
+          state: INGESTION_STATE.FAILED_RETRYABLE,
+          reasonCode: 'processing_transaction_failed',
+        });
+      } catch {
+        // Lease may already be lost; reclaim path will retry.
+      }
+      throw err;
+    } finally {
+      await ownSession.endSession();
+    }
+  }
+
   const resolution = await resolveMerchantProfilesByShortCode(normalized.businessShortCode, { session });
   if (resolution.status === 'none') {
     await completeIngestionEvent(event._id, leaseToken, {
@@ -158,21 +193,24 @@ export async function processClaimedEvent(event, leaseToken, normalized, { sessi
     });
     return { quarantined: true, reason: 'validation_failed', transaction: null };
   }
+
   const profile = resolution.profile;
   await MpesaIngestionEvent.updateOne(
     { _id: event._id, processingLeaseToken: leaseToken },
     { $set: { merchantProfileId: profile._id, clientId: profile.clientId } },
-    { session: session || null }
+    { session }
   );
+
   try {
     const upsert = await upsertCanonicalTransaction(normalized, profile, { session });
-    await completeIngestionEvent(event._id, leaseToken, {
+    const completed = await completeIngestionEvent(event._id, leaseToken, {
       state: upsert.conflict ? INGESTION_STATE.QUARANTINED : INGESTION_STATE.PROCESSED,
       quarantineCategory: upsert.conflict ? 'conflict' : null,
       reasonCode: upsert.conflictReason || null,
       normalizedTransactionId: upsert.transaction?._id || null,
       session,
     });
+    if (!completed) throw new Error('lease_lost_before_complete');
     return {
       quarantined: Boolean(upsert.conflict),
       conflict: Boolean(upsert.conflict),
@@ -181,11 +219,7 @@ export async function processClaimedEvent(event, leaseToken, normalized, { sessi
     };
   } catch (err) {
     logger.error({ err: err.message, eventId: String(event._id) }, 'Canonical upsert failed');
-    await completeIngestionEvent(event._id, leaseToken, {
-      state: INGESTION_STATE.FAILED_RETRYABLE,
-      reasonCode: 'canonical_upsert_failed',
-      session,
-    });
+    // Do not mark PROCESSED here; leave PROCESSING for reclaim or outer FAILED_RETRYABLE.
     throw err;
   }
 }
