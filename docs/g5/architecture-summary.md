@@ -111,13 +111,21 @@ The second source review confirmed several additional implementation constraints
 New technical design gates G5-D13–D15 are recorded in the PRD and architecture: public endpoint security/middleware order, SMS dispatch recovery/SLA, and tenancy lifecycle/seed policy. No application code or migrations were changed and no G5 tests were run.
 
 
-## Current next gate: G5.1 schema/index design
+## Previous gate: G5.1 schema/index design
 
-The proposed five-record schema and index decision record is [G5_1_SCHEMA_INDEX_DESIGN.md](G5_1_SCHEMA_INDEX_DESIGN.md).
+The five-record schema/index decision record is [G5_1_SCHEMA_INDEX_DESIGN.md](G5_1_SCHEMA_INDEX_DESIGN.md).
 
-**Status:** CONDITIONAL GO for corrected documentation/design only. NO-GO for application implementation or migrations.
+**G5.1 status:** CONDITIONAL GO for corrected documentation/design only. NO-GO for application implementation or migrations.
 
 The initial proposal omits a separate PaymentClaim collection: the canonical MpesaTransaction owns its one-winning claim and fenced posting state. A generic MpesaIngestionEvent inbox handles callback/Pull durability and quarantine; Pull checkpoint schema is deferred until the authenticated contract defines the checkpoint unit. Merchant identity and receipt uniqueness remain provisional under B01/B02, credentials under B09, and retention under B05. MPESA financial posting is disabled until the exact provider-scoped receipt unique index is installed and runtime-verified; the Payment ObjectId index alone cannot prove external receipt uniqueness.
+
+## Current next gate: G5.2 tenancy link and protected notification lifecycle
+
+The proposed lifecycle/outbox decision record is [G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md](G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md).
+
+**Status:** PROPOSED for independent design review. NO-GO for application implementation, model changes, migrations, key creation, dispatch-worker changes or Celcom sends.
+
+G5.2 keeps the existing Celcom queue/provider, but extends it with session-aware protected enqueue, a versioned encrypted payload, API/history redaction, dispatch lease fencing and conservative crash recovery. Tenant/Tenancy/link/outbox/critical audit commit together when trusted G5 provisioning is REQUIRED; DISABLED creates no new link/outbox but still transitions any old link when its Tenancy closes/transfers. `moved_out` must become atomic; move must accept a caller-owned session; demo SMS must be explicitly suppressed. Move/move-out requests require an exact expected Tenancy ID supplied by the authenticated tenant detail `currentTenancyId` field. B01/B03 merchant readiness, B05 inbound evidence retention, D17 protected outbox retention, B08 unknown-send recovery and D14 delivery SLA remain unresolved. D18 also requires an API contract change to expose and return exact expected Tenancy IDs.
 
 Source of truth for G5 documentation and shared review is the live GitHub feature branch accessed through Composio. A hosted agent's local workbench may be stale or divergent and must be reconciled without destructive Git operations.
 
@@ -134,3 +142,19 @@ The independent review supported the five-record model and conditional claim-on-
 - `claimState` no longer duplicates `POSTED`; posting completion belongs to `postingState`. SHA-256 of a uniformly random 256-bit token is the default; HMAC pepper is not presumed easier to rotate.
 
 **Review outcome:** CONDITIONAL GO for the corrected G5.1 design record. Application implementation and migrations remain NO-GO. No code, database, migration, provider, or test environment was changed or exercised by this review.
+
+## G5.2 source review (12 November 2026)
+
+The implementation source was rechecked at `main@204c8f9c3578f753af20727799aaa049b1545135`. Findings and the proposed lifecycle/outbox state machine are recorded in `G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md`.
+
+- `tenantService.create()` already creates Tenant + Tenancy in one Mongo transaction, but `tenantController.create()` does not pass the actor ID accepted by the service. `tenantController.moveToHouse()` also omits the actor argument accepted by its service, and the move-out update path currently has no actor parameter. G5 critical audit requires explicit actor propagation from the authenticated controller into the lifecycle use case.
+- `tenantService.create()` already creates Tenant + Tenancy in one Mongo transaction. `tenancyService.moveToHouse()` also has a transaction, but owns its session and clears the old House pointer without matching the expected old Tenant; G5 must make it caller-session-aware and compare the exact pointer so stale moves cannot clear another occupant.
+- `tenantService.update(status='moved_out')` still writes Tenant before a separate Tenancy close. Its fallback may unconditionally clear a House pointer when it cannot find the expected active old tenancy, potentially affecting a later occupant. `tenantService.get()` also omits the active Tenancy ID it uses internally. G5.2 requires an exact `currentTenancyId` DTO, expected-Tenancy request preconditions and a House pointer compare before any clear. The operation must become one transaction before G5 lifecycle state is attached.
+- `queueSms()` and `withIdempotency()` do not accept a Mongo session. Protected onboarding needs a session-aware insert into the existing SmsMessage queue, not a second queue.
+- SmsMessage body and phone are currently ordinary fields exposed through SMS history/tenant details. G5 destination/body must live in an authenticated, versioned encrypted envelope; default API/history/serialization paths must redact it.
+- The worker has no stale-`processing` reclaimer. G5 requires a fenced dispatch lease and a durable `sendStartedAt` boundary; only pre-send expired leases can be safely reclaimed. After send-start, an expired/ambiguous result is `unknown` and cannot be blindly resent. The Celcom adapter accepts only mobile/message and ignores the third idempotency argument passed by the generic service; no provider-level idempotency is established.
+- `seedDemoClient.js` inserts “not sent” sample SMS records as `queued`, which the scheduled 15-minute drain can dispatch. Seed rows must be suppressed and excluded by the atomic worker claim query.
+- MongoDB `withTransaction()` may retry its callback. Preallocate stable identifiers, token/version and idempotency key, and pin the outbox key version before the callback. Generate a fresh GCM nonce/envelope inside each callback attempt; only the committed envelope can be dispatched, and no Celcom I/O occurs inside the callback.
+
+**G5.2 status:** PROPOSED for independent design review. No application code, model, migration, key, provider or test environment was changed or exercised.
+

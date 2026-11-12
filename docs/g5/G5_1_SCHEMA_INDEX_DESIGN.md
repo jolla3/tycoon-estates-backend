@@ -322,3 +322,16 @@ G5.1 APPLICATION IMPLEMENTATION remains NO-GO until the owner gives explicit aut
 **NO-GO for G5.1 application implementation or migrations.**
 
 This is a proposal for review. `mpesaingestionevents` is the corrected proposed ingestion collection name; `mpesatransactions` was already the correct proposed transaction collection name and does not need renaming. This is not proof of live merchant capability, final database index state, or production readiness. Implementation and migrations remain NO-GO.
+
+## 10. G5.2 follow-on schema extension — PROPOSED only
+
+The G5.2 lifecycle/outbox design in [`G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md`](G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md) proposes one additive field on `MpesaSubmissionLink`:
+
+| Field | Type | Purpose / constraint |
+|---|---|---|
+| `dispatchRevision` | Number, default `0` | Write-fence revision incremented by the protected SMS dispatcher when it authorizes the `sendStartedAt` boundary for the exact current `tokenVersion`. Rotation/revocation writes the same link document, so the competing write operations serialize. It is not a submission idempotency key and requires no index. |
+
+This is not part of the original G5.1.1 proposal and is not an existing source/model field. It is proposed because G5.2 identified a concrete dispatch-start-vs-rotation/revocation race. It remains subject to independent G5.2 review and explicit implementation authorization. The existing `submissionRevision` remains the submission-vs-rotation write fence; do not overload it with dispatch semantics.
+
+The protected SMS fields and dispatch lease additions are proposed extensions to the existing generic `SmsMessage` queue record, not new G5 domain aggregates. See the G5.2 design record for the envelope, `deliveryMode`, `dispatchMode`, lease, `sendStartedAt`, suppression and retention requirements.
+

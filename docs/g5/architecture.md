@@ -324,13 +324,16 @@ Do not apply an arbitrary short calendar TTL to a permanent tenancy association.
 
 ### 7.5 Move, close and void
 
-- A move closes the old Tenancy and creates a separate new Tenancy. Create a new link for the new Tenancy in the same transaction.
-- Preserve the old link's original `tenancyId` and owner snapshot.
-- On close, set old link to `ARREARS_ONLY` if debt, unresolved claims, unapplied credit, or unverified historical coverage may remain.
-- Set `SETTLED` only when the PRD settlement conditions are proven. A zero cached charge projection is not sufficient.
-- A `VOID` Tenancy cannot receive automatic posting; revoke or hold its link for authorized review according to the correction/audit process.
-- The audited `tenantService.update(status='moved_out')` path currently performs Tenant update and Tenancy close separately. It must be replaced/centralized as an atomic lifecycle operation before G5 relies on it.
-- Trace every status/close/void path and scheduled task. Do not wire link state into only `tenantService.create()` and `moveToHouse()` while leaving alternate lifecycle paths inconsistent.
+- A move is one caller-owned Mongo transaction: close the old Tenancy, transition its existing link, create the new Tenancy, create the new link/outbox when G5 provisioning is REQUIRED, update House/Tenant pointers, and write critical audit rows.
+- Preserve the old link's original `tenancyId` and immutable owner snapshot. The new Tenancy receives a different link; do not retarget or clone the old link.
+- A same-house move is a no-op. It creates no new Tenancy, link or outbox record.
+- On close/move-out, set an existing old link to `ARREARS_ONLY` if debt, unresolved claims, unapplied credit, or unverified historical coverage may remain. `SETTLED` remains blocked by B07; a zero cached charge projection is not proof.
+- A `VOID` Tenancy cannot receive automatic posting; hold its link for authorized review or revoke only under the correction/audit process. No current void service was identified in the inspected baseline.
+- The audited `tenantService.update(status='moved_out')` path is a split write. Its fallback can unconditionally clear a House pointer when no matching active old Tenancy is found; this can affect a later occupant. Replace it with one transaction covering Tenant, exact expected Tenancy, conditional House pointer, old-link transition and audit.
+- `tenantService.get()` uses the active Tenancy internally to calculate Ledger balance but does not return its ID. Add read-only `currentTenancyId` from an exact client/tenant ACTIVE lookup, verify the pointer, and require clients to send it as a move/move-out precondition. If the query returns zero or multiple active Tenancies, block the transition for controlled repair. Controllers must pass the authenticated actor ID into create/move/move-out lifecycle services.
+- `tenancyService.moveToHouse()` clears the old House pointer using only House ID/client and does not reject a non-null conflicting destination House tenant pointer when no active Tenancy row exists. Require `expectedCurrentTenancyId`, exact source House `{ _id, clientId, tenantId }` match with one row modified, and a vacant/consistent destination pointer before assigning it.
+- G5 provisioning must be an explicit trusted `DISABLED`/`REQUIRED` decision. REQUIRED fails the whole lifecycle operation if one operational merchant mapping or protected outbox write is unavailable; DISABLED creates no new link/outbox but still transitions any existing old link atomically when its Tenancy closes/transfers. The protected message uses the new `g5_onboarding_link` type and `g5_onboarding_link:v1` notification version; its outbox key is tied to link ID, token version, template version and preallocated message ID.
+- Low-level `tenancyService.open()` must not implicitly create links or dispatch SMS because demo/seed callers use it directly. Trace every status/close/void path and scheduled task at the implementation HEAD.
 
 ## 8. Protected SMS delivery
 
@@ -354,6 +357,24 @@ Extend the current SMS pipeline rather than creating a second delivery system:
 - Treat `unknown` as ambiguous delivery. Do not resend blindly. First verify whether Celcom exposes a delivery lookup or define a controlled operator confirmation process. This remains a blocker until proven.
 
 A separate `MpesaNotificationOutbox` is acceptable only if the review demonstrates the current `SmsMessage` path cannot be safely extended. It must still feed the existing provider worker; do not create a second provider abstraction or queue.
+
+### 8.3 Dispatch lease and crash recovery
+
+The existing dispatcher claims only `queued` rows and has no stale-`processing` reclaimer. Extend the same worker/queue with a random dispatch lease token, expiry and `sendStartedAt` boundary. Every completion/reclaim update must match the current lease token.
+
+- Claim changes queued to processing and writes a fresh lease token/expiry.
+- Before provider I/O, decrypt and validate the protected envelope, then commit a write-bearing `sendStartedAt` CAS in the SMS row and a write-bearing current-link/version check in the same Mongo transaction. This serializes dispatch authorization against link rotation/revocation.
+- Expired processing with no `sendStartedAt` may be requeued only after confirming the link/version remains eligible.
+- Expired processing with `sendStartedAt` is `unknown`; the external request may have reached Celcom. Do not blindly requeue.
+- Accepted, failed and unknown outcomes can be written only by the current lease token. A stale worker cannot overwrite a newer claim/outcome.
+- A rotation/revocation that commits after `sendStartedAt` immediately invalidates the old token but cannot recall a request already in flight. The message may arrive with a nonredeemable URL.
+- `SmsMessage.status = sent` means Celcom accepted the request, not that the handset received the SMS.
+
+The current 15-minute scheduler cadence is not an approved onboarding delivery SLA. G5-D14 must define maximum time-to-first-attempt. A more frequent scheduler trigger may call the same dispatcher if approved; no second queue/provider platform is introduced. Celcom `unknown` remains blocked by B08 until actual status lookup or controlled operator resolution is demonstrated.
+
+### 8.4 Seed and test suppression
+
+`seedDemoClient.js` currently inserts a sample SMS record with `status: queued` while labelling it “not sent”. The ordinary scheduler drains queued rows, so this fixture can reach live Celcom. Add an explicit `dispatchMode: SUPPRESSED`/suppressed status for seed/test rows and exclude them in the atomic worker claim predicate. Demo seed must never request G5 link provisioning. Preserve existing legacy queue behaviour for historical rows missing the new mode, with an explicit compatibility rule.
 
 ## 9. Submitted SMS evidence and deterministic parser
 
@@ -975,7 +996,7 @@ No alternate direct production Tenancy create/status write was identified in the
 
 ### 24.7 Implementation order and review verdict
 
-Before G5.2, fix and test the `moved_out` transaction boundary and establish the seed/no-send policy. Before G5.3, design the public bearer endpoint middleware ordering, bounded body parser, abuse-control outage behaviour, frontend hosting owner, and Celcom queue recovery contract. Before G5.7, test the exact old-tenancy credit cases above and add MPESA idempotency through the existing G3 service.
+Before G5.2 implementation, complete the `moved_out` transaction refactor, caller-owned move session, expected-Tenancy stale-request guards, protected outbox design review, key custody decision, and seed/no-send suppression tests. The design phase itself is documentation-only. Before G5.3, design the public bearer endpoint middleware ordering, bounded body parser, abuse-control outage behaviour, frontend hosting owner, and Celcom unknown-outcome recovery contract. Before G5.7, test the exact old-tenancy credit cases above and add MPESA idempotency through the existing G3 service.
 
 **G5.0.2 result: documentation review only. G5.1 implementation is NO-GO at this point.** The original owner authorization has not been supplied in this conversation, the final merchant identity/credential schema scope remains subject to B01/B09, and the security/lifecycle dependencies above need to be reflected in the design. This is not a claim that every B01–B10 decision blocks schema design; the blocker is the explicit authorization boundary plus the unresolved schema scope where those decisions matter. G5 remains code-free and migration-free.
 
@@ -998,3 +1019,26 @@ Important boundaries:
 - Recommended public submission limiter default is fail-closed during Redis outage unless an independently verified upstream layer offers equivalent protection. This remains a technical recommendation, not an owner decision.
 
 **G5.1.1 design verdict:** CONDITIONAL GO for the corrected five-record schema/index design; NO-GO for application models, migrations, readiness wiring, routes, workers, or posting code until explicit owner authorization. B01/B02 also keep financial posting disabled until the external receipt uniqueness scope and exact unique index are proven.
+
+## 26. G5.2 tenancy-link and protected-outbox design review
+
+The detailed decision record is `docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md`. It is a proposed design for independent review only.
+
+Source-specific corrections and design consequences:
+
+- `tenantService.create()` and `tenancyService.moveToHouse()` already use Mongo transactions; extend those existing units rather than nesting new transactions.
+- `tenancyService.moveToHouse()` currently owns its session; G5 needs a caller-owned session or one shared lifecycle orchestrator so the old-link transition and new-link/outbox join the same transaction.
+- `tenantService.update(status='moved_out')` writes Tenant before closing Tenancy in a separate transaction. Remove that split before attaching G5 state.
+- `tenantController.create()` does not currently forward the actor ID accepted by `tenantService.create()`. G5 lifecycle audit requires explicit actor propagation.
+- `queueSms()` and `withIdempotency()` do not accept a Mongo session. A protected outbox must use a session-aware enqueue path and the existing unique idempotency barrier. The `SmsMessage.idempotencyKey` schema declares uniqueness, but the live `smsmessages.idempotencyKey` index must be inspected before relying on it.
+- `SmsMessage.message` and `phoneNumber` are ordinary plaintext fields returned in tenant/SMS history. Keep the G5 destination/body inside a dedicated versioned AES-GCM envelope with AAD; ordinary API-visible fields must be redacted. The current `type` field is a strict enum; add a dedicated `g5_onboarding_link` value and `notificationVersion: g5_onboarding_link:v1` rather than overloading `general`.
+- The existing encryption helper has no key identifier/version or AAD. Bank key management is provider-specific. G5 needs its own reviewed keyring; no key fallback or plaintext mode.
+- `withTransaction()` callbacks can be retried. Preallocate stable IDs, token/version and idempotency key, and pin the approved outbox key version before entering the callback. After session-bound merchant/tenancy validation, generate a fresh GCM nonce and encrypted envelope inside each callback attempt. Only the committed envelope is dispatchable; Celcom I/O must happen only after successful commit.
+- The seed script queues SMS history marked “not sent”. This is eligible for the live 15-minute dispatcher. Add explicit suppressed mode and prove the worker never claims it.
+- The current `smsService` passes `job.idempotencyKey` as a third argument to `provider.send()`, but the Celcom implementation signature is `send(mobile, message)` and ignores that argument. No provider-level idempotency is established. The existing unique DB key deduplicates queue records only.
+- The existing 15-minute queue-drain cadence is not a delivery SLA. B08, D14 and D17 remain unresolved; no blind retry, invented retention duration or guessed delivery target.
+
+Official transaction references: [MongoDB Node.js Driver transactions](https://www.mongodb.com/docs/drivers/node/current/crud/transactions/), [MongoDB transaction application handling](https://www.mongodb.com/docs/manual/core/transactions-in-applications/), and [MongoDB stale-read/write-conflict considerations](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/).
+
+**G5.2 design verdict:** PROPOSED for independent review. NO-GO for lifecycle/SMS code, schema changes, migrations, key creation, worker changes or provider sends until explicit slice authorization.
+

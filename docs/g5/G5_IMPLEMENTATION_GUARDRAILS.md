@@ -193,7 +193,8 @@ Lifecycle transitions affecting Tenant, Tenancy, MpesaSubmissionLink and protect
 - Tenant + Tenancy + link + encrypted outbox atomic create/rollback.
 - Move creates distinct old/new links; old link never retargets.
 - Close/move and claim/post serialize against the correct tenancy revision.
-- moved_out path is transactional.
+- moved_out path is transactional and requires the exact expected Tenancy ID.
+- Stale move/move-out requests cannot mutate a later Tenancy or clear a different occupant's House pointer.
 - Protected SMS payload never appears in API/history/serialization/logs.
 - Callback and Pull overlap create one canonical transaction when the exact external identity index is ready; otherwise duplicate candidates remain non-postable.
 - SMS-before-Daraja and Daraja-before-SMS both converge.
@@ -277,7 +278,7 @@ The GitHub branch API reported `protected: false` for `main` during this review.
 
 ## 16. G5.1 schema/index design boundary
 
-Use `docs/g5/G5_1_SCHEMA_INDEX_DESIGN.md` as the current schema/index proposal. Treat all unapproved schema fields and indexes as PROPOSED, not existing.
+Use `docs/g5/G5_1_SCHEMA_INDEX_DESIGN.md` as the core schema/index proposal and `docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md` for lifecycle/outbox refinements. Treat `MpesaSubmissionLink.dispatchRevision` and all unapproved SMS envelope/lease fields as PROPOSED, not existing.
 
 - Do not implement a separate PaymentClaim collection unless a concrete independent lifecycle requires it; the proposal places the winning claim and fenced posting state on the canonical MpesaTransaction.
 - Do not finalize merchant identity or receipt uniqueness before B01/B02 evidence.
@@ -286,3 +287,37 @@ Use `docs/g5/G5_1_SCHEMA_INDEX_DESIGN.md` as the current schema/index proposal. 
 - Do not add TTL/retention indexes before B05.
 - Public bearer submission should fail closed when the shared limiter is unavailable unless equivalent independent upstream protection is verified. This is the preferred technical default, not an owner-approved product rule.
 - Design approval does not authorize application implementation. A separate explicit owner instruction must name the implementation slice.
+
+## 17. G5.2 tenancy lifecycle and protected-outbox boundary
+
+Use `docs/g5/G5_2_TENANCY_LINK_AND_OUTBOX_DESIGN.md` as the proposed design. It is not implementation authorization.
+
+- Keep `tenantService.create()` Tenant/Tenancy creation and G5 link/outbox creation in one caller-owned Mongo session. Preallocate stable IDs, token/version and idempotency key; pin the outbox key version. Generate a fresh GCM nonce/envelope inside each retryable callback attempt after session-bound merchant validation. Never reuse a nonce/key pair across callback retries.
+- Refactor `tenancyService.moveToHouse()` to accept a caller-owned session (or use one shared lifecycle orchestrator) so old Tenancy close, old-link `ARREARS_ONLY`, new Tenancy, new link/outbox, House/Tenant pointers and critical audit commit atomically. Expose `currentTenancyId` in authenticated tenant detail and require `expectedCurrentTenancyId`; compare source House pointer to the exact old Tenant and require a vacant/consistent destination House pointer before assigning. Same-house move remains a no-op.
+- Refactor `tenantService.update(status='moved_out')` before G5 integration. Require `expectedTenancyId`, and do not write Tenant status outside the transaction that closes that exact Tenancy, conditionally updates House, transitions the old link and writes critical audit. Remove the fallback that unconditionally clears the House pointer when no matching active tenancy is found. Pass the authenticated actor ID through create/move/move-out service signatures and persist it on Tenancy/AuditLog. Require exact House pointer updates to match the expected tenant and `matchedCount === 1`; stale requests must conflict, never clear later occupants.
+- G5 provisioning is a trusted server-side `DISABLED`/`REQUIRED` decision, never a tenant-controlled body field. REQUIRED fails the whole operation if exactly one permitted operational merchant cannot be resolved or protected encryption/outbox readiness is unavailable. DISABLED creates no new link/outbox but still transitions an existing old link when its Tenancy closes/transfers.
+- Do not hook G5 provisioning to every low-level `tenancyService.open()` call. The seed script uses it directly. Demo/test flows must explicitly stay G5-disabled.
+- `queueSms()` and `withIdempotency()` do not accept a Mongo session. Do not call them unchanged inside lifecycle transaction. Add session-aware protected enqueue using the existing SMS record/idempotency barrier; inspect the actual live `smsmessages.idempotencyKey` unique index before relying on it.
+- G5 protected destination/body must be inside a dedicated versioned authenticated-encryption envelope with AAD bound to message/client/estate/tenant/house/link/tokenVersion/deliveryMode/dispatchMode/type/notificationVersion/idempotencyKey/formatVersion/keyId. Do not use plaintext fallback, the legacy unversioned encryption helper unchanged, or bank-only key material.
+- Ordinary SmsMessage fields, JSON, history, tenant detail, audit, logs and errors must not expose bearer URL, plaintext body, ciphertext or key material. Decrypt only immediately before provider dispatch.
+- Never call Celcom inside a `withTransaction()` callback. MongoDB may retry the callback; provider sends inside it can duplicate.
+- Dispatch uses a Mongo lease token and expiry. `sendStartedAt` is the external side-effect boundary. The standard worker claim query must exclude `deliveryMode: G5_PROTECTED`; the protected branch claims/decrypts only G5_PROTECTED rows and never falls back to plaintext. Stale pre-send work may be reclaimed only after current link/version validation; post-send-start expiry/exception/no-response/5xx is `unknown`, never blindly queued. All completion/reclaim writes require the current lease token. A late response may settle `unknown` only if the original attempt token still matches; a new authorized attempt uses a new token.
+- `sent` means provider accepted, not handset delivery. Celcom `unknown` remains unresolved until B08 gives verified provider lookup or controlled operator policy. The current Celcom adapter ignores the extra idempotency-key argument; do not assume provider-side deduplication. D14 must set maximum time-to-first-attempt; do not assume the current 15-minute cadence is acceptable. D17 must define protected outbox payload clearing/hold policy.
+- Seed/test messages must be explicitly suppressed and excluded from the atomic dispatch claim query. The source currently inserts “not sent” SMS samples as `queued`; this is a verified risk, not a hypothetical cleanup.
+- No TTL/retention duration or key rotation grace period may be invented. B05 governs inbound SMS/payer evidence; D17 governs encrypted outbound recipient/body retention; B08 governs unknown delivery recovery.
+
+### Additional G5.2 tests required
+
+- Transaction rollback at every step of Tenant/Tenancy/link/protected-outbox/audit create.
+- G5 DISABLED path and REQUIRED fail-closed path for missing/ambiguous/non-operational merchant and missing key.
+- Move old/new Tenancy/link/outbox atomicity; same-house no-op; moved_out failure rollback; repeat move-out cannot alter a later occupancy.
+- Concurrent create/move/link uniqueness; rotation/revoke versus send-start CAS.
+- Envelope tamper/AAD/key-version tests; tenant detail/history/JSON/log/audit redaction.
+- Two worker claims cannot send the same row; expired pre-send lease safely reclaims; expired post-send-start lease becomes unknown; stale worker cannot overwrite after takeover.
+- Demo seed messages use suppressed mode; worker does not claim them and provider mock receives zero calls.
+- Existing standard SMS recipient idempotency, queueing, failure/unknown and concurrent claim tests remain green.
+
+## 18. G5.2 design/implementation gate
+
+Independent review must challenge the lifecycle state machine, provisioning policy, encryption/AAD/key rotation, lease expiry and seed suppression. After review, the owner must explicitly authorize a bounded implementation slice. Until then, no Tenant/Tenancy refactor, SmsMessage model change, key creation, worker/scheduler change, migration or provider send is permitted.
+
