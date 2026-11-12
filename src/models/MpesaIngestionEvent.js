@@ -4,6 +4,7 @@
 // Collection: mpesaingestionevents
 // payloadDigest is diagnostic only — not a provider event uniqueness barrier.
 // Event persistence and processing are separate stages (G5.1).
+// autoIndex: false — indexes are explicit; no silent unique identity install.
 
 import mongoose from 'mongoose';
 import {
@@ -56,12 +57,11 @@ const MpesaIngestionEventSchema = new Schema(
     processingLeaseToken: { type: String, default: null },
     processingLeaseExpiresAt: { type: Date, default: null },
   },
-  { timestamps: true }
+  { timestamps: true, autoIndex: false, collection: 'mpesaingestionevents' }
 );
 
 MpesaIngestionEventSchema.index({ state: 1, nextAttemptAt: 1, receivedAt: 1 });
 MpesaIngestionEventSchema.index({ merchantProfileId: 1, sourceChannel: 1, receivedAt: -1 });
-// Non-unique diagnostic index only
 MpesaIngestionEventSchema.index({
   provider: 1,
   businessShortCode: 1,
