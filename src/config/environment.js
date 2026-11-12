@@ -120,6 +120,15 @@ export const env = {
   CELCOM_PARTNER_ID: optional('CELCOM_PARTNER_ID'),
   CELCOM_API_KEY: optional('CELCOM_API_KEY'),
   CELCOM_SENDER_ID: optional('CELCOM_SENDER_ID'),
+
+  // Daraja / M-PESA (G5.3) — optional until sandbox credentials are configured
+  DARAJA_ENVIRONMENT: optional('DARAJA_ENVIRONMENT') || 'sandbox',
+  DARAJA_CONSUMER_KEY: optional('DARAJA_CONSUMER_KEY'),
+  DARAJA_CONSUMER_SECRET: optional('DARAJA_CONSUMER_SECRET'),
+  /** Explicit enable for public Daraja callback routes (never auto-on in production). */
+  DARAJA_CALLBACKS_ENABLED: optional('DARAJA_CALLBACKS_ENABLED') === '1' ? '1' : '',
+  /** Non-production lab enable for local callback testing. */
+  DARAJA_CALLBACKS_LAB: optional('DARAJA_CALLBACKS_LAB') === '1' ? '1' : '',
 };
 
 /**
