@@ -67,7 +67,6 @@ export function createDarajaOAuthClient({
       const err = new Error('Daraja OAuth token request failed');
       err.code = 'DARAJA_OAUTH_FAILED';
       err.status = response.status;
-      // Never attach raw body that may echo credentials.
       throw err;
     } catch (error) {
       if (error.code === 'DARAJA_OAUTH_FAILED') throw error;
@@ -78,9 +77,6 @@ export function createDarajaOAuthClient({
     }
   }
 
-  /**
-   * Returns a bearer access token, reusing cache and coalescing concurrent refresh.
-   */
   async function getAccessToken({ forceRefresh = false } = {}) {
     if (!forceRefresh && cacheValid()) {
       return cached.accessToken;
@@ -102,7 +98,6 @@ export function createDarajaOAuthClient({
     cached = null;
   }
 
-  /** Redacted snapshot for diagnostics — never includes secrets or token. */
   function debugState() {
     return {
       environment,
@@ -123,11 +118,16 @@ export function createDarajaOAuthClient({
 }
 
 /**
- * Load OAuth client from process env. Missing credentials return null (fail closed).
+ * Load OAuth client from process env.
+ * Unknown DARAJA_ENVIRONMENT fails closed (does not silently select sandbox).
+ * Missing credentials return null.
  */
 export function createDarajaOAuthClientFromEnv(envLike) {
-  const environment =
-    envLike.DARAJA_ENVIRONMENT === 'production' ? DARAJA_ENV.PRODUCTION : DARAJA_ENV.SANDBOX;
+  const rawEnv = (envLike.DARAJA_ENVIRONMENT || DARAJA_ENV.SANDBOX).toLowerCase();
+  if (rawEnv !== DARAJA_ENV.SANDBOX && rawEnv !== DARAJA_ENV.PRODUCTION) {
+    throw new Error(`Unknown DARAJA_ENVIRONMENT: ${envLike.DARAJA_ENVIRONMENT}`);
+  }
+  const environment = rawEnv === DARAJA_ENV.PRODUCTION ? DARAJA_ENV.PRODUCTION : DARAJA_ENV.SANDBOX;
   const consumerKey = envLike.DARAJA_CONSUMER_KEY;
   const consumerSecret = envLike.DARAJA_CONSUMER_SECRET;
   if (!consumerKey || !consumerSecret) {
