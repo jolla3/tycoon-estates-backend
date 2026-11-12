@@ -12,9 +12,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
-// Load .env from the project root (two levels above src/config/), not from
-// process.cwd(). That way nodemon/npm started from a parent directory still
-// finds the correct file.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '../..');
 const envPath = path.join(projectRoot, '.env');
@@ -25,10 +22,6 @@ const NODE_ENV = process.env.NODE_ENV || 'development';
 const isProd = NODE_ENV === 'production';
 export const isTest = NODE_ENV === 'test';
 
-/**
- * Required string from process.env. Empty / whitespace-only = missing.
- * No fallback values are embedded in source code.
- */
 function required(name) {
   const raw = process.env[name];
   const value = typeof raw === 'string' ? raw.trim() : raw;
@@ -47,18 +40,12 @@ function required(name) {
   );
 }
 
-/**
- * Optional string — returns undefined when unset/blank.
- */
 function optional(name) {
   const raw = process.env[name];
   const value = typeof raw === 'string' ? raw.trim() : raw;
   return value || undefined;
 }
 
-/**
- * ENCRYPTION_KEY must be 64 hex characters (32 bytes) for AES-256-GCM.
- */
 function requiredEncryptionKey() {
   const key = required('ENCRYPTION_KEY');
   if (!/^[0-9a-fA-F]{64}$/.test(key)) {
@@ -73,31 +60,20 @@ function requiredEncryptionKey() {
 export const env = {
   NODE_ENV,
   PORT: parseInt(process.env.PORT || '4000', 10),
-  // Browser Origin(s) allowed for CORS + credentialed cookies.
-  // Set in env only — never hardcode production hosts in source.
-  // One origin, or comma-separated list. Trailing slashes are stripped.
-  // Local default is for development only.
   FRONTEND_URL: (optional('FRONTEND_URL') || 'http://localhost:5173').replace(/\/+$/, ''),
   TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS || '1', 10),
 
-  // Infrastructure — from .env only
-  // Test-only sentinels allow unit tests to import infrastructure consumers without opening a connection. Integration helpers still require the raw
-  // process.env.MONGODB_URI and validate a dedicated disposable replica set.
   MONGODB_URI: isTest
     ? (optional('MONGODB_URI') || 'mongodb://127.0.0.1:1/tycoon_test_config_only')
     : required('MONGODB_URI'),
-  // REDIS_TEST_URL is accepted only in test mode. The port-1 sentinel keeps
-  // accidental unit-test connections fail-closed when no test Redis is set.
   REDIS_URL: isTest
     ? (optional('REDIS_URL') || optional('REDIS_TEST_URL') || 'redis://127.0.0.1:1')
     : required('REDIS_URL'),
 
-  // Secrets — from .env only, never hardcoded in this file
   COOKIE_SECRET: required('COOKIE_SECRET'),
   SESSION_SECRET: required('SESSION_SECRET'),
   ENCRYPTION_KEY: requiredEncryptionKey(),
 
-  // Co-operative Bank — all from .env (optional until you connect a bank)
   COOP_BASE_URL: optional('COOP_BASE_URL'),
   COOP_CLIENT_ID: optional('COOP_CLIENT_ID'),
   COOP_CLIENT_SECRET: optional('COOP_CLIENT_SECRET'),
@@ -105,37 +81,25 @@ export const env = {
   COOP_PASSWORD: optional('COOP_PASSWORD'),
   COOP_SCOPE: optional('COOP_SCOPE') || null,
   COOP_INS_BASIC_SECRET: optional('COOP_INS_BASIC_SECRET'),
-  // Dedicated application-level encryption key for MongoDB BankCredential records.
-  // This key is separate from ENCRYPTION_KEY and must never be stored in MongoDB/Redis.
   BANK_SECRETS_ENCRYPTION_KEY: optional('BANK_SECRETS_ENCRYPTION_KEY') || '',
   BANK_SECRETS_ENCRYPTION_KEY_PREVIOUS: optional('BANK_SECRETS_ENCRYPTION_KEY_PREVIOUS') || '',
-  /** Explicit non-production lab enable for unverified COOP bank workflows. */
   COOP_BANK_LAB_MODE: optional('COOP_BANK_LAB_MODE') === '1',
-  /** Explicit non-production lab enable for the COOP inbound webhook. */
   COOP_WEBHOOK_LAB_OVERRIDE: optional('COOP_WEBHOOK_LAB_OVERRIDE') === '1',
 
-
-  // Celcom Africa SMS — all from .env
   CELCOM_BASE_URL: optional('CELCOM_BASE_URL'),
   CELCOM_PARTNER_ID: optional('CELCOM_PARTNER_ID'),
   CELCOM_API_KEY: optional('CELCOM_API_KEY'),
   CELCOM_SENDER_ID: optional('CELCOM_SENDER_ID'),
 
-  // Daraja / M-PESA (G5.3) — optional until sandbox credentials are configured
   DARAJA_ENVIRONMENT: optional('DARAJA_ENVIRONMENT') || 'sandbox',
   DARAJA_CONSUMER_KEY: optional('DARAJA_CONSUMER_KEY'),
   DARAJA_CONSUMER_SECRET: optional('DARAJA_CONSUMER_SECRET'),
-  /** Explicit enable for public Daraja callback routes (never auto-on in production). */
   DARAJA_CALLBACKS_ENABLED: optional('DARAJA_CALLBACKS_ENABLED') === '1' ? '1' : '',
-  /** Non-production lab enable for local callback testing. */
   DARAJA_CALLBACKS_LAB: optional('DARAJA_CALLBACKS_LAB') === '1' ? '1' : '',
+  /** Explicit opt-in for scheduled Pull query/reconciliation (default off). */
+  DARAJA_PULL_RECONCILIATION_ENABLED: optional('DARAJA_PULL_RECONCILIATION_ENABLED') === '1' ? '1' : '',
 };
 
-/**
- * True when at least one configured FRONTEND_URL host is not loopback.
- * Drives SameSite=None + Secure for credentialed cross-origin cookies.
- * All hosts come from env — no production URLs in source.
- */
 export function isCrossSiteFrontend() {
   const raw = String(env.FRONTEND_URL || '');
   const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
