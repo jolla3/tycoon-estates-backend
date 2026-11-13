@@ -1,157 +1,196 @@
 // src/services/mpesa/mpesaSubmission.service.js
 //
 // Public Tenant SMS submission + matching against canonical Daraja receipts.
-// The submitted SMS is EVIDENCE ONLY. It can never create money; posting remains gated on verified Daraja data.
-//
-// Security:
-// - Same-document CAS on linkVersion + submissionRevision
-// - Transactional accept under Mongo session
-// - acceptedLinkVersion / acceptedAt recorded for audit
-
+// The submitted SMS is EVIDENCE ONLY. It can never create money; posting requires a
+// provider-verified canonical MpesaTransaction (see mpesaPosting.service.js).
+// Payer MSISDN/name are neither parsed into storage nor compared with the Tenant.
 import mongoose from 'mongoose';
-import { MpesaSmsSubmission } from '../../models/MpesaSmsSubmission.js';
 import { MpesaSubmissionLink } from '../../models/MpesaSubmissionLink.js';
+import { MpesaSmsSubmission, SUBMISSION_STATE } from '../../models/MpesaSmsSubmission.js';
 import { MpesaTransaction } from '../../models/MpesaTransaction.js';
+import { parseMpesaSms } from './mpesaSmsParser.js';
+import { resolveOperationalMerchant } from './mpesaSubmissionLink.service.js';
+import { evaluateEvidence, postVerifiedReceipt, postingGate } from './mpesaPosting.service.js';
+import { DARAJA_PROVIDER } from './daraja.constants.js';
+import { isWellFormedToken, digestToken } from '../../utils/g5Token.js';
+import { sealEnvelope, envelopeKeyId, evidenceDigest } from '../../utils/g5Envelope.js';
+import { env } from '../../config/environment.js';
 import { logger } from '../../config/logger.js';
-import { AppError } from '../../utils/AppError.js';
 
-const { withTransaction } = mongoose;
+export const SUBMISSION_REJECTED = Symbol('SUBMISSION_REJECTED');
 
-/**
- * Accept a public SMS submission against an active submission link.
- * Uses same-document CAS (linkVersion + submissionRevision) inside a transaction.
- */
-export async function submitSms({
-  tokenDigest,
-  rawSms,
-  clientMeta = {},
-  session: externalSession = null,
-}) {
-  if (!tokenDigest || !rawSms) {
-    throw new AppError(400, 'tokenDigest and rawSms are required');
+function canonicalText(text) {
+  return String(text).replace(/\s+/g, ' ').trim();
+}
+
+/** Match one stored submission against the canonical receipt; never posts unless the gate is open. */
+export async function matchSubmission(submissionId) {
+  const sub = await MpesaSmsSubmission.findById(submissionId);
+  if (!sub || ![SUBMISSION_STATE.PARSED, SUBMISSION_STATE.UNMATCHED].includes(sub.state)) return sub?.state || null;
+  const link = await MpesaSubmissionLink.findById(sub.linkId);
+  if (!link) return setState(sub, SUBMISSION_STATE.MANUAL_REVIEW, 'LINK_MISSING');
+  // Merchant must still be operational for posting; link may already be rotated.
+  const merchant = await resolveOperationalMerchant(sub.clientId, sub.estateId);
+  if (!merchant) return setState(sub, SUBMISSION_STATE.UNMATCHED, 'MERCHANT_NOT_OPERATIONAL');
+  const txn = await MpesaTransaction.findOne({
+    provider: DARAJA_PROVIDER, businessShortCode: merchant.businessShortCode, receiptNumber: sub.receiptNumber,
+  });
+  if (!txn) return setState(sub, SUBMISSION_STATE.UNMATCHED, 'RECEIPT_NOT_YET_RECEIVED');
+  const verdict = evaluateEvidence({ submission: sub, link, txn, profile: merchant });
+  if (!verdict.ok) {
+    const s = verdict.reason === 'COMPETING_CLAIM' ? SUBMISSION_STATE.CONFLICTING
+      : verdict.reason === 'RECEIPT_NOT_VERIFIED' ? SUBMISSION_STATE.UNMATCHED : SUBMISSION_STATE.MANUAL_REVIEW;
+    return setState(sub, s, verdict.reason, txn._id);
   }
-
-  const run = async (session) => {
-    const link = await MpesaSubmissionLink.findOne({ tokenDigest, status: 'ACTIVE' })
-      .session(session)
-      .select('+tokenDigest');
-
-    if (!link) {
-      throw new AppError(404, 'Submission link not found or revoked');
+  await setState(sub, SUBMISSION_STATE.MATCHED, null, txn._id);
+  if (!(await postingGate())) {
+    try {
+      await postVerifiedReceipt({ submissionId: sub._id, clientId: sub.clientId, estateId: sub.estateId });
+      return SUBMISSION_STATE.POSTED;
+    } catch (err) {
+      logger.warn({ code: err.code, submissionId: String(sub._id) }, 'G5 posting attempt did not complete');
     }
-
-    const expectedVersion = link.linkVersion;
-    const expectedRevision = link.submissionRevision ?? 0;
-
-    // Same-document CAS fence: increment submissionRevision only if version matches
-    const cas = await MpesaSubmissionLink.findOneAndUpdate(
-      {
-        _id: link._id,
-        status: 'ACTIVE',
-        linkVersion: expectedVersion,
-        submissionRevision: expectedRevision,
-      },
-      {
-        $inc: { submissionRevision: 1 },
-        $set: { updatedAt: new Date() },
-      },
-      { new: true, session }
-    );
-
-    if (!cas) {
-      throw new AppError(409, 'Link was rotated or concurrent submission in progress; retry');
-    }
-
-    const submission = await MpesaSmsSubmission.create(
-      [
-        {
-          clientId: link.clientId,
-          estateId: link.estateId,
-          tenantId: link.tenantId,
-          merchantProfileId: link.merchantProfileId,
-          linkId: link._id,
-          acceptedLinkVersion: expectedVersion,
-          acceptedAt: new Date(),
-          rawSms,
-          status: 'PENDING',
-          clientMeta,
-        },
-      ],
-      { session }
-    );
-
-    return submission[0];
-  };
-
-  if (externalSession) {
-    return run(externalSession);
   }
+  return SUBMISSION_STATE.MATCHED;
+}
 
-  return withTransaction(async (session) => run(session));
+async function setState(sub, state, reason, txnId = null) {
+  await MpesaSmsSubmission.updateOne(
+    { _id: sub._id, state: { $in: [SUBMISSION_STATE.PARSED, SUBMISSION_STATE.UNMATCHED, SUBMISSION_STATE.MATCHED, SUBMISSION_STATE.RECEIVED] } },
+    { $set: { state, stateReason: reason, ...(txnId ? { mpesaTransactionId: txnId } : {}) } }
+  );
+  return state;
 }
 
 /**
- * Match pending submissions against verified MpesaTransaction receipts.
- * Deterministic, oldest-first. Never creates money.
+ * @returns {Promise<{accepted: boolean}>} Uniform result: unknown/revoked/malformed token and
+ * disabled feature are indistinguishable to the caller.
  */
-export async function matchPendingSubmissions({ limit = 50, clientId = null } = {}) {
-  const filter = { status: 'PENDING' };
-  if (clientId) filter.clientId = clientId;
+export async function submitSms({ token, text }) {
+  if (env.G5_SUBMISSIONS_ENABLED !== '1' || !isWellFormedToken(token) || typeof text !== 'string') {
+    return { accepted: false };
+  }
+  const tokenDigest = digestToken(token);
+  // Pre-check without claiming acceptance — neutral rejection for unknown tokens.
+  const probe = await MpesaSubmissionLink.findOne({ tokenDigest, status: 'ACTIVE' })
+    .select('+tokenDigest');
+  if (!probe) return { accepted: false };
 
-  const rows = await MpesaSmsSubmission.find(filter)
-    .sort({ createdAt: 1 })
-    .limit(limit)
-    .lean();
+  const normalized = canonicalText(text);
+  const digest = evidenceDigest(normalized);
+  // Fast path for already-accepted identical evidence (outside the write fence).
+  const existing = await MpesaSmsSubmission.findOne({
+    clientId: probe.clientId, estateId: probe.estateId, tenantId: probe.tenantId, evidenceDigest: digest,
+  }).select('_id');
+  if (existing) return { accepted: true };
 
-  let matched = 0;
-  for (const sub of rows) {
-    try {
-      // Heuristic match on amount / phone / reference fragments present in rawSms
-      // Real matching logic is intentionally conservative and evidence-only.
-      const tx = await MpesaTransaction.findOne({
-        clientId: sub.clientId,
-        estateId: sub.estateId,
-        status: 'VERIFIED',
-        // further match fields would be applied here
-      }).sort({ createdAt: -1 });
+  const parsed = parseMpesaSms(text);
+  const retain = env.G5_SMS_EVIDENCE_RETENTION_APPROVED === '1';
+  const submissionId = new mongoose.Types.ObjectId();
 
-      if (tx) {
-        await MpesaSmsSubmission.updateOne(
-          { _id: sub._id, status: 'PENDING' },
-          {
-            $set: {
-              status: 'MATCHED',
-              matchedTransactionId: tx._id,
-              matchedAt: new Date(),
-            },
-          }
-        );
-        matched += 1;
+  const session = await mongoose.startSession();
+  let accepted = false;
+  let parseOk = parsed.ok;
+  try {
+    await session.withTransaction(async () => {
+      // Re-check evidence uniqueness inside the transaction.
+      const dup = await MpesaSmsSubmission.findOne({
+        clientId: probe.clientId, estateId: probe.estateId, tenantId: probe.tenantId, evidenceDigest: digest,
+      }).session(session).select('_id');
+      if (dup) {
+        accepted = true;
+        return;
       }
-    } catch (err) {
-      logger.warn({ err, submissionId: sub._id }, 'G5 match attempt failed');
-    }
+
+      // Same-document write fence: ACTIVE + exact digest + exact linkVersion.
+      // Rotation/revocation increment linkVersion / clear digest and will conflict.
+      const now = new Date();
+      const fenced = await MpesaSubmissionLink.findOneAndUpdate(
+        {
+          _id: probe._id,
+          clientId: probe.clientId,
+          estateId: probe.estateId,
+          tenantId: probe.tenantId,
+          tokenDigest,
+          status: 'ACTIVE',
+          linkVersion: probe.linkVersion,
+        },
+        { $inc: { submissionRevision: 1 } },
+        { new: true, session }
+      );
+      if (!fenced) {
+        // Link rotated/revoked between probe and fence — reject neutrally.
+        accepted = false;
+        return;
+      }
+
+      const doc = {
+        _id: submissionId,
+        clientId: fenced.clientId,
+        estateId: fenced.estateId,
+        tenantId: fenced.tenantId,
+        linkId: fenced._id,
+        linkVersion: fenced.linkVersion,
+        acceptedLinkVersion: fenced.linkVersion,
+        acceptedAt: now,
+        state: parsed.ok ? SUBMISSION_STATE.PARSED : SUBMISSION_STATE.UNSUPPORTED,
+        stateReason: parsed.ok ? null : (parsed.errors[0] || 'unsupported'),
+        parserVersion: parsed.parserVersion,
+        template: parsed.template,
+        parseErrors: parsed.errors,
+        evidenceDigest: digest,
+      };
+      if (parsed.ok) {
+        Object.assign(doc, {
+          receiptNumber: parsed.receiptNumber,
+          amountCents: parsed.amountCents,
+          currency: parsed.currency,
+          smsMerchantName: parsed.merchantName,
+          smsTransactionAt: parsed.transactionAt,
+          timestampSemantics: parsed.timestampSemantics,
+        });
+      }
+      if (retain) {
+        const env1 = sealEnvelope(normalized, `g5sub:${submissionId}:${fenced.clientId}`);
+        Object.assign(doc, {
+          evidenceEnvelope: env1,
+          evidenceKeyId: envelopeKeyId(env1),
+          retentionState: 'RETAINED_ENCRYPTED',
+        });
+      }
+      try {
+        await MpesaSmsSubmission.create([doc], { session });
+        accepted = true;
+      } catch (err) {
+        if (err?.code === 11000) {
+          // Concurrent identical evidence; unique index is the final barrier.
+          accepted = true;
+          return;
+        }
+        throw err;
+      }
+    });
+  } catch (err) {
+    // Aborted session must not be reused for follow-up queries.
+    if (err?.code === 11000) return { accepted: true };
+    throw err;
+  } finally {
+    await session.endSession();
   }
-  return { scanned: rows.length, matched };
+
+  if (!accepted) return { accepted: false };
+  if (parseOk) {
+    try { await matchSubmission(submissionId); } catch (err) { logger.warn({ code: err.code }, 'G5 matching deferred'); }
+  }
+  return { accepted: true };
 }
 
-/**
- * Re-match helper used by collection job after posting.
- */
-export async function reMatchAfterPosting(clientId, limit = 20) {
-  const rows = await MpesaSmsSubmission.find({
-    clientId,
-    status: 'PENDING',
-  })
-    .sort({ createdAt: 1 })
-    .limit(limit);
-
-  for (const row of rows) {
-    try {
-      // no-op placeholder for re-match triggers
-    } catch (err) {
-      logger.warn({ code: err.code }, 'G5 re-match failed');
-    }
+/** Background re-match for submissions that arrived before their canonical receipt. */
+export async function matchPendingSubmissions(limit = 50) {
+  const rows = await MpesaSmsSubmission.find({ state: { $in: [SUBMISSION_STATE.PARSED, SUBMISSION_STATE.UNMATCHED] } })
+    .sort({ updatedAt: 1 }).limit(limit).select('_id');
+  for (const r of rows) {
+    try { await matchSubmission(r._id); } catch (err) { logger.warn({ code: err.code }, 'G5 re-match failed'); }
   }
   return rows.length;
 }
