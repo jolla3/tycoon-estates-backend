@@ -188,3 +188,6 @@ Two missed API paths are now explicit: House PATCH can change occupancy status/i
 - Excess credit reduces future combined rent due for that same Tenant/Estate. Current G3 needs an auditable aggregate-credit extension; G5 does not own another wallet or ledger.
 - Rent effective dates and proration come from each Client's configured policy. G5 consumes the RentCharges G3 generated; it does not invent rent dates.
 - Existing SMS provider and sender configuration are unchanged.
+
+
+> G5.4 addendum: see G5_4_TENANT_COLLECTION_DESIGN.md. Posting stays disabled (`G5_MPESA_POSTING_ENABLED`) and gated on B01/B02; gates B01–B05, B07–B10 remain unresolved.

@@ -31,3 +31,7 @@ Do not implement G5 models, Daraja clients, submission links, SMS parsers, or ac
 ## Application tree
 
 Standard backend layout under this folder: `src/`, `tests/`, `scripts/`, `package.json`, `package-lock.json`, existing G3/G4 code. `node_modules` is not included; install with `npm ci` when tests are required on a safe machine.
+
+
+## G5.4
+See [G5_4_TENANT_COLLECTION_DESIGN.md](G5_4_TENANT_COLLECTION_DESIGN.md) for Tenant M-PESA collection, credit, posting and protected-outbox design. Code published != tests verified != provider evidence != production readiness.
