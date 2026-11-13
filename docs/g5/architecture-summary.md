@@ -1,13 +1,30 @@
 # G5 — Architecture Summary and Engineering Handoff
 
-**State:** G5.1.1 corrected design baseline. G5 code does not exist.
+**State (2026-11-14, `feature/g5-construction`):** design baseline G5.1.1 PLUS a published, unit-tested implementation of the Tenant collection slice. Not production ready; every money-moving and public capability is feature-flagged OFF.
 
-**Workspace verification (2026-11-12 construction init):**
+### Operational handoff (short)
+
+| Area | Status |
+|---|---|
+| Code published | Submission link lifecycle, public submission API, deterministic SMS parser, evidence envelope, Tenant credit + cross-Tenancy oldest-first settlement, fenced receipt posting service, protected SMS outbox, authenticated Tenant account / review APIs, guarded migrations, OpenAPI entries. |
+| Verified by executed tests | Unit tests only (`tests/unit`). 3 suites fail and were already failing at c357c93, unrelated to G5 code: `mpesa/darajaPullExtract`, `mpesa/leaseFence`, `mpesa/migrationAllowlist`. Exact counts are in the final report. |
+| NOT executed | MongoDB replica-set integration tests (`tests/integration/g5.*`) — no disposable replica set was available. Transaction atomicity, concurrent posting, fencing and migration execution are therefore **unproven by execution**. |
+| Disabled by default | `G5_SUBMISSIONS_ENABLED`, `G5_MPESA_POSTING_ENABLED`, `G5_PROTECTED_SMS_ENABLED`, `G5_SMS_EVIDENCE_RETENTION_APPROVED`. Posting additionally hard-blocked while canonical receipt identity (B01/B02) is unproven. |
+| Unresolved gates | B01-B05, B07-B10 (provider/owner evidence). Nothing here resolves them. |
+| Migrations | `20261113_g5_payment_receipt_tenancy_index.js`, `20261113_g5_collection_indexes.js`: dry-run default, allowlisted `--execute`; never run against staging/production by this work. |
+| Remaining work | Public frontend page (`/pay#t=`), real SMS-capture fixtures (B04), retention/recovery policy (B05), override policy (B10), running integration tests, enabling flags per environment after approvals. |
+
+Details and decisions: `architecture.md` (section 23 and the G5 collection design record `G5_COLLECTION_IMPLEMENTATION_DESIGN.md`).
+
+---
+
+
+**Historical workspace verification (2026-11-12 construction init; superseded by the state above):**
 - Repository `https://github.com/jolla3/tycoon-estates-backend`, branch `main`.
 - Verified HEAD still `204c8f9c3578f753af20727799aaa049b1545135` (`feat(banking): integrate verified G4 banking infrastructure`, 2026-11-12). Same as the design-audit baseline — no post-audit main drift detected at init.
 - Remote `origin/main` matched local HEAD; clone working tree was clean.
 - Confirmed in current source: `Payment.origin` includes `MPESA` and `mpesaReceiptId` ObjectId unique partial index exists; `accountingPosting.service.js` still has no MPESA posting branch; no `Mpesa*` models; no Daraja/Safaricom client code; SMS path remains Celcom outbound via `sms.service.js`; G4 banking providers present (`COOP` + disabled shells).
-- Construction workspace: `/home/workdir/artifacts/G5` (application tree + G5 docs). Implementation is **not** authorized until explicit G5.1 approval.
+- Construction workspace: `/home/workdir/artifacts/G5` (application tree + G5 docs). (Historical statement at init time; construction has since proceeded on `feature/g5-construction`.)
 
   
 **Repository:** `jolla3/tycoon-estates-backend`  

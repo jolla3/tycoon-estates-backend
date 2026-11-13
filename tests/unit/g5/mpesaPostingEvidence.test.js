@@ -5,7 +5,7 @@ const base = () => ({
   link: { status: 'ACTIVE', clientId: oid('a'), estateId: oid('b') },
   profile: { _id: oid('c'), clientId: oid('a'), estateId: oid('b'), operationalState: 'ACTIVE' },
   txn: { merchantProfileId: oid('c'), clientId: oid('a'), transactionType: BUY_GOODS_TYPE, verificationState: 'MATCHED',
-    receiptNumber: 'QJK2ABCDEF', acceptedAmountCents: 1000, acceptedTransactionAt: new Date('2026-10-20T12:15:30Z'), attributedTenantId: null },
+    receiptNumber: 'QJK2ABCDEF', amountCents: 1000, acceptedAmountCents: 1000, transactionAt: new Date('2026-10-20T12:15:30Z'), acceptedTransactionAt: new Date('2026-10-20T12:15:30Z'), attributedTenantId: null },
   submission: { tenantId: oid('d'), receiptNumber: 'QJK2ABCDEF', amountCents: 1000, smsTransactionAt: new Date('2026-10-20T12:15:00Z') },
 });
 const run = (mut) => { const b = base(); mut?.(b); return evaluateEvidence(b); };
@@ -22,7 +22,10 @@ describe('evaluateEvidence', () => {
     ['RECEIPT_NOT_VERIFIED', (b) => { b.txn.verificationState = 'UNVERIFIED'; }],
     ['RECEIPT_NUMBER_MISMATCH', (b) => { b.submission.receiptNumber = 'ZZZZZZZZZZ'; }],
     ['AMOUNT_MISMATCH', (b) => { b.submission.amountCents = 1001; }],
-    ['TIMESTAMP_OUT_OF_TOLERANCE', (b) => { b.submission.smsTransactionAt = new Date(b.txn.acceptedTransactionAt.getTime() + TIMESTAMP_TOLERANCE_MS + 1); }],
+    ['TIMESTAMP_OUT_OF_TOLERANCE', (b) => { b.submission.smsTransactionAt = new Date(b.txn.transactionAt.getTime() + TIMESTAMP_TOLERANCE_MS + 1); }],
+    ['AMOUNT_MISMATCH', (b) => { b.txn.acceptedAmountCents = 999; }],
+    ['TIMESTAMP_OUT_OF_TOLERANCE', (b) => { b.txn.acceptedTransactionAt = new Date(b.txn.transactionAt.getTime() + TIMESTAMP_TOLERANCE_MS + 1); }],
+    ['CURRENCY_MISMATCH', (b) => { b.txn.currency = 'USD'; b.submission.currency = 'KES'; }],
     ['COMPETING_CLAIM', (b) => { b.txn.attributedTenantId = oid('e'); }],
   ])('%s', (reason, mut) => expect(run(mut)).toEqual({ ok: false, reason }));
   test('same Tenant re-claim is allowed; payer identity is never an input', () => {

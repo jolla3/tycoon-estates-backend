@@ -158,17 +158,10 @@ export async function submitSms({ token, text }) {
           retentionState: 'RETAINED_ENCRYPTED',
         });
       }
-      try {
-        await MpesaSmsSubmission.create([doc], { session });
-        accepted = true;
-      } catch (err) {
-        if (err?.code === 11000) {
-          // Concurrent identical evidence; unique index is the final barrier.
-          accepted = true;
-          return;
-        }
-        throw err;
-      }
+      // A duplicate-key write error aborts the Mongo transaction server-side, so it must
+      // propagate (never be swallowed here); the outer catch collapses it to "accepted".
+      await MpesaSmsSubmission.create([doc], { session });
+      accepted = true;
     });
   } catch (err) {
     // Aborted session must not be reused for follow-up queries.

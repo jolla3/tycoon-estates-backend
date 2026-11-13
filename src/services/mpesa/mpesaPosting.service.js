@@ -79,11 +79,19 @@ export function evaluateEvidence({ submission, link, txn, profile }) {
   if (submission.currency && txn.currency && String(txn.currency) !== String(submission.currency)) {
     return { ok: false, reason: 'CURRENCY_MISMATCH' };
   }
-  if (!Number.isSafeInteger(txn.amountCents) || txn.amountCents !== submission.amountCents) {
+  // Canonical receipt fields AND the provider-accepted observation must both agree with the
+  // submission; any divergence between them means the receipt is not settled and never posts.
+  if (!Number.isSafeInteger(txn.amountCents) || txn.amountCents !== submission.amountCents
+    || txn.acceptedAmountCents !== txn.amountCents) {
     return { ok: false, reason: 'AMOUNT_MISMATCH' };
   }
-  const skew = Math.abs(new Date(txn.transactionAt).getTime() - new Date(submission.smsTransactionAt).getTime());
-  if (!Number.isFinite(skew) || skew > TIMESTAMP_TOLERANCE_MS) return { ok: false, reason: 'TIMESTAMP_OUT_OF_TOLERANCE' };
+  const smsMs = new Date(submission.smsTransactionAt).getTime();
+  const skew = Math.abs(new Date(txn.transactionAt).getTime() - smsMs);
+  const acceptedSkew = Math.abs(new Date(txn.acceptedTransactionAt).getTime() - smsMs);
+  if (!Number.isFinite(skew) || skew > TIMESTAMP_TOLERANCE_MS
+    || !Number.isFinite(acceptedSkew) || acceptedSkew > TIMESTAMP_TOLERANCE_MS) {
+    return { ok: false, reason: 'TIMESTAMP_OUT_OF_TOLERANCE' };
+  }
   if (txn.attributedTenantId && String(txn.attributedTenantId) !== String(submission.tenantId)) {
     return { ok: false, reason: 'COMPETING_CLAIM' };
   }

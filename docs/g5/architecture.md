@@ -1116,3 +1116,13 @@ See [G5_COLLECTION_IMPLEMENTATION_DESIGN.md](G5_COLLECTION_IMPLEMENTATION_DESIGN
 - Legacy auto-created unique `Payment.mpesaReceiptId` is removed from the schema; compound unique `{mpesaReceiptId, tenancyId}` is installed only by a guarded migration and asserted at posting time.
 - Public submission route is mounted before the global JSON parser with its own body limit and fail-closed abuse limiter; no cookie/CSRF dependency.
 - Protected SMS outbox extends `SmsMessage` (`deliveryMode`, envelope payload, fenced dispatch lease, `sendStartedAt`); the ordinary worker excludes protected messages.
+
+
+### 23.1 Later corrections (same branch)
+- **Acceptance proof:** a submission stores `acceptedAt` + `acceptedLinkVersion` inside the same transaction that fences the link (`submissionRevision` increment, ACTIVE + exact digest + exact `linkVersion`). A later rotation/revocation does not invalidate an already accepted submission; submissions lacking proof still require an ACTIVE link at match time.
+- **Evidence agreement:** posting requires the canonical receipt fields (`amountCents`, `transactionAt`) and the provider-accepted fields (`acceptedAmountCents`, `acceptedTransactionAt`) to agree with each other and with the submission (currency too). Divergence never posts.
+- **Duplicate-key handling:** a duplicate-key write inside a Mongo transaction aborts it, so it is propagated, never swallowed, and collapsed to "accepted" outside the transaction.
+- **Protected SMS:** dispatch is OFF unless `G5_PROTECTED_SMS_ENABLED=1`; AAD binds message, client, estate, tenant, link, link version, type, notification version and idempotency key; dispatch of link-bound messages performs a link CAS (`dispatchRevision`) and the durable `sendStartedAt` write in one transaction; payment-confirmation SMS is queued inside the posting transaction and sent only after commit by the dispatcher; the ordinary worker claims only a positive allowlist (`STANDARD`/absent and `ENABLED`/absent).
+- **Credit after billing:** `rentService.generateChargesForEstate` applies existing Tenant credit after billing, independent of whether new charges were created; per-Tenant failures are logged and never fail billing.
+- **Integrity verifier:** CREDIT-origin Payments are expected to have a ledger `SETTLEMENT` (not `PAYMENT`) entry.
+- **Recovery note:** `rent.service.js` and `sms.service.js` were truncated/compressed by intermediate commits on this branch (stub rent service; SMS service without `processQueuedBatch`); both were restored from the 4f04df8 blobs with the legitimate later behavior re-applied (see change log in the final report).

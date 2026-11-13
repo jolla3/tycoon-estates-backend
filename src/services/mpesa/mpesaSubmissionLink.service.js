@@ -52,8 +52,8 @@ async function queueOnboardingIfPossible({
 }) {
   const phone = tenant?.phone && String(tenant.phone).trim();
   const tillCode = merchant?.businessShortCode ? String(merchant.businessShortCode) : null;
-  if (!phone || !tillCode) {
-    const reason = !phone ? 'tenant_phone_missing' : 'merchant_till_unavailable';
+  if (!phone || !tillCode || !env.FRONTEND_URL) {
+    const reason = !phone ? 'tenant_phone_missing' : !tillCode ? 'merchant_till_unavailable' : 'frontend_url_missing';
     await audit({
       clientId, estateId, userId: actor?.userId,
       action: 'G5_LINK_SMS_BLOCKED', resource: 'MpesaSubmissionLink',

@@ -1,5 +1,6 @@
 /** G5 protected SMS outbox — replica-set/Mongo integration. Authored, NOT executed where no mongod exists. */
 import '../setup.js';
+import '../helpers/g5ProtectedSmsEnv.js';
 import { jest } from '@jest/globals';
 import { describeWithMongo, connectTestDb, clearTestDb, disconnectTestDb } from '../helpers/db.js';
 import mongoose from 'mongoose';

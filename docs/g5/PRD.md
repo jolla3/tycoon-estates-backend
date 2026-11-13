@@ -437,3 +437,7 @@ Authoritative design record: [G5_COLLECTION_IMPLEMENTATION_DESIGN.md](G5_COLLECT
 - Multi-Tenancy posting: one claimed receipt produces one child Payment per Tenancy portion (`origin: MPESA`, `mpesaReceiptId` = internal `MpesaTransaction._id`) in one MongoDB transaction; requires the migration-controlled compound Payment index.
 - Gates B01–B05, B07–B10 remain unresolved. Posting is disabled by default and additionally blocked while canonical receipt identity (B01/B02) is not proven. No retention/TTL for submitted SMS is invented (B05): raw text is not retained until a policy exists. SMS template wording is verified only against synthetic fixtures (B04).
 - Integration tests requiring a MongoDB replica set are written but only count as evidence when actually executed.
+
+
+### 22.1 Status wording (2026-11-14)
+Implemented behind OFF flags: Tenant link + public submission, SMS evidence (digest-only until B05 approval), Tenant credit with automatic application after billing, fenced multi-Tenancy posting (blocked on B01/B02 and migrations), protected confirmation/onboarding SMS (dispatch OFF by default). Unit tests executed; replica-set integration tests authored but not executed. Gates B01-B05, B07-B10 remain open. See architecture-summary.md for the operational handoff.
