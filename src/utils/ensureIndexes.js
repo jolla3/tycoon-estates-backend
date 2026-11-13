@@ -1,11 +1,16 @@
 // Non-destructive index ensure. Required financial index failures set readiness flag.
 // G3.1: RentCharge identity UNIQUE indexes are NOT created here — explicit migration owns them.
+// G5 unique indexes are also migration-controlled. Only non-unique operational indexes are provisioned.
 import mongoose from 'mongoose';
 import { logger } from '../config/logger.js';
 import { refreshBillingIndexReadiness, getBillingIndexReport } from './billingIndexReadiness.js';
 import { inspectHouseTypeIndexes } from './houseTypeIndexReadiness.js';
 import { inspectManualPaymentReferenceIndex } from './manualPaymentIndexReadiness.js';
 import { inspectDepositMovementIndex } from './depositMovementIndexReadiness.js';
+import {
+  provisionMpesaOperationalIndexes,
+  inspectMpesaIndexes,
+} from './mpesaIndexReadiness.js';
 
 let financialIndexesReady = false;
 let lastIndexError = null;
@@ -47,6 +52,28 @@ export const REQUIRED_MODELS = [
   'Subscription',
 ];
 
+async function ensureMpesaOperationalIndexes() {
+  try {
+    await import('../models/MpesaIngestionEvent.js');
+    await import('../models/MpesaMerchantProfile.js');
+    await import('../models/MpesaTransaction.js');
+    await import('../models/MpesaPullCheckpoint.js');
+    // Do NOT call model.createIndexes() — schemas declare unique indexes and autoIndex is false.
+    const provisioned = await provisionMpesaOperationalIndexes();
+    const report = await inspectMpesaIndexes();
+    if (!report.gates?.durableInbox) {
+      logger.warn(
+        { gates: report.gates, provisioned },
+        'G5 inbox indexes incomplete — M-PESA ingestion readiness is not complete'
+      );
+    } else {
+      logger.info({ gates: report.gates, created: provisioned.created }, 'G5 operational indexes inspected');
+    }
+  } catch (err) {
+    logger.error({ error: err.message }, 'G5 operational index provisioning failed — API startup continues');
+  }
+}
+
 export async function ensureIndexes() {
   if (!mongoose.connection.db) {
     logger.warn('ensureIndexes skipped — no database connection');
@@ -55,7 +82,6 @@ export async function ensureIndexes() {
     return;
   }
   try {
-    // Fail closed on import errors
     await import('../models/Tenancy.js');
     await import('../models/RentCharge.js');
     await import('../models/Ledger.js');
@@ -71,13 +97,9 @@ export async function ensureIndexes() {
       if (!model) {
         throw new Error(`Required model not registered: ${name}`);
       }
-      // createIndexes is create-only for schema-declared (non-identity-unique) indexes.
-      // RentCharge schema intentionally omits the unique identity indexes so this path
-      // cannot install them before migration preflight.
       await model.createIndexes();
     }
 
-    // Live inspection of RentCharge identity indexes (does not create/drop)
     await refreshBillingIndexReadiness();
     const billing = getBillingIndexReport();
     if (!billing?.aligned) {
@@ -87,9 +109,6 @@ export async function ensureIndexes() {
       );
     }
 
-    // HouseType and immutable plan-version schemas have autoIndex:false.
-    // Their indexes are installed only by the guarded G3.2 migration and are
-    // verified here. Missing or conflicting definitions fail closed globally.
     const houseTypeIndexes = await inspectHouseTypeIndexes();
     const manualPaymentIndex = await inspectManualPaymentReferenceIndex();
     const depositMovementIndex = await inspectDepositMovementIndex();
@@ -112,6 +131,8 @@ export async function ensureIndexes() {
         `Financial posting disabled: ${readinessReasons.join('; ')}`
       );
     }
+
+    await ensureMpesaOperationalIndexes();
   } catch (err) {
     financialIndexesReady = false;
     lastIndexError = err.message;
