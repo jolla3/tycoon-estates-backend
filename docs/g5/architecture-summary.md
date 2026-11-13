@@ -190,4 +190,4 @@ Two missed API paths are now explicit: House PATCH can change occupancy status/i
 - Existing SMS provider and sender configuration are unchanged.
 
 
-> G5.4 addendum: see G5_4_TENANT_COLLECTION_DESIGN.md. Posting stays disabled (`G5_MPESA_POSTING_ENABLED`) and gated on B01/B02; gates B01–B05, B07–B10 remain unresolved.
+> G5 collection addendum: see G5_COLLECTION_IMPLEMENTATION_DESIGN.md. Posting stays disabled (`G5_MPESA_POSTING_ENABLED`) and gated on B01/B02; gates B01–B05, B07–B10 remain unresolved.

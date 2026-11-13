@@ -1,4 +1,4 @@
-# G5.4 — Tenant M-PESA collection, attribution and G3 posting
+# G5 collection slices (G5.3 submission, G5.6 claims, G5.7 posting) — Tenant M-PESA collection, attribution and G3 posting
 
 Status vocabulary used here (kept distinct on purpose):
 - **Published code**: present on `feature/g5-construction`.

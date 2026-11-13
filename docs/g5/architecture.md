@@ -1105,3 +1105,14 @@ Other production Tenancy.updateOne() calls in accountingPosting, ledger and reco
 - Each Client's configured rent-change/effective-date and proration policy determines when a new unit's rent begins and how a partial period is billed. G5 does not hard-code a global effective date or proration rule.
 - G3 billing generates the RentCharges from the approved client policy and preserves the effective policy/version in the charge snapshot. G5 only allocates a verified receipt to the resulting eligible obligations.
 - A missing/invalid client configuration must not be replaced with an invented G5 default.
+
+
+## 23. Implementation addendum — corrections made during construction
+
+See [G5_COLLECTION_IMPLEMENTATION_DESIGN.md](G5_COLLECTION_IMPLEMENTATION_DESIGN.md) for the full record. Corrections to the sections above:
+
+- `MpesaTransaction` is the single receipt claim/posting authority: fenced lease (`postingLeaseToken`, expiry), first-claim-wins attribution fields; a stale worker's final conditional update fails and aborts the transaction.
+- `planAllocation` (G3) is NOT reused for Tenant surplus (it makes OVERPAID on the last charge); `utils/crossTenancyAllocation.js` never allocates beyond a charge balance and returns surplus as Tenant credit.
+- Legacy auto-created unique `Payment.mpesaReceiptId` is removed from the schema; compound unique `{mpesaReceiptId, tenancyId}` is installed only by a guarded migration and asserted at posting time.
+- Public submission route is mounted before the global JSON parser with its own body limit and fail-closed abuse limiter; no cookie/CSRF dependency.
+- Protected SMS outbox extends `SmsMessage` (`deliveryMode`, envelope payload, fenced dispatch lease, `sendStartedAt`); the ordinary worker excludes protected messages.

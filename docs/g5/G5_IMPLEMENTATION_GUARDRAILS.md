@@ -379,4 +379,4 @@ No source code, index, migration, provider configuration, key or test environmen
 - Preserve one-unit regression behavior and prove multi-unit combined payment, one receipt claim, atomic child postings, carried-forward credit, credit application next month, and unit-specific move isolation.
 
 
-> G5.4 addendum: see G5_4_TENANT_COLLECTION_DESIGN.md. Posting stays disabled (`G5_MPESA_POSTING_ENABLED`) and gated on B01/B02; gates B01–B05, B07–B10 remain unresolved.
+> G5 collection addendum: see G5_COLLECTION_IMPLEMENTATION_DESIGN.md. Posting stays disabled (`G5_MPESA_POSTING_ENABLED`) and gated on B01/B02; gates B01–B05, B07–B10 remain unresolved.

@@ -427,3 +427,13 @@ The detailed source paths, required corrections and test gaps are in G5_2_TENANC
 - **D22 — combined payment and excess credit:** RESOLVED at product level. One receipt is claimed once; partial payment reduces the combined balance; any amount above current eligible obligations remains the Tenant's carried-forward credit and reduces the next combined rent due within that same Estate. G3 must implement this auditable Tenant-account credit; the existing Tenancy-only balance service is not sufficient.
 - **D23 — rent effective date/proration:** RESOLVED as a configuration rule. Each Client's configured policy decides the effective date and proration when the Tenant moves to a different unit or rent changes. G3 billing generates the applicable RentCharges; G5 consumes them and does not hard-code dates or proration.
 - **Remaining technical gates:** G3 tenant-account credit/application design and atomic posting; Payment receipt index migration for one child Payment per Tenancy; Tenant profile compatibility fields and aggregate DTO; Daraja merchant/receipt uniqueness and actual Till callback/Pull capability. These are implementation design/evidence gates, not unresolved product intent.
+
+
+## 22. Implementation status addendum — Tenant M-PESA collection (feature/g5-construction)
+
+Authoritative design record: [G5_COLLECTION_IMPLEMENTATION_DESIGN.md](G5_COLLECTION_IMPLEMENTATION_DESIGN.md). Resolutions D21–D23 are implemented as follows (code may exist; this is NOT production readiness):
+
+- D22 Tenant credit: immutable `TenantCreditMovement` ledger, derived balance, `Tenant.creditRev` serialization; credit applied automatically, oldest obligation first.
+- Multi-Tenancy posting: one claimed receipt produces one child Payment per Tenancy portion (`origin: MPESA`, `mpesaReceiptId` = internal `MpesaTransaction._id`) in one MongoDB transaction; requires the migration-controlled compound Payment index.
+- Gates B01–B05, B07–B10 remain unresolved. Posting is disabled by default and additionally blocked while canonical receipt identity (B01/B02) is not proven. No retention/TTL for submitted SMS is invented (B05): raw text is not retained until a policy exists. SMS template wording is verified only against synthetic fixtures (B04).
+- Integration tests requiring a MongoDB replica set are written but only count as evidence when actually executed.
