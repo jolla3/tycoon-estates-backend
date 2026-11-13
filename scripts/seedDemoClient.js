@@ -74,8 +74,6 @@ async function main() {
   const types = [];
 
   for (const spec of typeSpecs) {
-    // Do not hide old client-scoped HouseTypes by creating a duplicate under the
-    // new Estate-scoped identity. Legacy ownership must be classified first.
     let t = await HouseType.findOne({ clientId, name: spec.name });
     if (!t) {
       t = await houseTypeService.create(clientId, {
@@ -167,7 +165,6 @@ async function main() {
         && (!tenancy.endAt || new Date(tenancy.endAt) >= nextPeriodStart);
       let rentCharge = null;
       if (tenancyCoversPeriod) {
-        // Use the same transaction-safe production charge path as scheduled billing.
         await rentService.ensureChargesForTenancy(clientId, tenancy, house, period);
         rentCharge = await RentCharge.findOne({
           clientId, estateId: estate._id, houseId: house._id,
@@ -177,8 +174,6 @@ async function main() {
           throw new Error(`G3 charge generation did not produce the expected Rent line for ${houseNumber}/${period}.`);
         }
 
-        // Partial payment is posted through the canonical accounting service.
-        // Its allocation policy chooses outstanding charges for this Tenancy.
         if (i === 0) {
           const paymentReference = `DEMO-${houseNumber}-${period}`;
           const payAmount = Math.round(type.rent * 100 * 0.5);
@@ -211,7 +206,7 @@ async function main() {
         );
       }
 
-      // Sample SMS history (not sent)
+      // Sample SMS history — never enter the live Celcom pipeline.
       const smsKey = `demo_sms_${clientId}_${tenant._id}_${period}`;
       const existingSms = await SmsMessage.findOne({ idempotencyKey: smsKey });
       if (!existingSms) {
@@ -223,11 +218,21 @@ async function main() {
           phoneNumber: tenant.phone,
           message: `Demo reminder for ${tenant.name} — House ${houseNumber}`,
           type: 'rent_reminder',
-          status: 'queued',
+          status: 'cancelled',
+          deliveryMode: 'STANDARD',
+          dispatchMode: 'SUPPRESSED',
           period,
           idempotencyKey: smsKey,
+          failureReason: 'demo_seed_suppressed',
         });
+      } else if (existingSms.status === 'queued') {
+        // Safe cancel of previously seeded demo rows still waiting to send.
+        await SmsMessage.updateOne(
+          { _id: existingSms._id, idempotencyKey: smsKey, status: 'queued' },
+          { $set: { status: 'cancelled', dispatchMode: 'SUPPRESSED', failureReason: 'demo_seed_suppressed' } }
+        );
       }
+      // processing/sent/failed/unknown demo rows are left untouched (provider may already be in flight).
     }
   }
 
