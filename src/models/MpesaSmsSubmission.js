@@ -29,6 +29,8 @@ const MpesaSmsSubmissionSchema = new Schema(
     tenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', required: true },
     linkId: { type: Schema.Types.ObjectId, ref: 'MpesaSubmissionLink', required: true },
     linkVersion: { type: Number, required: true },
+    acceptedLinkVersion: { type: Number, default: null },
+    acceptedAt: { type: Date, default: null },
     state: { type: String, enum: Object.values(SUBMISSION_STATE), default: SUBMISSION_STATE.RECEIVED },
     stateReason: { type: String, default: null },
 
