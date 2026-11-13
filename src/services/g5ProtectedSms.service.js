@@ -57,8 +57,6 @@ export async function queueProtectedSms({
     throw new Error('queueProtectedSms: idempotencyKey, phone and body are required');
   }
   const fullKey = `g5:${idempotencyKey}`;
-  // Stable row id for this logical notification so AAD stays consistent on retry
-  // when the caller reuses the same idempotency key after a transient failure.
   const existing = await SmsMessage.findOne({ clientId, idempotencyKey: fullKey })
     .session(session || null).select('_id');
   if (existing) return { id: existing._id, created: false };
@@ -68,7 +66,6 @@ export async function queueProtectedSms({
     messageId: _id, clientId, estateId, tenantId, linkId, linkVersion,
     type, notificationVersion, idempotencyKey: fullKey,
   });
-  // Fresh envelope every attempt — never reuse nonce across retries.
   const envelope = sealEnvelope(JSON.stringify({ phone, body }), aad);
   try {
     const docs = await SmsMessage.create([{
@@ -161,20 +158,7 @@ export async function dispatchProtectedBatch(limit = 20) {
       { $set: { ...set, dispatchLeaseToken: null, dispatchLeaseExpiresAt: null } }
     );
 
-    // Link eligibility: if bound to a link version, that version must still be ACTIVE.
-    if (row.g5LinkId != null && row.g5LinkVersion != null) {
-      const linkOk = await MpesaSubmissionLink.findOne({
-        _id: row.g5LinkId,
-        clientId: row.clientId,
-        status: 'ACTIVE',
-        linkVersion: row.g5LinkVersion,
-      }).select('_id');
-      if (!linkOk) {
-        await complete({ status: 'cancelled', failureReason: 'link_no_longer_eligible' });
-        continue;
-      }
-    }
-
+    // Decrypt first (no side effects).
     const aad = buildProtectedSmsAad({
       messageId: row._id,
       clientId: row.clientId,
@@ -198,14 +182,60 @@ export async function dispatchProtectedBatch(limit = 20) {
       continue;
     }
 
-    const started = await SmsMessage.updateOne(
-      {
-        _id: row._id, dispatchLeaseToken: token,
-        status: 'processing', sendStartedAt: null,
-      },
-      { $set: { sendStartedAt: new Date() } }
-    );
-    if (started.matchedCount !== 1) continue;
+    // Atomic dispatch authorization: link CAS + sendStartedAt under one session.
+    let authorized = false;
+    if (row.g5LinkId != null && row.g5LinkVersion != null) {
+      const authSession = await mongoose.startSession();
+      try {
+        await authSession.withTransaction(async () => {
+          const linkCas = await MpesaSubmissionLink.findOneAndUpdate(
+            {
+              _id: row.g5LinkId,
+              clientId: row.clientId,
+              estateId: row.estateId,
+              tenantId: row.tenantId,
+              status: 'ACTIVE',
+              linkVersion: row.g5LinkVersion,
+            },
+            { $inc: { dispatchRevision: 1 } },
+            { new: true, session: authSession }
+          );
+          if (!linkCas) {
+            throw Object.assign(new Error('LINK_NO_LONGER_ELIGIBLE'), { code: 'LINK_NO_LONGER_ELIGIBLE' });
+          }
+          const started = await SmsMessage.updateOne(
+            {
+              _id: row._id,
+              dispatchLeaseToken: token,
+              status: 'processing',
+              sendStartedAt: null,
+            },
+            { $set: { sendStartedAt: new Date() } },
+            { session: authSession }
+          );
+          if (started.matchedCount !== 1) {
+            throw Object.assign(new Error('LEASE_LOST'), { code: 'LEASE_LOST' });
+          }
+        });
+        authorized = true;
+      } catch (err) {
+        if (err?.code === 'LINK_NO_LONGER_ELIGIBLE') {
+          await complete({ status: 'cancelled', failureReason: 'link_no_longer_eligible' });
+        }
+      } finally {
+        await authSession.endSession();
+      }
+      if (!authorized) continue;
+    } else {
+      const started = await SmsMessage.updateOne(
+        {
+          _id: row._id, dispatchLeaseToken: token,
+          status: 'processing', sendStartedAt: null,
+        },
+        { $set: { sendStartedAt: new Date() } }
+      );
+      if (started.matchedCount !== 1) continue;
+    }
 
     let result;
     try {
