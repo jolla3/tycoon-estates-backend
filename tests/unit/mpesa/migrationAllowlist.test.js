@@ -1,10 +1,11 @@
 /**
- * G5.3 acceptance — migration allowlist rejects production and unapproved targets.
+ * G5.3 acceptance — migration allowlist and import side-effect freedom.
  */
 import { describe, test, expect } from '@jest/globals';
 import {
   parseMongoUri,
   assertSafeTarget,
+  isInvokedDirectly,
 } from '../../../scripts/migrations/20261112_g53_mpesa_merchant_index.js';
 
 describe('G5.3 migration allowlist', () => {
@@ -27,5 +28,12 @@ describe('G5.3 migration allowlist', () => {
     expect(() =>
       assertSafeTarget('mongodb://127.0.0.1:27017/tycoon_test', true)
     ).toThrow(/Refusing --execute/);
+  });
+
+  test('importing the module does not invoke main', () => {
+    const exitBefore = process.exitCode;
+    expect(isInvokedDirectly()).toBe(false);
+    expect(isInvokedDirectly('file:///tmp/migration.js', ['node', '/tmp/other.js'])).toBe(false);
+    expect(process.exitCode).toBe(exitBefore);
   });
 });
