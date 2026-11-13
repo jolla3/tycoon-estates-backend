@@ -22,6 +22,8 @@ const MpesaSubmissionLinkSchema = new Schema(
     linkVersion: { type: Number, default: 1, min: 1 },
     /** Non-token fence for concurrent submission acceptance (not rotated on submit). */
     submissionRevision: { type: Number, default: 0, min: 0 },
+    /** Separate fence for protected-SMS dispatch authorization vs rotation/revocation. */
+    dispatchRevision: { type: Number, default: 0, min: 0 },
     rotatedAt: { type: Date, default: null },
     revokedAt: { type: Date, default: null },
     createdByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
