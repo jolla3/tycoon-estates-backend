@@ -54,17 +54,17 @@ export async function postingGate() {
 /**
  * Pure evidence check: does submission evidence agree with the canonical receipt and link scope?
  * Returns { ok, reason }. Never compares payer MSISDN/name to the Tenant.
- * Historical accepted evidence remains eligible after link rotation/revocation.
  */
 export function evaluateEvidence({ submission, link, txn, profile }) {
+  // A previously accepted submission remains processable after rotation/revocation.
   // Current ACTIVE status is required only for submissions that lack acceptance proof.
   if (!link) return { ok: false, reason: 'LINK_NOT_ACTIVE' };
   const hasAcceptanceProof = Boolean(submission?.acceptedAt && submission?.acceptedLinkVersion != null);
   if (!hasAcceptanceProof && link.status !== 'ACTIVE') return { ok: false, reason: 'LINK_NOT_ACTIVE' };
   if (hasAcceptanceProof) {
-    // Accepted evidence is frozen at acceptance; rotation after acceptance does not invalidate it.
+    if (String(link._id) !== String(submission.linkId)) return { ok: false, reason: 'LINK_IDENTITY_MISMATCH' };
     if (Number(submission.acceptedLinkVersion) !== Number(submission.linkVersion)) {
-      return { ok: false, reason: 'ACCEPTANCE_VERSION_MISMATCH' };
+      return { ok: false, reason: 'ACCEPTANCE_VERSION_INCONSISTENT' };
     }
   }
   if (!profile || profile.operationalState !== 'ACTIVE') return { ok: false, reason: 'MERCHANT_NOT_OPERATIONAL' };
@@ -76,10 +76,13 @@ export function evaluateEvidence({ submission, link, txn, profile }) {
   if (txn.transactionType !== BUY_GOODS_TYPE) return { ok: false, reason: 'NOT_BUY_GOODS' };
   if (txn.verificationState !== TXN_VERIFICATION_STATE.MATCHED) return { ok: false, reason: 'RECEIPT_NOT_VERIFIED' };
   if (txn.receiptNumber !== submission.receiptNumber) return { ok: false, reason: 'RECEIPT_NUMBER_MISMATCH' };
-  if (!Number.isSafeInteger(txn.acceptedAmountCents) || txn.acceptedAmountCents !== submission.amountCents) {
+  if (submission.currency && txn.currency && String(txn.currency) !== String(submission.currency)) {
+    return { ok: false, reason: 'CURRENCY_MISMATCH' };
+  }
+  if (!Number.isSafeInteger(txn.amountCents) || txn.amountCents !== submission.amountCents) {
     return { ok: false, reason: 'AMOUNT_MISMATCH' };
   }
-  const skew = Math.abs(new Date(txn.acceptedTransactionAt).getTime() - new Date(submission.smsTransactionAt).getTime());
+  const skew = Math.abs(new Date(txn.transactionAt).getTime() - new Date(submission.smsTransactionAt).getTime());
   if (!Number.isFinite(skew) || skew > TIMESTAMP_TOLERANCE_MS) return { ok: false, reason: 'TIMESTAMP_OUT_OF_TOLERANCE' };
   if (txn.attributedTenantId && String(txn.attributedTenantId) !== String(submission.tenantId)) {
     return { ok: false, reason: 'COMPETING_CLAIM' };
@@ -150,7 +153,7 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
         clientId, estateId, tenantId: submission.tenantId,
         receipt: {
           transactionId: txn._id, receiptNumber: txn.receiptNumber,
-          amountCents: txn.acceptedAmountCents, transactionAt: txn.acceptedTransactionAt,
+          amountCents: txn.amountCents, transactionAt: txn.transactionAt,
         },
         session,
       });
@@ -182,7 +185,7 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
       const tenant = await Tenant.findOne({ _id: submission.tenantId, clientId, estateId }).session(session).select('phone');
       const phone = tenant?.phone && String(tenant.phone).trim();
       if (phone) {
-        const amountKes = (Number(txn.acceptedAmountCents) / 100).toFixed(2);
+        const amountKes = (Number(txn.amountCents) / 100).toFixed(2);
         const body = `Tycoon Estates: M-PESA receipt ${txn.receiptNumber} of KES ${amountKes} has been applied to your rent account.`;
         await queueProtectedSms({
           clientId, estateId, tenantId: submission.tenantId,

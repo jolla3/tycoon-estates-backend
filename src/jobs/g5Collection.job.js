@@ -7,5 +7,6 @@ import { dispatchProtectedBatch } from '../services/g5ProtectedSms.service.js';
 
 export async function g5CollectionJob() {
   if (env.G5_SUBMISSIONS_ENABLED === '1') await matchPendingSubmissions(50);
-  await dispatchProtectedBatch(20); // no-op when no protected rows exist
+  // Protected dispatch is default-off; both the job and the service fail closed.
+  if (env.G5_PROTECTED_SMS_ENABLED === '1') await dispatchProtectedBatch(20);
 }
