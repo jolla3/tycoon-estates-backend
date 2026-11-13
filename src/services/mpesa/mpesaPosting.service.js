@@ -19,6 +19,8 @@ import { MpesaSubmissionLink } from '../../models/MpesaSubmissionLink.js';
 import { MpesaMerchantProfile } from '../../models/MpesaMerchantProfile.js';
 import { AuditLog } from '../../models/AuditLog.js';
 import { settleTenantAccount } from '../tenantCredit.service.js';
+import { queueProtectedSms } from '../g5ProtectedSms.service.js';
+import { Tenant } from '../../models/Tenant.js';
 import { TXN_VERIFICATION_STATE } from './daraja.constants.js';
 import { inspectMpesaIndexes } from '../../utils/mpesaIndexReadiness.js';
 import { assertPaymentReceiptIndexesAligned } from '../../utils/paymentReceiptIndexReadiness.js';
@@ -52,9 +54,19 @@ export async function postingGate() {
 /**
  * Pure evidence check: does submission evidence agree with the canonical receipt and link scope?
  * Returns { ok, reason }. Never compares payer MSISDN/name to the Tenant.
+ * Historical accepted evidence remains eligible after link rotation/revocation.
  */
 export function evaluateEvidence({ submission, link, txn, profile }) {
-  if (!link || link.status !== 'ACTIVE') return { ok: false, reason: 'LINK_NOT_ACTIVE' };
+  // Current ACTIVE status is required only for submissions that lack acceptance proof.
+  if (!link) return { ok: false, reason: 'LINK_NOT_ACTIVE' };
+  const hasAcceptanceProof = Boolean(submission?.acceptedAt && submission?.acceptedLinkVersion != null);
+  if (!hasAcceptanceProof && link.status !== 'ACTIVE') return { ok: false, reason: 'LINK_NOT_ACTIVE' };
+  if (hasAcceptanceProof) {
+    // Accepted evidence is frozen at acceptance; rotation after acceptance does not invalidate it.
+    if (Number(submission.acceptedLinkVersion) !== Number(submission.linkVersion)) {
+      return { ok: false, reason: 'ACCEPTANCE_VERSION_MISMATCH' };
+    }
+  }
   if (!profile || profile.operationalState !== 'ACTIVE') return { ok: false, reason: 'MERCHANT_NOT_OPERATIONAL' };
   if (String(profile.clientId) !== String(link.clientId)) return { ok: false, reason: 'MERCHANT_CLIENT_MISMATCH' };
   if (!profile.estateId || String(profile.estateId) !== String(link.estateId)) return { ok: false, reason: 'MERCHANT_ESTATE_UNMAPPED' };
@@ -165,6 +177,29 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
         { session }
       );
       if (sub.matchedCount !== 1) throw Errors.Conflict('Submission state changed; aborting');
+
+      // One Tenant-level confirmation SMS per canonical receipt (not per child Payment).
+      const tenant = await Tenant.findOne({ _id: submission.tenantId, clientId, estateId }).session(session).select('phone');
+      const phone = tenant?.phone && String(tenant.phone).trim();
+      if (phone) {
+        const amountKes = (Number(txn.acceptedAmountCents) / 100).toFixed(2);
+        const body = `Tycoon Estates: M-PESA receipt ${txn.receiptNumber} of KES ${amountKes} has been applied to your rent account.`;
+        await queueProtectedSms({
+          clientId, estateId, tenantId: submission.tenantId,
+          phone, body, type: 'payment_confirmation',
+          notificationVersion: 'payment_confirmation:v1',
+          idempotencyKey: `confirm:${String(txn._id)}:${String(submission.tenantId)}`,
+          session,
+        });
+      } else {
+        await AuditLog.create([{
+          clientId, estateId, userId: actorUserId || undefined,
+          action: 'G5_CONFIRMATION_SMS_BLOCKED', resource: 'MpesaTransaction', resourceId: txn._id,
+          description: 'Payment confirmation SMS not queued — tenant phone missing',
+          metadata: { tenantId: String(submission.tenantId), reason: 'tenant_phone_missing' },
+          ipAddress,
+        }], { session });
+      }
 
       await AuditLog.create([{
         clientId, estateId, userId: actorUserId || undefined,
