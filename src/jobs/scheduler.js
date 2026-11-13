@@ -3,6 +3,7 @@ import { bankSyncJob } from './bankSync.job.js';
 import { rentStatusJob } from './rentStatus.job.js';
 import { smsReminderJob } from './smsReminder.job.js';
 import { mpesaPullJob } from './mpesaPull.job.js';
+import { g5CollectionJob } from './g5Collection.job.js';
 import { withLock } from '../utils/distributedLock.js';
 import {
   recordJobStart,
@@ -17,6 +18,7 @@ const INTERVALS = {
   rentStatus: 60 * 60 * 1000,
   smsReminder: 15 * 60 * 1000,
   mpesaPull: 10 * 60 * 1000,
+  g5Collection: 60 * 1000,
 };
 
 const LOCK_TTL_MS = {
@@ -24,9 +26,10 @@ const LOCK_TTL_MS = {
   rentStatus: 10 * 60 * 1000,
   smsReminder: 10 * 60 * 1000,
   mpesaPull: 8 * 60 * 1000,
+  g5Collection: 2 * 60 * 1000,
 };
 
-const JOB_NAMES = ['bankSync', 'rentStatus', 'smsReminder', 'mpesaPull'];
+const JOB_NAMES = ['bankSync', 'rentStatus', 'smsReminder', 'mpesaPull', 'g5Collection'];
 
 let timers = [];
 const startedAt = new Date().toISOString();
@@ -50,6 +53,7 @@ export function startBackgroundJobs() {
   timers.push(setInterval(runSafely('rentStatus', rentStatusJob), INTERVALS.rentStatus));
   timers.push(setInterval(runSafely('smsReminder', smsReminderJob), INTERVALS.smsReminder));
   timers.push(setInterval(runSafely('mpesaPull', mpesaPullJob), INTERVALS.mpesaPull));
+  timers.push(setInterval(runSafely('g5Collection', g5CollectionJob), INTERVALS.g5Collection));
   logger.info('Background jobs started (Redis-locked, safe for multiple instances)');
 }
 

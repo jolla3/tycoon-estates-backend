@@ -54,6 +54,18 @@ const MpesaTransactionSchema = new Schema(
       default: 'NOT_POSTED',
     },
     paymentId: { type: Schema.Types.ObjectId, ref: 'Payment', default: null },
+    // G5 attribution: first successful conditional claim wins; never reassigned.
+    attributedClientId: { type: Schema.Types.ObjectId, ref: 'Client', default: null },
+    attributedEstateId: { type: Schema.Types.ObjectId, ref: 'Estate', default: null },
+    attributedTenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', default: null },
+    attributedSubmissionId: { type: Schema.Types.ObjectId, ref: 'MpesaSmsSubmission', default: null },
+    // G5 receipt-level fencing for posting (attempt-specific random token + expiry).
+    postingLeaseToken: { type: String, default: null, select: false },
+    postingLeaseExpiresAt: { type: Date, default: null },
+    postingAttempts: { type: Number, default: 0 },
+    postingFailureCode: { type: String, default: null },
+    postedAt: { type: Date, default: null },
+    creditEarnedCents: { type: Number, default: 0 },
     /** Future multi-tenancy child Payments (G5.1) — no G3 writes in this slice. */
     paymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
   },

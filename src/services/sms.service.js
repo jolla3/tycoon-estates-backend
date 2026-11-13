@@ -591,6 +591,8 @@ export const smsService = {
       const job = await SmsMessage.findOneAndUpdate(
         {
           status: 'queued',
+          // G5 protected messages are dispatched ONLY by the protected dispatcher.
+          deliveryMode: { $ne: 'G5_PROTECTED' },
           $or: [
             { nextRetryAt: null },
             { nextRetryAt: { $exists: false } },

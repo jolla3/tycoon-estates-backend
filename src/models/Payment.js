@@ -2,7 +2,8 @@
 import mongoose from 'mongoose';
 const { Schema } = mongoose;
 
-const PAYMENT_ORIGINS = ['BANK', 'MANUAL', 'MPESA'];
+// CREDIT = application of existing Tenant-level credit (G5). Never a new external receipt.
+const PAYMENT_ORIGINS = ['BANK', 'MANUAL', 'MPESA', 'CREDIT'];
 const TENDER_METHODS = ['CASH', 'CHEQUE', 'BANK_TRANSFER', 'MPESA', 'OTHER', null];
 
 const PaymentSchema = new Schema(
@@ -14,7 +15,10 @@ const PaymentSchema = new Schema(
     tenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null, index: true },
     origin: { type: String, enum: PAYMENT_ORIGINS, required: true },
     bankTransactionId: { type: Schema.Types.ObjectId, ref: 'BankTransaction', unique: true, sparse: true },
+    // Internal MpesaTransaction._id (never the external receipt string).
     mpesaReceiptId: { type: Schema.Types.ObjectId, default: null },
+    // Deterministic identity of a CREDIT-origin application (migration-controlled unique).
+    creditApplicationKey: { type: String, default: null },
     tenderMethod: { type: String, enum: TENDER_METHODS, default: null },
     recordedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     recordedAt: { type: Date, default: null },
@@ -41,10 +45,11 @@ PaymentSchema.path('amountCents').validate(
 PaymentSchema.index({ estateId: 1, houseId: 1, period: 1 });
 PaymentSchema.index({ clientId: 1, paymentDate: -1 });
 PaymentSchema.index({ tenancyId: 1, paymentDate: -1 });
-PaymentSchema.index(
-  { mpesaReceiptId: 1 },
-  { unique: true, partialFilterExpression: { mpesaReceiptId: { $type: 'objectId' } } }
-);
+// G5: the former global unique { mpesaReceiptId } index is REPLACED by the
+// migration-controlled compound child identity { mpesaReceiptId, tenancyId }
+// (one child Payment per affected Tenancy). Neither is auto-created here; see
+// scripts/migrations/20261113_g5_payment_receipt_tenancy_index.js.
+PaymentSchema.index({ mpesaReceiptId: 1 }, { sparse: true, name: 'idx_payment_mpesa_receipt' });
 
 export const Payment = mongoose.model('Payment', PaymentSchema);
 export const PAYMENT_ORIGINS_LIST = PAYMENT_ORIGINS;

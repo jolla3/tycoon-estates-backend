@@ -38,3 +38,21 @@ Versioned AES-256-GCM envelope `g5e1.<keyId>.…` with AAD, dedicated keys (`G5_
 
 ## 8. Gates (all remain unresolved / fail-closed)
 B01 merchant hierarchy identity, B02 canonical receipt uniqueness, B03 credential model, B04 timestamp semantics + real SMS captures, B05 evidence retention/recovery, B07 historical coverage, B08 Till operational proof, B09 credentials, B10 manual-resolution approval policy. Nothing here activates any of them.
+
+## 9. Implemented surface (as built)
+Authenticated (`/api/v1/mpesa-collection`, CSRF applies, Client + estate-scoped via `clientContext`/`estateFilter`):
+`GET /tenants/:tenantId/account`, `GET /tenants/:tenantId/payments`, `GET|POST /tenants/:tenantId/link`, `POST /tenants/:tenantId/link/revoke` (admin roles), `GET /submissions`, `POST /submissions/:id/resolve` (actions `REJECT`, `RETRY_MATCH` with reason code; no force-approve because B10 is unresolved).
+Public (no cookie/CSRF; mounted before global JSON parser): `POST /api/v1/public/mpesa/submissions` body `{ token, text }` only. The token is the 43-char value carried in the URL fragment of the link the admin distributes (`<frontend>/pay#t=<token>`); the page itself belongs to the frontend repo and is NOT implemented here. Responses: `202 {received:true}` or a uniform `404` for unknown/revoked/malformed/disabled.
+Background (`g5Collection` scheduler job): re-match PARSED/UNMATCHED submissions; dispatch protected SMS.
+
+## 10. Disabled / gated capabilities
+- `G5_SUBMISSIONS_ENABLED` unset: public endpoint answers uniform 404.
+- `G5_MPESA_POSTING_ENABLED` unset, and in any case posting is blocked until canonical receipt identity (B01/B02 — currently hard-coded false), Payment receipt/credit indexes (migration) and financial indexes are all ready.
+- `G5_SMS_EVIDENCE_RETENTION_APPROVED` unset: raw submitted SMS is never stored (digest + parsed fields only).
+- No post-commit payment-confirmation SMS is queued yet; the protected outbox primitives exist (`queueProtectedSms`) but no caller is wired, pending B05 recovery policy.
+
+## 11. Known limitations
+- Receipt timestamp tolerance (10 min) is a provisional constant pending B04 evidence.
+- Parser template is verified only against synthetic fixtures.
+- Pre-existing at c357c93 and unrelated: unit suites `mpesa/darajaPullExtract`, `mpesa/leaseFence`, `mpesa/migrationAllowlist` fail (tests expect exports/shapes the source does not provide).
+- OpenAPI (`src/docs/openapi.js`) not yet extended with the new routes.

@@ -21,6 +21,7 @@ import { User } from './models/User.js';
 import apiRoutes from './routes/index.js';
 import webhookRoutes from './routes/webhook.routes.js';
 import darajaWebhookRoutes from './routes/darajaWebhook.routes.js';
+import mpesaPublicRoutes from './routes/mpesaPublic.routes.js';
 import { openApiSpec } from './docs/openapi.js';
 
 // Track per-app Mongo-backed session stores so their owning process can
@@ -55,6 +56,9 @@ export function createApp() {
   app.disable('x-powered-by');
   app.use(helmetMiddleware);
   app.use(corsMiddleware);
+  // G5 public Tenant submission: own body limit/guards, no cookie/session/CSRF.
+  // MUST stay before the global JSON parser and the authenticated CSRF boundary.
+  app.use('/api/v1/public/mpesa', mpesaPublicRoutes);
   app.use(express.json({ limit: '1mb' }));
 
   // Unsigned cookie parser. CSRF is a double-submit cookie read from

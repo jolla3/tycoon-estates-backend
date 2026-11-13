@@ -12,6 +12,8 @@ const TenantSchema = new Schema(
     status: { type: String, enum: ['active', 'moved_out'], default: 'active' },
     moveInDate: Date,
     moveOutDate: Date,
+    // G5 non-monetary CAS token that serializes Tenant-level credit writers. NOT a balance.
+    creditRev: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );

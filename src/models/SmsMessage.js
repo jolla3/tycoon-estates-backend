@@ -31,7 +31,7 @@ const SmsMessageSchema = new Schema(
     priority: { type: Number, default: 0 },
     status: {
       type: String,
-      enum: ['queued', 'processing', 'sent', 'failed', 'unknown'],
+      enum: ['queued', 'processing', 'sent', 'failed', 'unknown', 'cancelled'],
       default: 'queued',
       index: true,
     },
@@ -44,12 +44,24 @@ const SmsMessageSchema = new Schema(
     sentAt: Date,
     failedAt: Date,
     failureReason: String,
+    // G5 protected outbox. STANDARD rows behave exactly as before.
+    deliveryMode: { type: String, enum: ['STANDARD', 'G5_PROTECTED'], default: 'STANDARD' },
+    // Encrypted { phone, body } envelope (AAD binds it to this row). phoneNumber/message hold a placeholder.
+    payloadEnvelope: { type: String, default: null, select: false },
+    payloadKeyId: { type: String, default: null },
+    dispatchMode: { type: String, enum: ['ENABLED', 'SUPPRESSED'], default: 'ENABLED' },
+    dispatchLeaseToken: { type: String, default: null, select: false },
+    dispatchLeaseExpiresAt: { type: Date, default: null },
+    sendStartedAt: { type: Date, default: null },
+    g5LinkId: { type: Schema.Types.ObjectId, default: null },
+    g5LinkVersion: { type: Number, default: null },
   },
   { timestamps: true }
 );
 
 SmsMessageSchema.index({ estateId: 1, houseId: 1, createdAt: -1 });
 SmsMessageSchema.index({ clientId: 1, status: 1 });
+SmsMessageSchema.index({ deliveryMode: 1, status: 1, dispatchMode: 1, nextRetryAt: 1 });
 SmsMessageSchema.index({ clientId: 1, broadcastId: 1 });
 SmsMessageSchema.index({ clientId: 1, tenantId: 1, type: 1, period: 1, notificationVersion: 1 });
 

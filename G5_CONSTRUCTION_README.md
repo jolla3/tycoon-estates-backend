@@ -19,4 +19,8 @@ G5.0 design authority for this construction workspace:
 | Source HEAD record | `G5_SOURCE_HEAD.txt` |
 | Integrity audit | `docs/G5_0_1_WORKSPACE_INTEGRITY_AND_DECISION_AUDIT.md` |
 
-No G5 application implementation has been committed on this branch yet.
+Status (kept separate on purpose):
+- **Code published on this branch:** G5.3 Daraja ingestion (earlier) plus the Tenant collection slice (submission link, public submission API, parser, Tenant credit, multi-Tenancy posting service, protected SMS outbox, guarded migrations). See `docs/g5/G5_COLLECTION_IMPLEMENTATION_DESIGN.md`.
+- **Verified by tests:** unit tests only (see commit message / final report). MongoDB replica-set integration tests are written but have NOT been executed.
+- **Blocked by provider/owner evidence:** B01-B05, B07-B10.
+- **Production readiness:** none claimed. Posting and submissions are OFF by default.

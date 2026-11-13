@@ -97,6 +97,10 @@ export const env = {
   DARAJA_CALLBACKS_ENABLED: optional('DARAJA_CALLBACKS_ENABLED') === '1' ? '1' : '',
   DARAJA_CALLBACKS_LAB: optional('DARAJA_CALLBACKS_LAB') === '1' ? '1' : '',
   /** Explicit opt-in for scheduled Pull query/reconciliation (default off). */
+  // G5 collection (all fail-closed when unset)
+  G5_MPESA_POSTING_ENABLED: optional('G5_MPESA_POSTING_ENABLED') === '1' ? '1' : '',
+  G5_SUBMISSIONS_ENABLED: optional('G5_SUBMISSIONS_ENABLED') === '1' ? '1' : '',
+  G5_SMS_EVIDENCE_RETENTION_APPROVED: optional('G5_SMS_EVIDENCE_RETENTION_APPROVED') === '1' ? '1' : '',
   DARAJA_PULL_RECONCILIATION_ENABLED: optional('DARAJA_PULL_RECONCILIATION_ENABLED') === '1' ? '1' : '',
 };
 
