@@ -94,6 +94,8 @@ export const env = {
   DARAJA_ENVIRONMENT: optional('DARAJA_ENVIRONMENT') || 'sandbox',
   DARAJA_CONSUMER_KEY: optional('DARAJA_CONSUMER_KEY'),
   DARAJA_CONSUMER_SECRET: optional('DARAJA_CONSUMER_SECRET'),
+  // INERT legacy names: callback exposure is decided by a provider verifier, never by a flag
+  // (see services/mpesa/darajaCallbackAuth.js). Setting these does not open any route.
   DARAJA_CALLBACKS_ENABLED: optional('DARAJA_CALLBACKS_ENABLED') === '1' ? '1' : '',
   DARAJA_CALLBACKS_LAB: optional('DARAJA_CALLBACKS_LAB') === '1' ? '1' : '',
   /** Explicit opt-in for scheduled Pull query/reconciliation (default off). */

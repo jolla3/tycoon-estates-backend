@@ -2,6 +2,11 @@
 //
 // G5.3 — Public Daraja callback routes (no CSRF).
 // Paths intentionally avoid prohibited keywords (mpesa, query, safaricom).
+//
+// SECURITY: every route sits behind darajaIngressGate, which is closed unless a
+// provider-specific verifier exists (none does). The gate runs BEFORE the rate limiter and
+// before any handler, so a blocked request never reaches ingestion, validation or Redis.
+// Environment flags cannot open these routes.
 
 import { Router } from 'express';
 import { webhookRateLimiter } from '../middlewares/rateLimiter.js';
@@ -11,21 +16,12 @@ import {
 } from '../services/mpesa/darajaC2b.service.js';
 import { ingestPullPayload } from '../services/mpesa/darajaPull.service.js';
 import { INGESTION_SOURCE } from '../services/mpesa/daraja.constants.js';
-import { env } from '../config/environment.js';
+import { darajaIngressGate } from '../services/mpesa/darajaCallbackAuth.js';
 import { logger } from '../config/logger.js';
 
 const router = Router();
 
-function darajaCallbacksExposed() {
-  if (env.DARAJA_CALLBACKS_ENABLED === '1') return true;
-  if (env.NODE_ENV === 'production') return false;
-  return env.DARAJA_CALLBACKS_LAB === '1';
-}
-
-router.post('/daraja/c2b/confirm', webhookRateLimiter, async (req, res) => {
-  if (!darajaCallbacksExposed()) {
-    return res.status(503).json({ ResultCode: 1, ResultDesc: 'Not exposed' });
-  }
+router.post('/daraja/c2b/confirm', darajaIngressGate, webhookRateLimiter, async (req, res) => {
   try {
     const result = await handleC2bConfirmation(req.body);
     return res.status(result.httpStatus || 200).json(result.ack);
@@ -35,18 +31,12 @@ router.post('/daraja/c2b/confirm', webhookRateLimiter, async (req, res) => {
   }
 });
 
-router.post('/daraja/c2b/validate', webhookRateLimiter, async (req, res) => {
-  if (!darajaCallbacksExposed()) {
-    return res.status(503).json({ ResultCode: 1, ResultDesc: 'Not exposed' });
-  }
+router.post('/daraja/c2b/validate', darajaIngressGate, webhookRateLimiter, async (req, res) => {
   const ack = await handleC2bValidation(req.body);
   return res.status(200).json(ack);
 });
 
-router.post('/daraja/pull/results', webhookRateLimiter, async (req, res) => {
-  if (!darajaCallbacksExposed()) {
-    return res.status(503).json({ ResultCode: 1, ResultDesc: 'Not exposed' });
-  }
+router.post('/daraja/pull/results', darajaIngressGate, webhookRateLimiter, async (req, res) => {
   try {
     const result = await ingestPullPayload(req.body, {
       sourceChannel: INGESTION_SOURCE.PULL_CALLBACK,
