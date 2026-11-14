@@ -75,18 +75,13 @@ export async function registerPull(
     };
   }
 
-  const responseCode = String(
-    response.data?.ResponseCode
-      ?? response.data?.responseCode
-      ?? response.data?.Responsecode
-      ?? ''
-  );
+  // Pull registration contract documents ResponseStatus, not ResponseCode.
+  const responseCode = String(response.data?.ResponseStatus ?? '').trim();
+  const httpAccepted = response.status >= 200 && response.status < 300;
   let registrationState = 'REJECTED';
-  if (responseCode === PULL_REGISTER_CODE.SUCCESS) registrationState = 'ACCEPTED';
-  else if (responseCode === PULL_REGISTER_CODE.ALREADY_REGISTERED) {
+  if (httpAccepted && responseCode === PULL_REGISTER_CODE.SUCCESS) registrationState = 'ACCEPTED';
+  else if (httpAccepted && responseCode === PULL_REGISTER_CODE.ALREADY_REGISTERED) {
     registrationState = 'ALREADY_REGISTERED';
-  } else if (response.status >= 200 && response.status < 300) {
-    registrationState = 'ACCEPTED';
   }
 
   // Registration success updates registration state only — not pullCapability.
@@ -109,7 +104,7 @@ export async function registerPull(
     httpStatus: response.status,
     body: response.data ?? null,
     responseCode,
-    alreadyRegistered: responseCode === PULL_REGISTER_CODE.ALREADY_REGISTERED,
+    alreadyRegistered: registrationState === 'ALREADY_REGISTERED',
     ok: registrationState === 'ACCEPTED' || registrationState === 'ALREADY_REGISTERED',
     registrationState,
   };
@@ -152,22 +147,67 @@ export async function queryPullTransactions(
   };
 }
 
-export function extractPullRows(body) {
-  if (body == null) return { shape: 'empty_body', rows: [] };
-  if (typeof body !== 'object') return { shape: 'unsupported', rows: [] };
-  if (Array.isArray(body)) {
-    return { shape: body.length ? 'rows' : 'empty_valid', rows: body };
-  }
-  for (const key of ['Response', 'transactions', 'Transactions', 'data']) {
-    if (Array.isArray(body[key])) {
-      const rows = body[key];
-      return { shape: rows.length ? 'rows' : 'empty_valid', rows };
+function flattenPullRows(value, rows = []) {
+  if (!Array.isArray(value)) return false;
+  for (const item of value) {
+    if (Array.isArray(item)) {
+      if (!flattenPullRows(item, rows)) return false;
+    } else if (item && typeof item === 'object') {
+      rows.push(item);
+    } else {
+      return false;
     }
   }
-  return { shape: 'unsupported', rows: [] };
+  return true;
 }
 
-export async function ingestPullPayload(body, { sourceChannel = INGESTION_SOURCE.PULL_QUERY } = {}) {
+export function extractPullRows(body) {
+  if (body == null) return { shape: 'empty_body', rows: [] };
+
+  if (Array.isArray(body)) {
+    const rows = [];
+    if (!flattenPullRows(body, rows)) return { shape: 'unsupported', rows: [] };
+    return { shape: rows.length ? 'rows' : 'unsupported', rows };
+  }
+  if (typeof body !== 'object') return { shape: 'unsupported', rows: [] };
+
+  const rawCode = body.ResponseCode ?? body.responseCode;
+  const responseCode = rawCode == null ? '' : String(rawCode).trim();
+  const responseKey = ['Response', 'transactions', 'Transactions', 'data']
+    .find((key) => Array.isArray(body[key]));
+
+  if (responseCode && responseCode !== '1000' && responseCode !== '1001') {
+    return { shape: 'provider_error', rows: [] };
+  }
+
+  if (responseCode === '1001') {
+    if (responseKey) {
+      const rows = [];
+      if (!flattenPullRows(body[responseKey], rows) || rows.length) {
+        return { shape: 'unsupported', rows: [] };
+      }
+    }
+    return { shape: 'empty_valid', rows: [] };
+  }
+
+  if (!responseKey) return { shape: 'unsupported', rows: [] };
+
+  const rows = [];
+  if (!flattenPullRows(body[responseKey], rows)) {
+    return { shape: 'unsupported', rows: [] };
+  }
+  if (!rows.length) {
+    // Only the documented 1001 response is authoritative proof of an empty window.
+    // An absent status or a 1000 envelope with no records must not advance a checkpoint.
+    return { shape: 'unsupported', rows: [] };
+  }
+  return { shape: 'rows', rows };
+}
+
+export async function ingestPullPayload(
+  body,
+  { sourceChannel = INGESTION_SOURCE.PULL_QUERY, businessShortCode = null } = {}
+) {
   const extracted = extractPullRows(body);
   const rows = extracted.rows;
   const results = [];
@@ -184,7 +224,7 @@ export async function ingestPullPayload(body, { sourceChannel = INGESTION_SOURCE
   }
 
   for (const row of rows) {
-    const normalized = normalizePullTransactionRow(row, { sourceChannel });
+    const normalized = normalizePullTransactionRow(row, { sourceChannel, businessShortCode });
     try {
       const event = await persistIngestionEvent(normalized);
       const claim = await claimIngestionEvent(event._id);

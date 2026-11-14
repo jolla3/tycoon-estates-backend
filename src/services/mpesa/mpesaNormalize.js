@@ -4,7 +4,7 @@
 // Does not post to G3. Does not invent missing provider fields.
 
 import crypto from 'crypto';
-import { DARAJA_PROVIDER, INGESTION_SOURCE } from './daraja.constants.js';
+import { C2B_COMMAND, DARAJA_PROVIDER, INGESTION_SOURCE } from './daraja.constants.js';
 
 /** Africa/Nairobi is fixed UTC+3 with no DST (Tycoon business-time convention). */
 const NAIROBI_OFFSET_MS = 3 * 60 * 60 * 1000;
@@ -12,6 +12,28 @@ const NAIROBI_OFFSET_MS = 3 * 60 * 60 * 1000;
 export function parseDarajaTransTime(raw) {
   if (raw == null || raw === '') return null;
   const s = String(raw).trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/i);
+  if (iso) {
+    const [, yearText, monthText, dayText, hourText, minuteText, secondText, , zone] = iso;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const hour = Number(hourText);
+    const minute = Number(minuteText);
+    const second = Number(secondText);
+    if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31
+      || hour > 23 || minute > 59 || second > 59) return null;
+    const probe = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+    if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1
+      || probe.getUTCDate() !== day || probe.getUTCHours() !== hour
+      || probe.getUTCMinutes() !== minute || probe.getUTCSeconds() !== second) return null;
+    if (zone.toUpperCase() !== 'Z') {
+      const offset = zone.slice(1).split(':').map(Number);
+      if (offset[0] > 23 || offset[1] > 59) return null;
+    }
+    const parsed = new Date(s);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
   if (!/^\d{14}$/.test(s)) return null;
   const year = Number(s.slice(0, 4));
   const month = Number(s.slice(4, 6));
@@ -79,13 +101,25 @@ function sortKeys(value) {
 export const BUY_GOODS_TRANSACTION_TYPES = Object.freeze([
   'Buy Goods',
   'Buy Goods Online',
-  'Pay Bill',
+  C2B_COMMAND.BUY_GOODS,
 ]);
 
+export function normalizeC2bTransactionType(raw) {
+  if (raw == null) return null;
+  const value = String(raw).trim();
+  if (!value) return null;
+  const normalized = value.toLowerCase().replace(/\s+/g, ' ');
+  if (['buy goods', 'buy goods online', 'customerbuygoodsonline'].includes(normalized)) {
+    return C2B_COMMAND.BUY_GOODS;
+  }
+  if (['pay bill', 'customerpaybillonline', 'c2b-pay-bill-debit'].includes(normalized)) {
+    return C2B_COMMAND.PAYBILL;
+  }
+  return value;
+}
+
 export function isEligibleBuyGoodsTransactionType(transactionType) {
-  if (transactionType == null || transactionType === '') return false;
-  const normalized = String(transactionType).trim().toLowerCase();
-  return BUY_GOODS_TRANSACTION_TYPES.some((t) => t.toLowerCase() === normalized);
+  return normalizeC2bTransactionType(transactionType) === C2B_COMMAND.BUY_GOODS;
 }
 
 export function normalizeC2bConfirmation(body) {
@@ -99,8 +133,7 @@ export function normalizeC2bConfirmation(body) {
     payload.BillRefNumber == null || String(payload.BillRefNumber).trim() === ''
       ? null
       : String(payload.BillRefNumber);
-  const transactionType =
-    payload.TransactionType != null ? String(payload.TransactionType).trim() : null;
+  const transactionType = normalizeC2bTransactionType(payload.TransactionType);
   const errors = [];
   if (!receiptNumber) errors.push('missing_receipt');
   if (!businessShortCode) errors.push('missing_shortcode');
@@ -134,36 +167,41 @@ export function normalizeC2bConfirmation(body) {
   };
 }
 
-export function normalizePullTransactionRow(row, { sourceChannel = INGESTION_SOURCE.PULL_QUERY } = {}) {
-  const payload = row && typeof row === 'object' ? row : {};
-  const receiptNumber =
-    payload.TransID != null
-      ? String(payload.TransID).trim()
-      : payload.TransactionID != null
-        ? String(payload.TransactionID).trim()
-        : '';
-  const businessShortCode =
-    payload.BusinessShortCode != null
-      ? String(payload.BusinessShortCode).trim()
-      : payload.ShortCode != null
-        ? String(payload.ShortCode).trim()
-        : '';
-  const amountCents = parseAmountToCents(
-    payload.TransAmount != null ? payload.TransAmount : payload.Amount
-  );
-  const transactionAt = parseDarajaTransTime(
-    payload.TransTime != null ? payload.TransTime : payload.TransactionDate
-  );
-  const transactionType =
-    payload.TransactionType != null ? String(payload.TransactionType).trim() : null;
+export function normalizePullTransactionRow(
+  row,
+  { sourceChannel = INGESTION_SOURCE.PULL_QUERY, businessShortCode: contextShortCode = null } = {}
+) {
+  const payload = row && typeof row === 'object' && !Array.isArray(row) ? row : {};
+  const rawReceipt = payload.transactionId ?? payload.TransID ?? payload.TransactionID;
+  const receiptNumber = rawReceipt == null ? '' : String(rawReceipt).trim();
+
+  const rawRowShortCode = payload.BusinessShortCode ?? payload.ShortCode;
+  const rowShortCode = rawRowShortCode == null ? '' : String(rawRowShortCode).trim();
+  const fallbackShortCode = contextShortCode == null ? '' : String(contextShortCode).trim();
+  const businessShortCode = rowShortCode || fallbackShortCode;
+
+  const rawAmount = payload.amount ?? payload.TransAmount ?? payload.Amount;
+  const amountCents = parseAmountToCents(rawAmount);
+  const rawTransactionAt = payload.trxDate ?? payload.TransTime ?? payload.TransactionDate;
+  const transactionAt = parseDarajaTransTime(rawTransactionAt);
+  const rawTransactionType = payload.transactiontype ?? payload.TransactionType;
+  const transactionType = normalizeC2bTransactionType(rawTransactionType);
+  const rawBillRef = payload.billreference ?? payload.BillRefNumber;
+  const rawMsisdn = payload.msisdn ?? payload.MSISDN;
+
   const errors = [];
   if (!receiptNumber) errors.push('missing_receipt');
   if (!businessShortCode) errors.push('missing_shortcode');
+  if (rowShortCode && fallbackShortCode && rowShortCode !== fallbackShortCode) {
+    errors.push('merchant_shortcode_mismatch');
+  }
   if (amountCents == null) errors.push('invalid_amount');
   if (!transactionAt) errors.push('invalid_trans_time');
-  if (transactionType && !isEligibleBuyGoodsTransactionType(transactionType)) {
+  if (!transactionType) errors.push('missing_transaction_type');
+  else if (!isEligibleBuyGoodsTransactionType(transactionType)) {
     errors.push('unsupported_transaction_type');
   }
+
   return {
     sourceChannel,
     provider: DARAJA_PROVIDER,
@@ -173,11 +211,9 @@ export function normalizePullTransactionRow(row, { sourceChannel = INGESTION_SOU
     currency: 'KES',
     transactionAt,
     billRefNumber:
-      payload.BillRefNumber == null || String(payload.BillRefNumber).trim() === ''
-        ? null
-        : String(payload.BillRefNumber),
+      rawBillRef == null || String(rawBillRef).trim() === '' ? null : String(rawBillRef),
     transactionType,
-    msisdn: payload.MSISDN != null ? String(payload.MSISDN) : null,
+    msisdn: rawMsisdn == null ? null : String(rawMsisdn),
     payerName: null,
     orgAccountBalance: null,
     thirdPartyTransId: null,

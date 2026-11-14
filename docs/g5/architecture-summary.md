@@ -1,14 +1,15 @@
 # G5 — Architecture Summary and Engineering Handoff
 
-**State (2026-11-14, `feature/g5-construction`):** design baseline G5.1.1 PLUS a published, unit-tested implementation of the Tenant collection slice. Not production ready; every money-moving and public capability is feature-flagged OFF.
+**State (2026-11-14, `main` at `5a96f124f45b7f556fc467eb65dbf1bc87413f88`):** G5.3 ingestion and Tenant collection code is published; this patch adds the owner-supplied C2B v2/Pull contract corrections. Not production ready; callback exposure and money-moving capabilities remain gated.
 
 ### Operational handoff (short)
 
 | Area | Status |
 |---|---|
 | Code published | Submission link lifecycle, public submission API, deterministic SMS parser, evidence envelope, Tenant credit + cross-Tenancy oldest-first settlement, fenced receipt posting service, protected SMS outbox, authenticated Tenant account / review APIs, guarded migrations, OpenAPI entries. |
-| Verified by executed tests | Unit tests only (`tests/unit`). 3 suites fail and were already failing at c357c93, unrelated to G5 code: `mpesa/darajaPullExtract`, `mpesa/leaseFence`, `mpesa/migrationAllowlist`. Exact counts are in the final report. |
-| NOT executed | MongoDB replica-set integration tests (`tests/integration/g5.*`) — no disposable replica set was available. Transaction atomicity, concurrent posting, fencing and migration execution are therefore **unproven by execution**. |
+| Verified by executed tests | The pre-contract-correction candidate `0df6f23` passed 24 focused unit suites / 116 tests and 2 MongoDB replica-set G5 integration suites / 9 tests. This was a focused G5/regression set, not the full repository suite. |
+| Current contract-correction tests | New C2B v2/Pull response, normalization, registration and request-contract tests are added in this patch; they must be run before merge/deploy. |
+| NOT executed | Full repository Jest suite and production migrations. |
 | Disabled by default | `G5_SUBMISSIONS_ENABLED`, `G5_MPESA_POSTING_ENABLED`, `G5_PROTECTED_SMS_ENABLED`, `G5_SMS_EVIDENCE_RETENTION_APPROVED`. Posting additionally hard-blocked while canonical receipt identity (B01/B02) is unproven. |
 | Unresolved gates | B01-B05, B07-B10 (provider/owner evidence). Nothing here resolves them. |
 | Migrations | `20261113_g5_payment_receipt_tenancy_index.js`, `20261113_g5_collection_indexes.js`: dry-run default, allowlisted `--execute`; never run against staging/production by this work. |
@@ -208,3 +209,12 @@ Two missed API paths are now explicit: House PATCH can change occupancy status/i
 
 
 > G5 collection addendum: see G5_COLLECTION_IMPLEMENTATION_DESIGN.md. Posting stays disabled (`G5_MPESA_POSTING_ENABLED`) and gated on B01/B02; gates B01–B05, B07–B10 remain unresolved.
+
+
+### Daraja contract update (14 November 2026)
+
+- C2B v2 registration succeeded in the Daraja sandbox for invocation-form shortcode `600987`; the separate app credential card showed `174379` and the identity relationship remains unproven.
+- C2B v2 is now the default registration/simulation path. Pull Register response parsing uses `ResponseStatus`; Pull Query remains POST and supports the documented nested `Response` rows, lower-case field names and ISO-8601 timestamps.
+- The documented Pull sample is `c2b-pay-bill-debit` (PayBill), so it is quarantined from the Buy Goods-only G5 flow. No Buy Goods Pull row has yet been captured.
+- Pull registration has not been attempted; the supplied portal documentation describes a live shortcode prerequisite. Pagination completion and 48-hour eligibility still need provider evidence.
+- Render OAuth succeeded from the deployed runtime. The callback feature gate remains disabled because callback authentication/abuse controls are not yet established. G5 posting remains disabled.

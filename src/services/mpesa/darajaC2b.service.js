@@ -86,12 +86,19 @@ export async function registerC2bUrls(
     };
   }
 
-  const ok = response.status >= 200 && response.status < 300;
+  const responseCode = String(
+    response.data?.ResponseCode ?? response.data?.responseCode ?? ''
+  ).trim();
+  const httpAccepted = response.status >= 200 && response.status < 300;
+  const providerAccepted = ['0', '00000000'].includes(responseCode);
+  const ok = httpAccepted && providerAccepted;
   let registrationState = ok ? 'ACCEPTED' : 'REJECTED';
   const desc = String(
     response.data?.ResponseDescription ?? response.data?.errorMessage ?? ''
   ).toLowerCase();
-  if (desc.includes('already')) registrationState = 'ALREADY_REGISTERED';
+  if (httpAccepted && providerAccepted && desc.includes('already')) {
+    registrationState = 'ALREADY_REGISTERED';
+  }
 
   if (profile) {
     await MpesaMerchantProfile.updateOne(
@@ -109,6 +116,7 @@ export async function registerC2bUrls(
   return {
     httpStatus: response.status,
     body: response.data ?? null,
+    responseCode,
     ok: ok || registrationState === 'ALREADY_REGISTERED',
     registrationState,
     attemptToken,

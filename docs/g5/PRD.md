@@ -1,11 +1,11 @@
 # G5 — M-PESA Buy Goods / Till Rent Receipt Attribution
 
-**Document:** Product Requirements Document  
-**Feature:** G5  
-**Document state:** Revised G5.0 design baseline for independent review  
-**Repository:** `jolla3/tycoon-estates-backend`  
-**Source-audit snapshot:** `main` at `204c8f9c3578f753af20727799aaa049b1545135` (12 November 2026)  
-**Implementation state:** Not implemented. This PRD does not claim that any G5 model, route, worker, migration, or test exists.
+**Document:** Product Requirements Document
+**Feature:** G5
+**Document state:** G5 product requirements with implementation/provider-contract addenda (14 November 2026)
+**Repository:** `jolla3/tycoon-estates-backend`
+**Current source snapshot:** `main` at `5a96f124f45b7f556fc467eb65dbf1bc87413f88` (14 November 2026)
+**Implementation state:** G5.3 ingestion and Tenant collection code is present. This PRD does not claim production readiness; callback authentication, merchant identity, canonical receipt identity and owner/provider release gates remain open.
 
 > **Document authority:** This PRD defines the intended product behaviour. `architecture.md` records the repository design and implementation constraints. `architecture-summary.md` is the short reading map. `G5_IMPLEMENTATION_GUARDRAILS.md` governs how an engineering agent must review and implement the feature. If a source-code fact, provider contract, or merchant-specific capability is not verified, it is a blocker, not an invitation to invent an answer.
 
@@ -281,7 +281,7 @@ The following must be resolved before the relevant implementation slice is allow
 | ID | Decision / evidence | Why it blocks | Safe default while unresolved |
 |---|---|---|---|
 | G5-B01 | Actual merchant hierarchy: whether this Till maps to one estate, several estates, or multiple Store identities; exact shortcode/Till/Store/Head Office/Notification/Nominated semantics | Determines transaction ownership and whether a Till receipt can map to the correct profile/store | Disable automatic posting for ambiguous merchant scope. |
-| G5-B02 | Authenticated Daraja sandbox contract for callback registration, callback payload, callback authentication/acknowledgment, Pull registration/query methods and payloads, pagination and response schema | Prevents invented endpoints, fields, signatures, or success semantics | No provider adapter implementation beyond contract-independent interfaces/fixtures. |
+| G5-B02 | Authenticated Daraja sandbox contract for callback registration, callback payload, callback authentication/acknowledgment, Pull registration/query methods and payloads, pagination and response schema | Prevents invented endpoints, fields, signatures, or success semantics | Owner supplied portal evidence now establishes C2B v2 registration and Pull POST query/envelope fields; callback authentication, Pull merchant eligibility, Buy Goods Pull type, pagination completion and callback acknowledgement/retry details remain blocked. |
 | G5-B03 | Exact merchant enablement for both callback and Pull Transactions on the real Buy Goods Till, including any Safaricom onboarding or production approval | A generic API guide does not prove a merchant can use the capability | Profile remains not operational. |
 | G5-B04 | Timestamp semantics and tolerance, established with actual SMS and Daraja fixtures | Prevents false matches and false rejections | Timestamp conflict or unsupported precision goes to review; no arbitrary tolerance. |
 | G5-B05 | Raw SMS and payer PII retention period, authorized visibility, dispute hold and deletion policy | Personal financial data requires a deliberate retention decision | Store only what is necessary, encrypted; do not enable production until the owner-approved policy is documented. |
@@ -441,3 +441,10 @@ Authoritative design record: [G5_COLLECTION_IMPLEMENTATION_DESIGN.md](G5_COLLECT
 
 ### 22.1 Status wording (2026-11-14)
 Implemented behind OFF flags: Tenant link + public submission, SMS evidence (digest-only until B05 approval), Tenant credit with automatic application after billing, fenced multi-Tenancy posting (blocked on B01/B02 and migrations), protected confirmation/onboarding SMS (dispatch OFF by default). Unit tests executed; replica-set integration tests authored but not executed. Gates B01-B05, B07-B10 remain open. See architecture-summary.md for the operational handoff.
+
+
+## 23. Provider-contract evidence addendum (14 November 2026)
+
+The owner supplied current Daraja portal documentation for C2B v2 and TransactionPull and returned a successful C2B v2 sandbox URL-registration response for shortcode `600987` (`ResponseCode: 00000000`, `ResponseDescription: Success`). The general sandbox app credential card separately displayed shortcode `174379`; the two values must not be silently equated. See `docs/provider-contracts/G5_DARAJA_C2B_PULL_EVIDENCE.md` for provenance and exact request/response details.
+
+The implementation therefore uses C2B v2 by default and parses the documented Pull POST response envelope and lower-case row fields. PayBill Pull rows and unknown transaction types remain non-postable. Pull registration/merchant eligibility, a real Buy Goods Pull row fixture, pagination completion, callback authentication and callback retry/acknowledgement semantics remain release gates. Sandbox URL registration success does not prove callback delivery or authorize callback exposure.

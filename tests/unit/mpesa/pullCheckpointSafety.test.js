@@ -9,8 +9,25 @@ describe('Pull response shape classification', () => {
     expect(extractPullRows(null).shape).toBe('empty_body');
   });
 
-  test('recognized empty Response array is empty_valid', () => {
-    expect(extractPullRows({ Response: [] }).shape).toBe('empty_valid');
+  test('empty Response array without an explicit provider status is unsupported', () => {
+    expect(extractPullRows({ Response: [] })).toEqual({
+      shape: 'unsupported',
+      rows: [],
+    });
+  });
+
+  test('documented ResponseCode 1001 identifies an empty result window', () => {
+    expect(extractPullRows({ ResponseCode: '1001', Response: [] })).toEqual({
+      shape: 'empty_valid',
+      rows: [],
+    });
+  });
+
+  test('ResponseCode 1000 with an empty Response array is not proof of an empty window', () => {
+    expect(extractPullRows({ ResponseCode: '1000', Response: [] })).toEqual({
+      shape: 'unsupported',
+      rows: [],
+    });
   });
 
   test('unrecognized object is unsupported', () => {
