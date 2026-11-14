@@ -1138,3 +1138,37 @@ The owner supplied current portal documentation and an executed successful C2B v
 - The documented example transaction type `c2b-pay-bill-debit` is PayBill and must not be accepted as a Buy Goods receipt. Unknown transaction types are quarantined rather than guessed.
 - Pull pagination completion, a Buy Goods Pull transaction-type fixture, the relationship between app-card shortcode `174379` and C2B invocation shortcode `600987`, Pull registration eligibility, callback authentication and callback retry/acknowledgement semantics remain unresolved.
 - C2B URLs were registered in sandbox, but the Render callback gate remains disabled. Do not enable inbound callbacks or G3 posting as part of this parser correction.
+
+
+## 31. Daraja callback security and receipt replay safety (14 November 2026, `fix/g5-daraja-pull-contract`)
+
+Implementation handoff: `G5_DARAJA_CALLBACK_REPLAY_FIX_HANDOFF.md`. Progress checkpoints: `G5_DARAJA_CALLBACK_REPLAY_PROGRESS.md`.
+
+### 31.1 Evidence matrix
+| Class | Statement |
+|---|---|
+| Source-verified (this branch before the change) | `darajaCallbacksExposed()` returned true whenever `DARAJA_CALLBACKS_ENABLED=1`, even in production, and returned true for `DARAJA_CALLBACKS_LAB=1` in any non-production `NODE_ENV`. `handleC2bValidation` accepts unconditionally. `persistIngestionEvent` always inserted; no inbox uniqueness existed; `payloadDigest` was diagnostic only. `processClaimedEvent` created/merged `MpesaTransaction` rows without consulting `canonicalReceiptIdentity` (hard-coded false in readiness). Request logging records method/path/status only, not bodies. |
+| Owner-supplied provider fact | C2B v2 registration and callback field shapes (provider-contract record). |
+| Not established by any evidence | Inbound callback signature/header/Basic auth, source IP ranges, mTLS, retry and acknowledgement semantics, validation enablement for this merchant, Till/Store/Head Office identity scope (B01/B02). Outbound OAuth does not authenticate inbound requests. |
+| Engineering controls (this slice) | (1) Provider-authenticator seam with NO verifier: routes always closed. (2) Deterministic source-observation inbox key + unique-index readiness gate. (3) Conflict quarantine with digest-only bounded evidence. (4) Canonical writes blocked unless the canonical identity gate is true. |
+| Unresolved blockers | Authenticated callback-authentication and acknowledgement evidence; B01/B02 merchant identity scope; exact canonical unique index approval; migration execution approval for the inbox idempotency index. |
+
+### 31.2 Callback exposure
+Exposure is a function of a provider-specific **verifier object**, never of an environment flag. No verifier exists, so `/daraja/c2b/confirm`, `/daraja/c2b/validate` and `/daraja/pull/results` always return the existing `503 {ResultCode:1, ResultDesc:'Not exposed'}` **before** the rate limiter and before any handler. `DARAJA_CALLBACKS_ENABLED` and `DARAJA_CALLBACKS_LAB` are retained only as inert, documented legacy names; they no longer alter routing. A future enablement needs a verifier written from authenticated Daraja evidence, with its own tests and review. Rejected: a bare `..._AUTH_VERIFIED=1` switch (not proof), URL path/query secrets (leak through provider config, proxies and logs), invented HMAC/Basic headers, invented Safaricom IP allowlists, reusing the outbound OAuth token. A Daraja-specific limiter was **not** added now (it would not be authentication and there is no verified ingress to protect); when added it must fail closed on store errors.
+
+### 31.3 Two identities
+- **Source-observation identity** (inbox): `idempotencyKey = sha256(canonical-json(["obs1", provider, sourceChannel, businessShortCode, receiptNumber]))`, stored as `obs1:<hex>`. Source channel is part of it, so one C2B delivery and one Pull row for the same receipt are two observations. Events lacking a usable receipt or shortcode use a bounded fallback `mal1:<sha256(["mal1", provider, sourceChannel, payloadDigest])>`; they are quarantine-only and can never become canonical.
+- **Canonical receipt identity**: unchanged and still unverified (B01/B02). The source channel must never be part of it and it is not derived from the inbox key.
+`payloadDigest` is an integrity comparison value, not identity: changing amount/time must not create a new event.
+
+### 31.4 Inbox persistence algorithm
+1. Refuse to persist (`inbox_idempotency_not_ready`) unless the exact unique index `uniq_mpesa_inbox_idempotency` (partial on string key) is verified present in MongoDB; a schema declaration is not proof. Callers treat this as a persistence failure (not acknowledged).
+2. Insert. On E11000 for that key: re-read by key; a failed or empty lookup raises `inbox_duplicate_lookup_failed` (retryable, never a successful duplicate). Other errors propagate.
+3. Same key + same `payloadDigest` = **duplicate**: `$inc replayCount`, `lastReplayAt`; return existing event; no new event, no claim, no second worker.
+4. Same key + different `payloadDigest` = **conflicting replay**: set state `QUARANTINED`, category `replay_conflict`, clear the processing lease token/expiry (fences any active worker: its token-conditional completion can no longer match, so its transaction aborts), `$inc conflictCount`, set first/last conflict timestamps, keep at most 5 conflicting digests. Original normalized fields and `payloadRedacted` are never overwritten and the conflicting payload is not stored. A quarantined event is never claimable.
+
+### 31.5 Canonical fail-closed
+`processClaimedEvent` resolves the merchant profile as before, then, if `canonicalReceiptIdentity` is not true, completes the event as `QUARANTINED / canonical_identity_unverified` and returns without any `MpesaTransaction` create/upsert/update, claim, Payment, allocation or Ledger write. The same guard is repeated inside `upsertCanonicalTransaction` as defense in depth. The gate is read from the verified-index inspection result only (fail closed when no inspection exists); no environment variable can open it. Future Pull checkpoints must not advance past observations that are not durably persisted/quarantined (unchanged rule).
+
+### 31.6 Migration
+`scripts/migrations/20261114_g5_inbox_idempotency_index.js` (dry-run default, `g5MigrationGuard` allowlists): preflight counts rows lacking `idempotencyKey` and duplicate keys; refuses to execute while any duplicate exists; never deletes, merges or rewrites. Because existing rows have no key and the index is partial on string keys, historical rows are unaffected. NOT executed in this task and never against the live `estate` database.

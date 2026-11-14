@@ -87,3 +87,7 @@
 - Pull registration eligibility, nominated number, Buy Goods Pull transaction-type fixture, pagination terminal semantics and full 48-hour entitlement remain unverified.
 - The exact canonical receipt identity and its unique index remain gated by B01/B02. G3 posting remains disabled.
 - No callback simulation, Pull registration, Pull query, production API request, migration, or G3 payment posting was performed as part of this correction.
+
+
+## 24. Classification note — inbound callback authentication (14 November 2026)
+Still **UNKNOWN / not evidenced**: inbound callback signature or authentication header, HTTP Basic, source IP ranges, mTLS, callback retry policy and required acknowledgement semantics, validation-URL enablement for this merchant, and the Till/Store/Head Office identity scope. Outbound OAuth authenticates Tycoon to Daraja only. Consequently Tycoon keeps every public callback route closed; engineering controls in `docs/g5/architecture.md` section 31 are **proposed controls**, not provider facts.

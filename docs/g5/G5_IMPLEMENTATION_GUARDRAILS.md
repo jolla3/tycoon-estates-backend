@@ -387,3 +387,13 @@ No source code, index, migration, provider configuration, key or test environmen
 The owner explicitly authorized a narrow code correction for the already-published G5.3 Daraja adapter. Authorized scope: (1) use the owner-confirmed C2B v2 registration/simulation paths; (2) canonicalize C2B `Buy Goods` to `CustomerBuyGoodsOnline` and keep PayBill outside G5; (3) parse the owner-supplied TransactionPull registration response status, POST query envelope, nested `Response` rows, lower-case fields and timezone-explicit ISO timestamps; (4) pass the queried merchant profile shortcode as context when Pull rows omit it; and (5) add focused fixture/request-contract tests and update the provider evidence record.
 
 This authorization does **not** authorize callback exposure, C2B simulation, Pull registration/query against the live Render/MongoDB environment, migrations, canonical receipt-index activation, merchant operational-state changes, G3 posting, production API requests or any G5 feature-flag changes. Unknown Pull transaction types, shortcode conflicts and ambiguous empty/error responses must remain quarantined or fail closed. Callback security and merchant/product identity remain release gates.
+
+
+## 24. Callback exposure and inbox replay guardrails (14 November 2026)
+1. Callback exposure is decided by a provider verifier, never by an environment flag. With no verifier, all Daraja callback routes return "Not exposed" before the limiter and before any handler.
+2. Never add a bare "auth verified" switch, URL secrets, invented headers/IP lists/mTLS or OAuth-token reuse as inbound authentication.
+3. Inbox identity = source-observation key; canonical identity stays separate and unverified. Do not use `payloadDigest` as identity, do not put the source channel into canonical identity, do not choose a shortcode-only canonical key.
+4. A conflicting replay quarantines the existing event and never overwrites its original data; store digests only (bounded).
+5. A duplicate-key lookup failure is an error, never a successful duplicate.
+6. No `MpesaTransaction`, Payment, allocation or Ledger write while `canonicalReceiptIdentity` is false.
+7. No migration execution, provider call, callback simulation or Render change in this slice.

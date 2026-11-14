@@ -15,6 +15,8 @@
 | Migrations | `20261113_g5_payment_receipt_tenancy_index.js`, `20261113_g5_collection_indexes.js`: dry-run default, allowlisted `--execute`; never run against staging/production by this work. |
 | Remaining work | Public frontend page (`/pay#t=`), real SMS-capture fixtures (B04), retention/recovery policy (B05), override policy (B10), running integration tests, enabling flags per environment after approvals. |
 
+**Daraja ingress (branch `fix/g5-daraja-pull-contract`):** all three public callback routes are hard-closed (no verifier exists; flags are inert). The inbox has a deterministic source-observation key with a runtime-verified unique index (migration `20261114_g5_inbox_idempotency_index.js`, not executed); conflicting replays are quarantined; canonical writes are blocked while `canonicalReceiptIdentity` is false. Blockers: provider callback-auth/ack evidence, B01/B02, migration approval. See `architecture.md` section 31.
+
 Details and decisions: `architecture.md` (section 23 and the G5 collection design record `G5_COLLECTION_IMPLEMENTATION_DESIGN.md`).
 
 ---
