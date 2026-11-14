@@ -1,0 +1,10 @@
+repository: https://github.com/jolla3/tycoon-estates-backend
+branch: main
+HEAD: 204c8f9c3578f753af20727799aaa049b1545135
+message: feat(banking): integrate verified G4 banking infrastructure
+date: 2026-11-12 03:30:22 +0300
+remote: origin/main (up to date at clone)
+working_tree_at_clone: clean
+populated: 2026-11-12
+note: G5 docs overlaid from G5-docs-revised.zip. Application tree copied from that HEAD (excluding node_modules).
+historical_audit_baseline: 204c8f9c3578f753af20727799aaa049b1545135 (same as current main HEAD at setup)

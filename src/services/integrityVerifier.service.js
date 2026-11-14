@@ -709,7 +709,7 @@ export async function runIntegrityVerifier({ clientId = null } = {}) {
     if (c.tenancyId) checkSourceLedger(c, 'RentCharge', 'CHARGE', -Math.abs(c.amountDueCents), 'charge');
   }
   for (const p of payments) {
-    if (p.tenancyId && p.status === 'CONFIRMED') checkSourceLedger(p, 'Payment', 'PAYMENT', p.amountCents, 'payment');
+    if (p.tenancyId && p.status === 'CONFIRMED') checkSourceLedger(p, 'Payment', p.origin === 'CREDIT' ? 'SETTLEMENT' : 'PAYMENT', p.amountCents, 'payment'); // G5: credit applications post SETTLEMENT
   }
 
   // A RENT CHARGE/PAYMENT ledger movement without its source is not a valid

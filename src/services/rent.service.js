@@ -14,9 +14,11 @@ import { dateUtil } from '../utils/date.js';
 import { money } from '../utils/money.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import { audit } from './audit.service.js';
+import { autoApplyCredit } from './tenantCredit.service.js';
 import { assertBillingIndexesAligned } from '../utils/billingIndexReadiness.js';
 import { supportsMongoTransactions } from '../config/database.js';
 import { Errors } from '../utils/errors.js';
+import { logger } from '../config/logger.js';
 import { isTenancyEligibleForPeriod } from '../utils/tenancyEligibility.js';
 
 function resolveDueDay(house, estate, configDueDay) {
@@ -395,8 +397,23 @@ export const rentService = {
       });
     }
 
+    // G5: existing Tenant credit settles newly eligible obligations oldest-first. Runs
+    // regardless of `created` (credit may also settle older open charges). Each Tenant is
+    // its own transaction; a failure never fails billing (credit simply stays unapplied
+    // and is retried on the next run).
+    let creditApplied = 0;
+    for (const tenantId of new Set(tenancies.map((t) => String(t.tenantId)))) {
+      try {
+        const r = await autoApplyCredit({ clientId, estateId, tenantId: new mongoose.Types.ObjectId(tenantId) });
+        creditApplied += r.applied || 0;
+      } catch (err) {
+        logger.warn({ code: err.code, estateId: String(estateId) }, 'Tenant credit auto-apply skipped');
+      }
+    }
+
     return {
       created,
+      creditAppliedCents: creditApplied,
       period,
       eligibleTenancies: tenancies.length,
       partialPeriodExcluded: partial.length,

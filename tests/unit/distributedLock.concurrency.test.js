@@ -41,6 +41,13 @@ describe('distributed lock concurrency', () => {
 
   afterAll(async () => {
     if (client) await client.quit().catch(() => {});
+
+    // The lock helpers create a separate application Redis singleton.
+    // Close it only when the helper module was successfully initialized.
+    if (tryAcquireLock) {
+      const { disconnectRedis } = await import('../../src/config/redis.js');
+      await disconnectRedis().catch(() => {});
+    }
   });
 
   test('Worker B cannot acquire while Worker A holds the lock', async () => {

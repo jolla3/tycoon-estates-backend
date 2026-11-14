@@ -4,6 +4,7 @@
 // core CRUD resources, and the Co-op webhook. Kept hand-written and small
 // per section 41 ("do not over-engineer") — extend paths as the API grows
 // rather than reaching for a code-generation pipeline.
+// G5: collection routes, public submission, Daraja webhooks added.
 
 export const openApiSpec = {
   openapi: '3.0.3',
@@ -103,6 +104,118 @@ export const openApiSpec = {
         summary: "Co-op Bank's SendTransactionINS webhook (called by the bank, not the frontend)",
         security: [],
         responses: { 200: { description: 'Acknowledged' }, 401: { description: 'Invalid Basic credential' }, 422: { description: 'No recognizable AccountNumber in payload' } },
+      },
+    },
+
+    // --- G5 M-PESA collection (authenticated) ---
+    '/mpesa-collection/tenants/{tenantId}/account': {
+      get: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'Tenant account statement (charges, payments, credit)',
+        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { 200: { description: 'OK' }, 404: { description: 'Tenant not found' } },
+      },
+    },
+    '/mpesa-collection/tenants/{tenantId}/payments': {
+      get: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'Tenant payments attributed via G5',
+        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { 200: { description: 'OK' } },
+      },
+    },
+    '/mpesa-collection/tenants/{tenantId}/link': {
+      get: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'Inspect the Tenant submission link (never returns the raw token)',
+        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { 200: { description: 'OK' }, 404: { description: 'No link' } },
+      },
+      post: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'Issue or rotate the Tenant submission link (raw token returned once)',
+        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { 200: { description: 'Link + one-time token' }, 409: { description: 'Concurrent conflict' } },
+      },
+    },
+    '/mpesa-collection/tenants/{tenantId}/link/revoke': {
+      post: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'Revoke the Tenant submission link',
+        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { 200: { description: 'Revoked' } },
+      },
+    },
+    '/mpesa-collection/submissions': {
+      get: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'List SMS submissions for review',
+        responses: { 200: { description: 'OK' } },
+      },
+    },
+    '/mpesa-collection/submissions/{id}/resolve': {
+      post: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'Manually resolve a submission in review',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { 200: { description: 'Resolved' } },
+      },
+    },
+
+    // --- G5 public submission (no cookie auth) ---
+    '/public/mpesa/submissions': {
+      post: {
+        tags: ['G5 Public'],
+        summary: 'Public Tenant SMS submission (bearer token in body)',
+        description: 'Actual mount: POST /api/v1/public/mpesa/submissions (before CSRF). No cookie auth. 4KB body limit. Additional body fields rejected. Rate limited. Neutral responses for invalid/unknown/revoked links.',
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['token', 'text'],
+                properties: {
+                  token: { type: 'string', description: 'One-time bearer token from link issue/rotate' },
+                  text: { type: 'string', description: 'Full M-PESA confirmation SMS text' },
+                },
+                additionalProperties: false,
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: 'Accepted or neutral rejection (indistinguishable to caller)' },
+          429: { description: 'Rate limited' },
+        },
+      },
+    },
+
+    // --- Daraja webhooks (public; no invented auth) ---
+    '/webhooks/daraja/c2b/confirm': {
+      post: {
+        tags: ['Daraja'],
+        summary: 'Daraja C2B confirmation callback',
+        description: 'Actual mount: POST /api/v1/webhooks/daraja/c2b/confirm. Public webhook. Do not invent Safaricom auth; handler persists then acknowledges when enabled.',
+        security: [],
+        responses: { 200: { description: 'Acknowledged' } },
+      },
+    },
+    '/webhooks/daraja/c2b/validate': {
+      post: {
+        tags: ['Daraja'],
+        summary: 'Daraja C2B validation callback',
+        security: [],
+        responses: { 200: { description: 'Acknowledged' } },
+      },
+    },
+    '/webhooks/daraja/pull/results': {
+      post: {
+        tags: ['Daraja'],
+        summary: 'Daraja transaction status / pull results callback',
+        security: [],
+        responses: { 200: { description: 'Acknowledged' } },
       },
     },
   },

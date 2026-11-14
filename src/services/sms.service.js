@@ -585,16 +585,21 @@ export const smsService = {
       .sort({ createdAt: -1 })
       .limit(limit),
 
-  async _claimNextBatch(limit) {
+  /**
+   * Claim the next ORDINARY (standard) SMS batch. Positive allowlist only: explicit null,
+   * SUPPRESSED, G5_PROTECTED or any unexpected value is never claimed here. Protected
+   * messages are dispatched exclusively by g5ProtectedSms.service.
+   */
+  async _claimNextBatch(limit = 20) {
     const claimed = [];
     for (let i = 0; i < limit; i += 1) {
       const job = await SmsMessage.findOneAndUpdate(
         {
           status: 'queued',
-          $or: [
-            { nextRetryAt: null },
-            { nextRetryAt: { $exists: false } },
-            { nextRetryAt: { $lte: new Date() } },
+          $and: [
+            { $or: [{ deliveryMode: 'STANDARD' }, { deliveryMode: { $exists: false } }] },
+            { $or: [{ dispatchMode: 'ENABLED' }, { dispatchMode: { $exists: false } }] },
+            { $or: [{ nextRetryAt: null }, { nextRetryAt: { $exists: false } }, { nextRetryAt: { $lte: new Date() } }] },
           ],
         },
         { $set: { status: 'processing', processingStartedAt: new Date() } },
