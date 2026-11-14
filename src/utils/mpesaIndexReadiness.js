@@ -74,6 +74,19 @@ export const CHECKPOINT_UNIQUE_INDEX = {
   unique: true,
 };
 
+/**
+ * Source-observation idempotency (inbox). Partial on string keys so legacy rows without a key
+ * do not block creation. This is NOT canonical receipt identity (B01/B02 unresolved).
+ * Created only by the guarded migration 20261114_g5_inbox_idempotency_index.js.
+ */
+export const INBOX_IDEMPOTENCY_INDEX = {
+  collection: MPESA_COLLECTIONS.inbox,
+  name: 'uniq_mpesa_inbox_idempotency',
+  key: { idempotencyKey: 1 },
+  unique: true,
+  partialFilterExpression: { idempotencyKey: { $type: 'string' } },
+};
+
 export function indexMatches(indexes, spec) {
   if (!Array.isArray(indexes)) return false;
   return indexes.some((idx) => {
@@ -81,7 +94,10 @@ export function indexMatches(indexes, spec) {
     const keyOk = JSON.stringify(idx.key) === JSON.stringify(spec.key);
     const uniqueOk = Boolean(idx.unique) === Boolean(spec.unique);
     const nameOk = spec.name == null || idx.name === spec.name;
-    return keyOk && uniqueOk && nameOk;
+    // A partial/non-partial mismatch changes uniqueness semantics, so compare filters exactly.
+    const partialOk = JSON.stringify(idx.partialFilterExpression ?? null)
+      === JSON.stringify(spec.partialFilterExpression ?? null);
+    return keyOk && uniqueOk && nameOk && partialOk;
   });
 }
 
@@ -98,6 +114,7 @@ function emptyGates() {
     merchantRegistration: false,
     canonicalQueryIndexes: false,
     canonicalReceiptIdentity: false,
+    inboxIdempotency: false,
     pullReconciliation: false,
   };
 }
@@ -174,6 +191,10 @@ export async function inspectMpesaIndexes() {
     report.collections[MPESA_COLLECTIONS.checkpoints],
     CHECKPOINT_UNIQUE_INDEX,
   );
+  report.gates.inboxIdempotency = indexMatches(
+    report.collections[MPESA_COLLECTIONS.inbox],
+    INBOX_IDEMPOTENCY_INDEX,
+  );
   // B01/B02 unresolved. Never treat provisional receipt uniqueness as ready.
   report.gates.canonicalReceiptIdentity = false;
 
@@ -184,4 +205,24 @@ export async function inspectMpesaIndexes() {
   lastReport = report;
   logger.debug({ gates: report.gates }, 'M-PESA index readiness inspected');
   return report;
+}
+
+/**
+ * Fail-closed readiness probes. Both read verified index inspection only; no env flag can open them.
+ * `inspect` is injectable for tests.
+ */
+export async function isInboxIdempotencyReady({ inspect = inspectMpesaIndexes } = {}) {
+  const cached = getMpesaIndexReport();
+  if (cached?.gates?.inboxIdempotency === true) return true;
+  try {
+    const report = await inspect();
+    return report?.gates?.inboxIdempotency === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Canonical receipt identity is unresolved (B01/B02): always false until separately verified. */
+export function isCanonicalReceiptIdentityReady() {
+  return getMpesaIndexReport()?.gates?.canonicalReceiptIdentity === true;
 }

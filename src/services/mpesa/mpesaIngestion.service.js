@@ -14,6 +14,10 @@ import {
   DARAJA_PROVIDER,
 } from './daraja.constants.js';
 import { logger } from '../../config/logger.js';
+import {
+  isInboxIdempotencyReady,
+  isCanonicalReceiptIdentityReady,
+} from '../../utils/mpesaIndexReadiness.js';
 
 const LEASE_TTL_MS = 120_000;
 
@@ -59,24 +63,132 @@ export async function resolveMerchantProfileByShortCode(businessShortCode, opts)
   return r.profile || null;
 }
 
-export async function persistIngestionEvent(normalized, { session } = {}) {
+export const PERSIST_OUTCOME = Object.freeze({
+  CREATED: 'created',
+  DUPLICATE: 'duplicate',
+  CONFLICT: 'conflict',
+});
+
+const MAX_CONFLICT_DIGESTS = 5;
+
+function canonicalJson(value) {
+  return JSON.stringify(value);
+}
+
+/**
+ * Source-observation idempotency key (architecture 31.3). Includes the source channel, so a C2B
+ * delivery and a Pull row for one receipt are two observations. It is not canonical receipt
+ * identity and never feeds MpesaTransaction. payloadDigest is excluded: a changed payload for the
+ * same observation is a conflict, not a new event.
+ */
+export function buildInboxIdempotencyKey(normalized) {
+  const sha = (arr) => crypto.createHash('sha256').update(canonicalJson(arr)).digest('hex');
+  const { sourceChannel, businessShortCode, receiptNumber, payloadDigest } = normalized;
+  if (sourceChannel && businessShortCode && receiptNumber) {
+    return `obs1:${sha(['obs1', DARAJA_PROVIDER, sourceChannel, String(businessShortCode), String(receiptNumber)])}`;
+  }
+  return `mal1:${sha(['mal1', DARAJA_PROVIDER, String(sourceChannel || ''), payloadDigest])}`;
+}
+
+function isDuplicateKeyError(err) {
+  return err && (err.code === 11000 || err.code === 11001);
+}
+
+async function recordDuplicate(key, digest, { session }) {
+  const existing = await MpesaIngestionEvent.findOne({ idempotencyKey: key }).session(session || null);
+  if (!existing) {
+    const err = new Error('inbox_duplicate_lookup_failed');
+    err.code = 'inbox_duplicate_lookup_failed';
+    throw err;
+  }
+  const now = new Date();
+  if (existing.payloadDigest === digest) {
+    await MpesaIngestionEvent.updateOne(
+      { _id: existing._id },
+      { $inc: { replayCount: 1 }, $set: { lastReplayAt: now } },
+      { session: session || null }
+    );
+    return { event: existing, outcome: PERSIST_OUTCOME.DUPLICATE };
+  }
+  // Conflicting replay: quarantine, fence any active lease, never touch original data.
+  const conflicted = await MpesaIngestionEvent.findOneAndUpdate(
+    { _id: existing._id },
+    [
+      {
+        $set: {
+          state: INGESTION_STATE.QUARANTINED,
+          quarantineCategory: 'replay_conflict',
+          reasonCode: 'conflicting_payload_for_same_observation',
+          processingLeaseToken: null,
+          processingLeaseExpiresAt: null,
+          conflictCount: { $add: [{ $ifNull: ['$conflictCount', 0] }, 1] },
+          firstConflictAt: { $ifNull: ['$firstConflictAt', now] },
+          lastConflictAt: now,
+          conflictDigests: {
+            $slice: [
+              {
+                $cond: [
+                  { $in: [digest, { $ifNull: ['$conflictDigests', []] }] },
+                  { $ifNull: ['$conflictDigests', []] },
+                  { $concatArrays: [{ $ifNull: ['$conflictDigests', []] }, [digest]] },
+                ],
+              },
+              MAX_CONFLICT_DIGESTS,
+            ],
+          },
+        },
+      },
+    ],
+    { new: true, session: session || null }
+  );
+  return { event: conflicted || existing, outcome: PERSIST_OUTCOME.CONFLICT };
+}
+
+/**
+ * Stage 1 persist with durable idempotency. Throws (caller must NOT acknowledge) when the
+ * idempotency index is not verified, on lookup failure after an insert race, or on any other error.
+ */
+export async function persistIngestionObservation(
+  normalized,
+  { session, readyCheck = isInboxIdempotencyReady } = {}
+) {
   if (!normalized || typeof normalized !== 'object') throw new Error('normalized observation required');
   if (!normalized.payloadDigest) throw new Error('payloadDigest required');
-  const [event] = await MpesaIngestionEvent.create(
-    [{
-      provider: DARAJA_PROVIDER,
-      sourceChannel: normalized.sourceChannel,
-      businessShortCode: normalized.businessShortCode || null,
-      receiptNumber: normalized.receiptNumber || null,
-      payloadDigest: normalized.payloadDigest,
-      payloadRedacted: redactNormalized(normalized),
-      state: normalized.ok ? INGESTION_STATE.RECEIVED : INGESTION_STATE.QUARANTINED,
-      quarantineCategory: normalized.ok ? null : 'validation_failed',
-      reasonCode: normalized.ok ? null : (normalized.validationErrors || []).join(','),
-    }],
-    { session }
-  );
-  return event;
+  if (!(await readyCheck())) {
+    const err = new Error('inbox_idempotency_not_ready');
+    err.code = 'inbox_idempotency_not_ready';
+    throw err;
+  }
+  const key = buildInboxIdempotencyKey(normalized);
+  try {
+    const [event] = await MpesaIngestionEvent.create(
+      [{
+        provider: DARAJA_PROVIDER,
+        sourceChannel: normalized.sourceChannel,
+        businessShortCode: normalized.businessShortCode || null,
+        receiptNumber: normalized.receiptNumber || null,
+        payloadDigest: normalized.payloadDigest,
+        idempotencyKey: key,
+        payloadRedacted: redactNormalized(normalized),
+        state: normalized.ok ? INGESTION_STATE.RECEIVED : INGESTION_STATE.QUARANTINED,
+        quarantineCategory: normalized.ok ? null : 'validation_failed',
+        reasonCode: normalized.ok ? null : (normalized.validationErrors || []).join(','),
+      }],
+      { session }
+    );
+    return { event, outcome: PERSIST_OUTCOME.CREATED };
+  } catch (err) {
+    if (!isDuplicateKeyError(err)) throw err;
+    // Inside a Mongo transaction a duplicate-key error aborts it; the caller's transaction must
+    // retry. Outside one (the normal Stage 1 path) re-read and classify.
+    if (session?.inTransaction?.()) throw err;
+    return recordDuplicate(key, normalized.payloadDigest, { session });
+  }
+}
+
+/** Back-compat wrapper: returns only the event. New callers use persistIngestionObservation. */
+export async function persistIngestionEvent(normalized, opts) {
+  return (await persistIngestionObservation(normalized, opts)).event;
 }
 
 export async function claimIngestionEvent(eventId, { ttlMs = LEASE_TTL_MS, session } = {}) {
@@ -207,6 +319,17 @@ export async function processClaimedEvent(event, leaseToken, normalized, { sessi
     { session }
   );
 
+  // Fail closed: no MpesaTransaction write while canonical receipt identity is unverified.
+  if (!canonicalIdentityReady()) {
+    await completeIngestionEvent(event._id, leaseToken, {
+      state: INGESTION_STATE.QUARANTINED,
+      quarantineCategory: 'canonical_identity_unverified',
+      reasonCode: 'canonical_receipt_identity_not_verified',
+      session,
+    });
+    return { quarantined: true, reason: 'canonical_identity_unverified', transaction: null };
+  }
+
   try {
     const upsert = await upsertCanonicalTransaction(normalized, profile, { session });
     const completed = await completeIngestionEvent(event._id, leaseToken, {
@@ -231,7 +354,17 @@ export async function processClaimedEvent(event, leaseToken, normalized, { sessi
 }
 
 export async function ingestNormalizedObservation(normalized, { session } = {}) {
-  const event = await persistIngestionEvent(normalized, { session });
+  const persisted = await persistIngestionObservation(normalized, { session });
+  const event = persisted.event;
+  if (persisted.outcome !== PERSIST_OUTCOME.CREATED) {
+    return {
+      persisted: true,
+      event,
+      duplicateEvent: persisted.outcome === PERSIST_OUTCOME.DUPLICATE,
+      replayConflict: persisted.outcome === PERSIST_OUTCOME.CONFLICT,
+      transaction: null,
+    };
+  }
   const claim = await claimIngestionEvent(event._id, { session });
   if (!claim) return { persisted: true, event, duplicateEvent: false, deferred: true };
   try {
@@ -248,7 +381,16 @@ export async function ingestNormalizedObservation(normalized, { session } = {}) 
   }
 }
 
+function canonicalIdentityReady() {
+  return isCanonicalReceiptIdentityReady();
+}
+
 async function upsertCanonicalTransaction(normalized, profile, { session } = {}) {
+  if (!canonicalIdentityReady()) {
+    const err = new Error('canonical_identity_unverified');
+    err.code = 'canonical_identity_unverified';
+    throw err;
+  }
   const filter = {
     provider: DARAJA_PROVIDER,
     businessShortCode: normalized.businessShortCode,

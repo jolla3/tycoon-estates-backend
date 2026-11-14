@@ -9,7 +9,8 @@ import crypto from 'crypto';
 import { DARAJA_PATHS, C2B_RESPONSE_TYPE } from './daraja.constants.js';
 import { normalizeC2bConfirmation } from './mpesaNormalize.js';
 import {
-  persistIngestionEvent,
+  persistIngestionObservation,
+  PERSIST_OUTCOME,
   claimIngestionEvent,
   processClaimedEvent,
 } from './mpesaIngestion.service.js';
@@ -126,8 +127,9 @@ export async function registerC2bUrls(
 export async function handleC2bConfirmation(body) {
   const normalized = normalizeC2bConfirmation(body);
   let event;
+  let persistOutcome;
   try {
-    event = await persistIngestionEvent(normalized);
+    ({ event, outcome: persistOutcome } = await persistIngestionObservation(normalized));
   } catch (err) {
     logger.error({ err: err.message }, 'C2B confirmation persist failed');
     return {
@@ -138,6 +140,20 @@ export async function handleC2bConfirmation(body) {
   }
 
   const ack = { ResultCode: 0, ResultDesc: 'Accepted' };
+  if (persistOutcome !== PERSIST_OUTCOME.CREATED) {
+    // Durable duplicate or conflicting replay: existing event returned, no claim, no second worker.
+    return {
+      ack,
+      httpStatus: 200,
+      ingestion: {
+        persisted: true,
+        eventId: event._id,
+        duplicateEvent: persistOutcome === PERSIST_OUTCOME.DUPLICATE,
+        replayConflict: persistOutcome === PERSIST_OUTCOME.CONFLICT,
+        quarantined: persistOutcome === PERSIST_OUTCOME.CONFLICT,
+      },
+    };
+  }
   try {
     const claim = await claimIngestionEvent(event._id);
     if (claim) {

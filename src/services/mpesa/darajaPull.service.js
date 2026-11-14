@@ -9,7 +9,8 @@ import axios from 'axios';
 import { DARAJA_PATHS, INGESTION_SOURCE, PULL_REGISTER_CODE } from './daraja.constants.js';
 import { normalizePullTransactionRow } from './mpesaNormalize.js';
 import {
-  persistIngestionEvent,
+  persistIngestionObservation,
+  PERSIST_OUTCOME,
   claimIngestionEvent,
   processClaimedEvent,
 } from './mpesaIngestion.service.js';
@@ -226,9 +227,14 @@ export async function ingestPullPayload(
   for (const row of rows) {
     const normalized = normalizePullTransactionRow(row, { sourceChannel, businessShortCode });
     try {
-      const event = await persistIngestionEvent(normalized);
-      const claim = await claimIngestionEvent(event._id);
+      const { event, outcome } = await persistIngestionObservation(normalized);
+      const claim = outcome === PERSIST_OUTCOME.CREATED
+        ? await claimIngestionEvent(event._id)
+        : null;
       let processResult = {};
+      if (outcome === PERSIST_OUTCOME.CONFLICT) {
+        processResult = { quarantined: true, conflict: true };
+      }
       if (claim) {
         processResult = await processClaimedEvent(claim.event, claim.leaseToken, normalized);
       }

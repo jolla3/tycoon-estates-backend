@@ -35,6 +35,15 @@ const MpesaIngestionEventSchema = new Schema(
     receiptNumber: { type: String, default: null, index: true },
     receivedAt: { type: Date, required: true, default: Date.now, index: true },
     payloadDigest: { type: String, required: true, index: true },
+    // Source-observation identity (NOT canonical receipt identity). See architecture 31.3.
+    // Uniqueness is enforced only by the migration-created partial unique index.
+    idempotencyKey: { type: String, default: null },
+    replayCount: { type: Number, default: 0 },
+    lastReplayAt: { type: Date, default: null },
+    conflictCount: { type: Number, default: 0 },
+    firstConflictAt: { type: Date, default: null },
+    lastConflictAt: { type: Date, default: null },
+    conflictDigests: { type: [String], default: [] },
     providerEventId: { type: String, default: null, index: true },
     payloadRedacted: { type: Schema.Types.Mixed, default: null },
     normalizedTransactionId: {
