@@ -142,6 +142,27 @@ export async function provisionMpesaOperationalIndexes() {
   return { created, skipped: false };
 }
 
+/**
+ * Zero legacy rows that have enough data to derive a source-observation key
+ * (sourceChannel + payloadDigest — the same two fields the migration's `deriveLegacyKey` / the
+ * production `buildInboxIdempotencyKey` require) but still lack `idempotencyKey`. Any such row
+ * means coverage is incomplete, whether from an interrupted migration or an index created without
+ * running it. Fails closed (returns false) on any query error — never assume coverage.
+ */
+async function hasCompleteInboxBackfillCoverage(db) {
+  try {
+    const remaining = await db.collection(MPESA_COLLECTIONS.inbox).countDocuments({
+      idempotencyKey: { $not: { $type: 'string' } },
+      sourceChannel: { $type: 'string', $ne: '' },
+      payloadDigest: { $type: 'string', $ne: '' },
+    });
+    return remaining === 0;
+  } catch (err) {
+    logger.debug({ err: err.message }, 'Could not verify inbox idempotency backfill coverage');
+    return false;
+  }
+}
+
 export async function inspectMpesaIndexes() {
   if (!mongoose.connection?.db) {
     lastReport = {
@@ -191,10 +212,20 @@ export async function inspectMpesaIndexes() {
     report.collections[MPESA_COLLECTIONS.checkpoints],
     CHECKPOINT_UNIQUE_INDEX,
   );
-  report.gates.inboxIdempotency = indexMatches(
+  // Structural check (the index exists) is necessary but not sufficient: a partial unique index
+  // can exist while historical rows were only partly backfilled (e.g. a migration run that was
+  // interrupted, or the index created by hand before the backfill finished). Readiness must prove
+  // COMPLETE coverage — zero legacy rows that have enough data to derive a key but still lack one
+  // — never just "the index object is present". Legacy rows that are permanently, legitimately
+  // unkeyed (ambiguous/colliding historical duplicates the migration deliberately left alone) are
+  // indistinguishable here from an incomplete run; both keep this gate false until a human
+  // resolves them, by design (never silently choose between historical events).
+  const indexStructurallyPresent = indexMatches(
     report.collections[MPESA_COLLECTIONS.inbox],
     INBOX_IDEMPOTENCY_INDEX,
   );
+  report.gates.inboxIdempotency = indexStructurallyPresent
+    && (await hasCompleteInboxBackfillCoverage(db));
   // B01/B02 unresolved. Never treat provisional receipt uniqueness as ready.
   report.gates.canonicalReceiptIdentity = false;
 

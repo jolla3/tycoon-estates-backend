@@ -462,16 +462,110 @@ async function mergeObservation(existing, normalized, { session } = {}) {
   return { transaction: refreshed, created: false, conflict: false };
 }
 
+const RECEIVED_MIN_AGE_MS = 30_000; // let the synchronous request-path claim fresh RECEIVED rows first
+const RETRY_BACKOFF_BASE_MS = 30_000;
+const RETRY_BACKOFF_MAX_MS = 30 * 60 * 1000;
+const MAX_RECOVERY_ATTEMPTS = 8;
+
+/** Exponential backoff so a repeatedly-failing event is retried less often over time, never in a tight loop. */
+export function nextRetryBackoffMs(attempts) {
+  const capped = Math.min(Math.max(attempts, 1), 10);
+  return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (capped - 1), RETRY_BACKOFF_MAX_MS);
+}
+
+/**
+ * Rebuilds a normalized observation from an event's own persisted, redacted fields — never from
+ * an unavailable raw callback body. Only the fields `persistIngestionObservation` already stored
+ * are used; nothing is guessed. Returns null when there isn't enough safe data to reconstruct.
+ */
+export function reconstructNormalizedObservation(event) {
+  if (!event?.sourceChannel || !event?.payloadDigest) return null;
+  const redacted = event.payloadRedacted || {};
+  return {
+    sourceChannel: event.sourceChannel,
+    businessShortCode: event.businessShortCode ?? null,
+    receiptNumber: event.receiptNumber ?? redacted.receiptNumber ?? null,
+    payloadDigest: event.payloadDigest,
+    ok: true, // only RECEIVED/FAILED_RETRYABLE/expired-PROCESSING events reach recovery; all were ok:true at persist
+    amountCents: redacted.amountCents,
+    transactionAt: redacted.transactionAt,
+    transactionType: redacted.transactionType,
+    billRefNumber: redacted.billRefNumber,
+  };
+}
+
+/**
+ * Recovers orphaned RECEIVED events (claimed but never processed before a crash), FAILED_RETRYABLE
+ * events whose backoff has elapsed, and PROCESSING events whose lease expired — then actually runs
+ * them through the same claim + processClaimedEvent lifecycle the live request path uses. Never
+ * bypasses inbox readiness, the canonical fail-closed gate, or financial posting: it reuses those
+ * same functions unmodified. Safe under multiple concurrent workers because claimIngestionEvent's
+ * conditional findOneAndUpdate is the only thing that lets a worker proceed with a given event.
+ */
 export async function reclaimExpiredProcessingEvents({ limit = 50 } = {}) {
   const now = new Date();
-  const stuck = await MpesaIngestionEvent.find({
-    state: INGESTION_STATE.PROCESSING,
-    processingLeaseExpiresAt: { $lte: now },
-  }).sort({ processingLeaseExpiresAt: 1 }).limit(limit);
+  const receivedCutoff = new Date(now.getTime() - RECEIVED_MIN_AGE_MS);
+  const candidates = await MpesaIngestionEvent.find({
+    $or: [
+      { state: INGESTION_STATE.RECEIVED, createdAt: { $lte: receivedCutoff } },
+      {
+        state: INGESTION_STATE.FAILED_RETRYABLE,
+        $or: [{ nextAttemptAt: null }, { nextAttemptAt: { $lte: now } }],
+      },
+      { state: INGESTION_STATE.PROCESSING, processingLeaseExpiresAt: { $lte: now } },
+    ],
+  }).sort({ receivedAt: 1 }).limit(limit);
+
   const results = [];
-  for (const ev of stuck) {
+  for (const ev of candidates) {
+    if (ev.attempts >= MAX_RECOVERY_ATTEMPTS) {
+      await MpesaIngestionEvent.updateOne(
+        { _id: ev._id, state: ev.state },
+        { $set: { state: INGESTION_STATE.FAILED_TERMINAL, reasonCode: 'max_recovery_attempts_exceeded' } }
+      );
+      results.push({ eventId: String(ev._id), outcome: 'terminal_max_attempts' });
+      continue;
+    }
+
     const claim = await claimIngestionEvent(ev._id);
-    results.push({ eventId: String(ev._id), reclaimed: Boolean(claim) });
+    if (!claim) {
+      // Another worker (or the live request path) already claimed it, or it changed state
+      // (e.g. was conflicted) between the find and now. Lease fencing made this safe to skip.
+      results.push({ eventId: String(ev._id), outcome: 'not_claimed' });
+      continue;
+    }
+
+    const normalized = reconstructNormalizedObservation(claim.event);
+    if (!normalized) {
+      await completeIngestionEvent(claim.event._id, claim.leaseToken, {
+        state: INGESTION_STATE.QUARANTINED,
+        quarantineCategory: 'recovery_insufficient_data',
+        reasonCode: 'cannot_reconstruct_normalized_observation',
+      });
+      results.push({ eventId: String(ev._id), outcome: 'quarantined_insufficient_data' });
+      continue;
+    }
+
+    try {
+      const outcome = await processClaimedEvent(claim.event, claim.leaseToken, normalized);
+      results.push({ eventId: String(ev._id), outcome: 'processed', quarantined: Boolean(outcome.quarantined) });
+    } catch (err) {
+      const attempts = (claim.event.attempts || 0);
+      await MpesaIngestionEvent.updateOne(
+        { _id: claim.event._id, processingLeaseToken: claim.leaseToken, state: INGESTION_STATE.PROCESSING },
+        {
+          $set: {
+            state: INGESTION_STATE.FAILED_RETRYABLE,
+            reasonCode: 'recovery_processing_failed',
+            nextAttemptAt: new Date(Date.now() + nextRetryBackoffMs(attempts)),
+            processingLeaseToken: null,
+            processingLeaseExpiresAt: null,
+          },
+        }
+      );
+      logger.error({ err: err.message, eventId: String(ev._id) }, 'Recovery processing failed; rescheduled with backoff');
+      results.push({ eventId: String(ev._id), outcome: 'rescheduled', error: err.message });
+    }
   }
   return results;
 }
