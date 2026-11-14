@@ -59,7 +59,9 @@ describeWithMongo('G5 multi-Tenancy receipt settlement and Tenant credit', () =>
   afterAll(async () => { await clearTestDb(); await disconnectTestDb(); });
 
   beforeEach(async () => {
-    await Promise.all([Payment, PaymentAllocation, Ledger, RentCharge, TenantCreditMovement, Tenancy, Tenant, House, Estate, Client].map((m) => m.deleteMany({}).catch(() => {})));
+    // TenantCreditMovement is immutable; each test creates a fresh Tenant,
+    // so previous movements remain isolated by tenantId.
+    await Promise.all([Payment, PaymentAllocation, Ledger, RentCharge, Tenancy, Tenant, House, Estate, Client].map((m) => m.deleteMany({}).catch(() => {})));
     client = await Client.create({ name: 'G5 Client' });
     estate = await Estate.create({ clientId: client._id, name: 'G5 Estate', isActive: true });
     houseA = await House.create({ clientId: client._id, estateId: estate._id, houseNumber: 'A1', monthlyRent: 10000, status: 'occupied', isActive: true, dueDay: 5 });
@@ -76,10 +78,12 @@ describeWithMongo('G5 multi-Tenancy receipt settlement and Tenant credit', () =>
     const txId = new mongoose.Types.ObjectId();
     const out = await settle(60000, txId);
     expect(out.plan).toMatchObject({ receiptAppliedCents: 60000, newCreditCents: 0 });
-    const pays = await Payment.find({ mpesaReceiptId: txId }).sort({ amountCents: 1 });
+    const pays = await Payment.find({ mpesaReceiptId: txId })
+      .sort({ amountCents: 1, tenancyId: 1 });
     expect(pays.map((p) => [String(p.tenancyId), p.amountCents, p.origin])).toEqual([
-      [String(tB._id), 30000, 'MPESA'], [String(tA._id), 30000, 'MPESA'],
-    ].sort((a, b) => a[1] - b[1]));
+      [String(tA._id), 30000, 'MPESA'],
+      [String(tB._id), 30000, 'MPESA'],
+    ].sort((a, b) => a[0].localeCompare(b[0])));
     expect((await RentCharge.findById(old._id)).balanceCents).toBe(0);
     expect((await RentCharge.findById(cur._id)).balanceCents).toBe(20000);
     const ledgerSum = (await Ledger.aggregate([{ $match: { entryType: 'PAYMENT' } }, { $group: { _id: null, t: { $sum: '$amountCents' } } }]))[0].t;
@@ -125,15 +129,39 @@ describeWithMongo('G5 multi-Tenancy receipt settlement and Tenant credit', () =>
 
   test('failure inside the transaction leaves no partial Payment/ledger/credit rows', async () => {
     await charge(tB, houseB, '2026-04', 10000);
+    const txId = new mongoose.Types.ObjectId();
     const session = await mongoose.startSession();
-    await expect(session.withTransaction(async () => {
-      await settleTenantAccount({ clientId: client._id, estateId: estate._id, tenantId: tenant._id, session,
-        receipt: { transactionId: new mongoose.Types.ObjectId(), receiptNumber: 'X', amountCents: 5000, transactionAt: new Date() } });
-      throw new Error('simulated downstream failure');
-    })).rejects.toThrow('simulated');
-    await session.endSession();
-    expect(await Payment.countDocuments({})).toBe(0);
-    expect(await Ledger.countDocuments({})).toBe(0);
-    expect(await TenantCreditMovement.countDocuments({})).toBe(0);
+
+    try {
+      await expect(session.withTransaction(async () => {
+        const result = await settleTenantAccount({
+          clientId: client._id,
+          estateId: estate._id,
+          tenantId: tenant._id,
+          session,
+          receipt: {
+            transactionId: txId,
+            receiptNumber: 'X',
+            amountCents: 15000,
+            transactionAt: new Date(),
+          },
+        });
+
+        // A 15,000-cent receipt against a 10,000-cent charge must
+        // create a 5,000-cent surplus movement before the forced abort.
+        expect(result.movements.map((m) => m.movementType)).toEqual(['RECEIPT_SURPLUS']);
+        throw new Error('simulated downstream failure');
+      })).rejects.toThrow('simulated');
+    } finally {
+      await session.endSession();
+    }
+
+    const scope = { clientId: client._id, estateId: estate._id, tenantId: tenant._id };
+    expect(await Payment.countDocuments(scope)).toBe(0);
+    expect(await Ledger.countDocuments(scope)).toBe(0);
+    expect(await TenantCreditMovement.countDocuments({
+      ...scope,
+      mpesaTransactionId: txId,
+    })).toBe(0);
   });
 });

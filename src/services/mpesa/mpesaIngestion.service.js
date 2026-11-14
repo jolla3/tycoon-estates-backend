@@ -29,6 +29,12 @@ function redactNormalized(n) {
   };
 }
 
+export function leaseLostError() {
+  const error = new Error('lease_lost_before_complete');
+  error.code = 'lease_lost_before_complete';
+  return error;
+}
+
 export function newProcessingLeaseToken() {
   return crypto.randomBytes(16).toString('hex');
 }
@@ -210,7 +216,7 @@ export async function processClaimedEvent(event, leaseToken, normalized, { sessi
       normalizedTransactionId: upsert.transaction?._id || null,
       session,
     });
-    if (!completed) throw new Error('lease_lost_before_complete');
+    if (!completed) throw leaseLostError();
     return {
       quarantined: Boolean(upsert.conflict),
       conflict: Boolean(upsert.conflict),

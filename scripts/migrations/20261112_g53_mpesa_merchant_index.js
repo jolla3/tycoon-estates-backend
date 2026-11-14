@@ -5,12 +5,22 @@
  * Does NOT create provisional receipt unique until B01/B02.
  */
 import mongoose from 'mongoose';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const EXECUTE = process.argv.includes('--execute');
 const MERCHANT_INDEX_NAME = 'uniq_client_business_shortcode';
 const MERCHANT_KEY = { clientId: 1, businessShortCode: 1 };
 const CHECKPOINT_INDEX_NAME = 'uniq_mpesa_pull_checkpoint_profile';
 const CHECKPOINT_KEY = { merchantProfileId: 1 };
+
+export function isInvokedDirectly(moduleUrl = import.meta.url, argv = process.argv) {
+  const invokedPath = argv[1]
+    ? pathToFileURL(resolve(argv[1])).href
+    : '';
+
+  return moduleUrl === invokedPath;
+}
 
 function normalizeAddress(value) {
   const address = String(value || '').trim().toLowerCase();
@@ -164,7 +174,9 @@ async function main() {
   await mongoose.disconnect();
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+if (isInvokedDirectly()) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

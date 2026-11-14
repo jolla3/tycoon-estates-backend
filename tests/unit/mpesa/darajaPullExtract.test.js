@@ -2,17 +2,23 @@ import { describe, test, expect } from '@jest/globals';
 import { extractPullRows } from '../../../src/services/mpesa/darajaPull.service.js';
 
 describe('extractPullRows', () => {
-  test('returns empty for null/non-object', () => {
-    expect(extractPullRows(null)).toEqual([]);
-    expect(extractPullRows('x')).toEqual([]);
+  test('distinguishes empty bodies from unsupported responses', () => {
+    expect(extractPullRows(null)).toEqual({ shape: 'empty_body', rows: [] });
+    expect(extractPullRows('x')).toEqual({ shape: 'unsupported', rows: [] });
+    expect(extractPullRows({ unexpected: true })).toEqual({ shape: 'unsupported', rows: [] });
   });
-  test('accepts top-level array', () => {
-    expect(extractPullRows([{ TransID: '1' }])).toHaveLength(1);
+
+  test('accepts top-level arrays and identifies valid empty arrays', () => {
+    const rows = [{ TransID: '1' }];
+    expect(extractPullRows(rows)).toEqual({ shape: 'rows', rows });
+    expect(extractPullRows([])).toEqual({ shape: 'empty_valid', rows: [] });
   });
+
   test('accepts Response / transactions / Transactions / data', () => {
-    expect(extractPullRows({ Response: [{ a: 1 }] })).toHaveLength(1);
-    expect(extractPullRows({ transactions: [{ a: 1 }] })).toHaveLength(1);
-    expect(extractPullRows({ Transactions: [{ a: 1 }] })).toHaveLength(1);
-    expect(extractPullRows({ data: [{ a: 1 }] })).toHaveLength(1);
+    for (const key of ['Response', 'transactions', 'Transactions', 'data']) {
+      const rows = [{ a: 1 }];
+      expect(extractPullRows({ [key]: rows })).toEqual({ shape: 'rows', rows });
+      expect(extractPullRows({ [key]: [] })).toEqual({ shape: 'empty_valid', rows: [] });
+    }
   });
 });

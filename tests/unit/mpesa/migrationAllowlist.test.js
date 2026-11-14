@@ -33,6 +33,7 @@ describe('G5.3 migration allowlist', () => {
   test('importing the module does not invoke main', () => {
     const exitBefore = process.exitCode;
     expect(isInvokedDirectly()).toBe(false);
+    expect(isInvokedDirectly('file:///tmp/migration.js', ['node', '/tmp/migration.js'])).toBe(true);
     expect(isInvokedDirectly('file:///tmp/migration.js', ['node', '/tmp/other.js'])).toBe(false);
     expect(process.exitCode).toBe(exitBefore);
   });
