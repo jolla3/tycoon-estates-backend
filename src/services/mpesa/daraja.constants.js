@@ -19,11 +19,12 @@ export const DARAJA_BASE_URL = Object.freeze({
 
 export const DARAJA_PATHS = Object.freeze({
   oauth: '/oauth/v1/generate',
-  /** Confirm app enablement for v1 vs v2 in the Daraja portal before production. */
-  c2bRegisterUrl: '/mpesa/c2b/v1/registerurl',
-  /** Portal may expose v2; set DARAJA_C2B_REGISTER_PATH to override after verification. */
+  /** Daraja v2 is the confirmed C2B contract for the Tycoon Estates sandbox app. */
+  c2bRegisterUrl: '/mpesa/c2b/v2/registerurl',
+  /** Retained only for an explicitly verified legacy merchant integration. */
+  c2bRegisterUrlV1: '/mpesa/c2b/v1/registerurl',
   c2bRegisterUrlV2: '/mpesa/c2b/v2/registerurl',
-  c2bSimulate: '/mpesa/c2b/v1/simulate',
+  c2bSimulate: '/mpesa/c2b/v2/simulate',
   pullRegister: '/pulltransactions/v1/register',
   pullQuery: '/pulltransactions/v1/query',
 });

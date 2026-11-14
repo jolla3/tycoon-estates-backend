@@ -1,11 +1,11 @@
 # G5 — M-PESA Buy Goods / Till Integration Architecture
 
-**Document:** Feature architecture and repository integration audit  
-**Feature:** G5  
-**Repository:** `jolla3/tycoon-estates-backend`  
-**Audited source snapshot:** `main` at `204c8f9c3578f753af20727799aaa049b1545135` (12 November 2026)  
-**Document state:** Revised G5.0 design baseline  
-**Implementation state:** G5 is not implemented. No G5 models, routes, jobs, migrations, credentials, or tests are claimed to exist.
+**Document:** Feature architecture and repository integration audit
+**Feature:** G5
+**Repository:** `jolla3/tycoon-estates-backend`
+**Current source snapshot:** `main` at `5a96f124f45b7f556fc467eb65dbf1bc87413f88` (14 November 2026)
+**Document state:** G5 architecture with implementation and provider-contract addenda
+**Implementation state:** G5.3 ingestion and Tenant collection code is present. Production readiness is not claimed; callback trust, merchant identity, canonical receipt identity and release gates remain unresolved.
 
 > **Read with:** `PRD.md` for product requirements, `architecture-summary.md` for the short handoff, and `G5_IMPLEMENTATION_GUARDRAILS.md` for mandatory agent rules. G5.0 is documentation/source-audit work only. The pinned commit is an audit snapshot, not a claim that the live branch cannot have moved.
 
@@ -1126,3 +1126,15 @@ See [G5_COLLECTION_IMPLEMENTATION_DESIGN.md](G5_COLLECTION_IMPLEMENTATION_DESIGN
 - **Credit after billing:** `rentService.generateChargesForEstate` applies existing Tenant credit after billing, independent of whether new charges were created; per-Tenant failures are logged and never fail billing.
 - **Integrity verifier:** CREDIT-origin Payments are expected to have a ledger `SETTLEMENT` (not `PAYMENT`) entry.
 - **Recovery note:** `rent.service.js` and `sms.service.js` were truncated/compressed by intermediate commits on this branch (stub rent service; SMS service without `processQueuedBatch`); both were restored from the 4f04df8 blobs with the legitimate later behavior re-applied (see change log in the final report).
+
+
+## 30. Daraja portal-contract update (14 November 2026)
+
+The owner supplied current portal documentation and an executed successful C2B v2 sandbox URL-registration response. The evidence record is `docs/provider-contracts/G5_DARAJA_C2B_PULL_EVIDENCE.md`.
+
+- Default C2B registration and simulation endpoints are v2 for the selected Tycoon Estates sandbox app. C2B callback `TransactionType: Buy Goods` is normalized to the internal `CustomerBuyGoodsOnline` value required by the posting evidence gate; PayBill remains excluded from G5.
+- TransactionPull register uses POST and returns `ResponseStatus` (`1000` registered, `1001` already registered). Query uses POST and returns `ResponseCode` (`1000` result envelope, `1001` no transactions).
+- The documented query response is nested under `Response` and may contain arrays of row objects. Pull rows use `transactionId`, `trxDate`, `amount`, `transactiontype`, `billreference` and `msisdn`; the shortcode is supplied from the merchant profile that initiated the query when omitted from a row.
+- The documented example transaction type `c2b-pay-bill-debit` is PayBill and must not be accepted as a Buy Goods receipt. Unknown transaction types are quarantined rather than guessed.
+- Pull pagination completion, a Buy Goods Pull transaction-type fixture, the relationship between app-card shortcode `174379` and C2B invocation shortcode `600987`, Pull registration eligibility, callback authentication and callback retry/acknowledgement semantics remain unresolved.
+- C2B URLs were registered in sandbox, but the Render callback gate remains disabled. Do not enable inbound callbacks or G3 posting as part of this parser correction.

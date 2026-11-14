@@ -87,6 +87,7 @@ export async function mpesaPullJob() {
 
         const ingest = await ingestPullPayload(queryResult.body, {
           sourceChannel: INGESTION_SOURCE.PULL_QUERY,
+          businessShortCode: profile.businessShortCode,
         });
         if (!ingest.allPersisted) {
           allOk = false;

@@ -380,3 +380,10 @@ No source code, index, migration, provider configuration, key or test environmen
 
 
 > G5 collection addendum: see G5_COLLECTION_IMPLEMENTATION_DESIGN.md. Posting stays disabled (`G5_MPESA_POSTING_ENABLED`) and gated on B01/B02; gates B01–B05, B07–B10 remain unresolved.
+
+
+## 23. Bounded Daraja contract-correction authorization (14 November 2026)
+
+The owner explicitly authorized a narrow code correction for the already-published G5.3 Daraja adapter. Authorized scope: (1) use the owner-confirmed C2B v2 registration/simulation paths; (2) canonicalize C2B `Buy Goods` to `CustomerBuyGoodsOnline` and keep PayBill outside G5; (3) parse the owner-supplied TransactionPull registration response status, POST query envelope, nested `Response` rows, lower-case fields and timezone-explicit ISO timestamps; (4) pass the queried merchant profile shortcode as context when Pull rows omit it; and (5) add focused fixture/request-contract tests and update the provider evidence record.
+
+This authorization does **not** authorize callback exposure, C2B simulation, Pull registration/query against the live Render/MongoDB environment, migrations, canonical receipt-index activation, merchant operational-state changes, G3 posting, production API requests or any G5 feature-flag changes. Unknown Pull transaction types, shortcode conflicts and ambiguous empty/error responses must remain quarantined or fail closed. Callback security and merchant/product identity remain release gates.
