@@ -346,7 +346,13 @@ A shared `requireProduct` middleware checks the product against the resolved cli
 
 ### 14.3 Worker and ingress policy
 
-Bank sync requires active Client + `BANKING`. M-PESA Pull requires active Client + `MPESA`. The M-PESA-specific collection match/protected-SMS portion of G5 collection processing requires active Client + `MPESA`. Rent status, rent reminders and standard SMS processing do not require either product.
+- `bankSyncJob`: active Client + `BANKING`.
+- `mpesaPullJob`: active Client + `MPESA`.
+- `g5CollectionJob`: the M-PESA-specific collection matching and protected collection-SMS steps require active Client + `MPESA`.
+- `rentStatusJob`: no BANKING/MPESA product gate.
+- `smsReminderJob` and standard SMS queue drain: no BANKING/MPESA product gate.
+
+Keep the M-PESA-specific collection steps separate from normal rent/status and standard SMS processing. An entitlement gate must not suppress unrelated rent operations or ordinary reminders.
 
 Provider webhooks/public M-PESA submission remain durable ingestion paths. Entitlement loss blocks downstream product operations; it must not make a valid financial event disappear. No billing engine, second ledger or new provider inbox is introduced.
 
