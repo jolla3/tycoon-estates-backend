@@ -19,6 +19,10 @@ import { env } from '../config/environment.js';
 import { Errors } from '../utils/errors.js';
 import { audit, auditRequired } from './audit.service.js';
 import { getBackgroundJobStatus } from '../jobs/scheduler.js';
+import {
+  bankingSummaryByClient, mpesaSummaryByClient, buildClientDirectoryFilter,
+  integrationDistributions, emptyBanking, emptyMpesa, pageParams,
+} from './platformIntegrations.service.js';
 
 const SALT_ROUNDS = 12;
 
@@ -32,6 +36,7 @@ export const platformService = {
       tenantStats,
       staffStats,
       subscriptionStats,
+      integrations,
     ] = await Promise.all([
       Client.aggregate([
         {
@@ -86,6 +91,7 @@ export const platformService = {
           },
         },
       ]),
+      integrationDistributions(),
     ]);
 
     const c = clientStats[0] || { totalClients: 0, activeClients: 0, inactiveClients: 0 };
@@ -114,27 +120,29 @@ export const platformService = {
       activeSubscriptions: sub.activeSubscriptions,
       pastDueSubscriptions: sub.pastDueSubscriptions,
       canceledSubscriptions: sub.canceledSubscriptions,
+      // Superadmin V2 additions. Entitlements (Subscription.products) and integration
+      // readiness are reported separately and never derived from one another.
+      productAssignments: integrations.productAssignments,
+      bankingIntegration: integrations.banking,
+      mpesaIntegration: integrations.mpesa,
     };
   },
 
   // ── Clients ─────────────────────────────────────────────────────────
-  async listClients({ page = 1, limit = 50, isActive } = {}) {
-    const filter = {};
-    if (typeof isActive === 'boolean') filter.isActive = isActive;
-    const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
-    const lim = Math.min(100, Math.max(1, limit));
+  async listClients(query = {}) {
+    const { page, limit, skip } = pageParams(query);
+    const filter = await buildClientDirectoryFilter(query);
 
     const [items, total] = await Promise.all([
-      Client.find(filter).sort({ createdAt: -1 }).skip(skip).limit(lim).lean(),
+      Client.find(filter).sort({ createdAt: -1, _id: 1 }).skip(skip).limit(limit).lean(),
       Client.countDocuments(filter),
     ]);
 
-    // Attach lightweight counts + owner email without N+1 explosion
+    // Batched enrichment: one query/aggregate per collection for the whole page.
     const clientIds = items.map((c) => c._id);
-    const [owners, estateCounts, houseCounts] = await Promise.all([
+    const [owners, estateCounts, houseCounts, subs, banking, mpesa] = await Promise.all([
       User.find({ clientId: { $in: clientIds }, role: 'CLIENT_OWNER' })
-        .select('clientId name email phone isActive')
-        .lean(),
+        .select('clientId name email phone isActive').lean(),
       Estate.aggregate([
         { $match: { clientId: { $in: clientIds } } },
         { $group: { _id: '$clientId', count: { $sum: 1 } } },
@@ -143,50 +151,85 @@ export const platformService = {
         { $match: { clientId: { $in: clientIds } } },
         { $group: { _id: '$clientId', count: { $sum: 1 } } },
       ]),
+      Subscription.find({ clientId: { $in: clientIds } }).lean(),
+      bankingSummaryByClient(clientIds),
+      mpesaSummaryByClient(clientIds),
     ]);
 
     const ownerByClient = new Map(owners.map((o) => [String(o.clientId), o]));
     const estatesByClient = new Map(estateCounts.map((e) => [String(e._id), e.count]));
     const housesByClient = new Map(houseCounts.map((h) => [String(h._id), h.count]));
+    const subByClient = new Map(subs.map((x) => [String(x.clientId), x]));
 
     return {
-      items: items.map((c) => ({
-        ...c,
-        owner: ownerByClient.get(String(c._id)) || null,
-        estateCount: estatesByClient.get(String(c._id)) || 0,
-        houseCount: housesByClient.get(String(c._id)) || 0,
-      })),
+      items: items.map((c) => {
+        const k = String(c._id);
+        const sub = subByClient.get(k);
+        return {
+          ...c,
+          owner: ownerByClient.get(k) || null,
+          estateCount: estatesByClient.get(k) || 0,
+          houseCount: housesByClient.get(k) || 0,
+          // Missing subscription is distinct from a subscription with empty products.
+          subscription: sub
+            ? { present: true, plan: sub.plan, status: sub.status, startDate: sub.startDate, endDate: sub.endDate || null }
+            : { present: false },
+          products: sub?.products || [],
+          banking: banking.get(k) || emptyBanking(),
+          mpesa: mpesa.get(k) || emptyMpesa(false),
+        };
+      }),
       total,
-      page: Math.max(1, page),
-      limit: lim,
+      page,
+      limit,
     };
   },
 
   async getClient(clientId) {
+    if (!mongoose.isValidObjectId(clientId)) throw Errors.NotFound('Client not found');
     const client = await Client.findById(clientId).lean();
     if (!client) throw Errors.NotFound('Client not found');
 
-    const [owner, subscription, estateCount, houseCount, tenantCount, staffCount] =
+    // Every query below is explicitly scoped to this clientId. Read-only; works for
+    // inactive clients (platform diagnostics) without any owner impersonation.
+    const [owner, subscription, estateCount, houseCount, tenantCount, staffCount, banking, mpesa] =
       await Promise.all([
-        User.findOne({ clientId, role: 'CLIENT_OWNER' }).select('-passwordHash').lean(),
+        User.findOne({ clientId, role: 'CLIENT_OWNER' }).select('name email phone isActive lastLoginAt createdAt').lean(),
         Subscription.findOne({ clientId }).lean(),
         Estate.countDocuments({ clientId }),
         House.countDocuments({ clientId }),
         Tenant.countDocuments({ clientId, status: 'active' }),
-        User.countDocuments({
-          clientId,
-          role: { $in: ['CLIENT_OWNER', 'CLIENT_ADMIN', 'STAFF'] },
-        }),
+        User.countDocuments({ clientId, role: { $in: ['CLIENT_OWNER', 'CLIENT_ADMIN', 'STAFF'] } }),
+        bankingSummaryByClient([clientId]),
+        mpesaSummaryByClient([clientId], { includeProfiles: true }),
       ]);
 
+    const key = String(client._id);
     return {
       ...client,
       owner: owner || null,
-      subscription: subscription || null,
+      subscription: subscription
+        ? {
+            present: true,
+            id: String(subscription._id),
+            plan: subscription.plan,
+            status: subscription.status,
+            startDate: subscription.startDate,
+            endDate: subscription.endDate || null,
+            products: subscription.products || [],
+            assignedByUserId: subscription.assignedByUserId ? String(subscription.assignedByUserId) : null,
+            lastChangedByUserId: subscription.lastChangedByUserId ? String(subscription.lastChangedByUserId) : null,
+            createdAt: subscription.createdAt,
+            updatedAt: subscription.updatedAt,
+          }
+        : { present: false },
+      products: subscription?.products || [],
       estateCount,
       houseCount,
       activeTenantCount: tenantCount,
       staffCount,
+      banking: banking.get(key) || emptyBanking(),
+      mpesa: mpesa.get(key) || emptyMpesa(true),
     };
   },
 

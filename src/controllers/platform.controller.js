@@ -28,16 +28,7 @@ export const platformController = {
 
   async listClients(req, res, next) {
     try {
-      const isActive =
-        req.query.isActive === 'true' ? true : req.query.isActive === 'false' ? false : undefined;
-      apiResponse.success(
-        res,
-        await platformService.listClients({
-          page: parseInt(req.query.page || '1', 10),
-          limit: parseInt(req.query.limit || '50', 10),
-          isActive,
-        })
-      );
+      apiResponse.success(res, await platformService.listClients(req.query));
     } catch (err) {
       next(err);
     }
