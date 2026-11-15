@@ -369,3 +369,9 @@ Use required audit semantics for Manager provisioning, subscription changes and 
 3. Add HTTP `requireProduct` gates and specified worker gates; retain provider ingress.
 4. Fix only scoped health/job/inactive-client gaps without introducing a generalized workflow or billing platform.
 5. Run migration, API authorization, worker gating, provider-ingress retention, audit-failure and G3/G4/G5 regression tests.
+
+---
+
+## Backend status against SM-01…SM-09 (branch `feat/superadmin-subscription-entitlements`)
+
+Implemented in source, verification pending: SM-03/SM-04 directory and detail (`GET /platform/clients[/:clientId]`), SM-05 per-client product assignment (`PATCH /platform/clients/:clientId/subscription`, provisioning `products`), SM-06 entitlement vs integration readiness kept separate, SM-09 connection state without credentials. SM-07/SM-08: no billing or payment evidence is recorded or inferred. `requireProduct` and `403 PRODUCT_NOT_ENTITLED` are live on Banking and client M-PESA routes. Details: Appendix B of `TYCOON_SUPERADMIN_CURRENT_BACKEND_MAP.md`.

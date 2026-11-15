@@ -284,3 +284,46 @@ Keep public M-PESA and Daraja webhook ingress outside session-based product midd
 - Add `auditRequired`/equivalent semantics for high-risk Manager mutations. Prefer the same Mongo transaction where supported; otherwise use a durable failure-safe strategy or fail the mutation.
 - Preserve shared best-effort `audit()` behavior for unrelated modules. Do not globally change its failure semantics.
 - Do not record payment as received without an actual transaction linked to the subscription. No billing, invoicing or second ledger is introduced.
+
+---
+
+## Appendix B. Implemented backend contracts — branch `feat/superadmin-subscription-entitlements`
+
+Status: **implemented in source, behavioural verification pending.** No tests, linting, builds or installs were run for this work (explicitly out of scope for the assignment). Entries below describe what the code does, not what has been proven at runtime.
+
+### B1. Subscription authority (A2 realised)
+- `Subscription` gained `products` (`BANKING` | `MPESA`, default `[]`), `assignedByUserId`, `lastChangedByUserId`. Existing plan/status/date fields are unchanged.
+- `subscriptionService`: `ensureDefaultForClient` (trial/active/`products: []`; signup + seed only), `createForManager` (insert-only; duplicate → `409`), `updateByManager` (sole ongoing mutation: partial plan/products/dates, `endDate: null` clears, status is not mutable). `setPlan`, `ensureForClient` and client `upgrade` were removed. `authService.signup` now goes through `ensureDefaultForClient`.
+- `POST /api/v1/subscription/upgrade` → stable `403 FORBIDDEN`, no mutation.
+- `POST /api/v1/platform/clients` accepts optional `products`, `startDate`, `endDate` (strict schema). `PATCH /api/v1/platform/clients/:clientId/subscription` is the Manager update. `GET /api/v1/platform/entitlement-inventory` (paginated, `product`/`isActive` filters, includes clients with no subscription; products only from `Subscription.products`).
+- Required audit: `auditRequired()` writes inside the caller's Mongo session. Provisioning (`CLIENT_CREATED`) and subscription updates (`SUBSCRIPTION_UPDATED_BY_MANAGER`, metadata `before`/`after`) commit or roll back with the mutation. `audit()` stays best-effort for all other modules.
+
+### B2. Entitlement enforcement (A3/A4 realised)
+- Single rule in `src/services/entitlement.service.js`: Client exists AND `isActive === true` AND `Subscription.products` contains the product; fails closed (reasons: `PRODUCT_UNKNOWN`, `CLIENT_NOT_FOUND`, `CLIENT_INACTIVE`, `SUBSCRIPTION_MISSING`, `PRODUCT_NOT_ASSIGNED`). Never inferred from plan/status/dates/payments/connections/profiles.
+- HTTP: `requireProduct(product)` after `clientContext`, before role `authorize`; denial is `403 PRODUCT_NOT_ENTITLED`. BANKING: `/bank/*`, `/bank/connections/*`, `/transactions/*`. MPESA: `/mpesa-collection/*` (SUPER_ADMIN does not bypass on customer routes). Not gated: deposits, billing, rent/SMS jobs, public/provider ingress.
+- Workers: `bankSyncJob` checks per client before sync (cached per run); `mpesaPullJob` checks per profile **before** lease acquisition; `matchSubmission` leaves entitlement-blocked evidence untouched (state unchanged); `dispatchProtectedBatch` releases a claimed row back to `queued` (lease token fenced, `sendStartedAt` untouched) with a 5-minute `nextRetryAt` so it resumes after entitlement is restored and is not re-claimed in the same pass. No G5 event/row is deleted or consumed.
+- **Rollout consequence:** existing clients have no `products`, so Banking/M-PESA client routes and workers are blocked until a Manager assigns products via the PATCH endpoint. Assign before deploying.
+
+### B3. Platform read APIs (all `authenticate → authorize('SUPER_ADMIN')`)
+| Route | Notes |
+|---|---|
+| `GET /platform/clients` | filters: `search` (client/owner name/email), `product` (BANKING/MPESA/BOTH/NONE), `plan`, `subscriptionStatus`, `hasSubscription`, `bankProvider`, `bankConnectionStatus`, `bankAccountConnectionStatus`, `bankValidationStatus`, `mpesaState`, `callbackCapability`, `pullCapability`, `c2bRegistrationState`, `pullRegistrationState`, `isActive`; batched enrichment; `subscription.present` distinguishes missing from empty products |
+| `GET /platform/clients/:clientId` | owner (safe fields), subscription incl. actor refs, counts, Banking summary, M-PESA summary with safe profiles and ingestion evidence timestamps |
+| `GET /platform/clients/:clientId/diagnostics` | read-only; works for inactive clients; adds entitlement evaluation per product, last 25 audit records, job outcomes (per-client counts where the job reports them) |
+| `GET /platform/overview` | all prior metrics + `productAssignments`, `bankingIntegration`, `mpesaIntegration` distributions |
+| `GET /platform/integrations/banking` | one row per `BankConnection` with account rollups; filters `clientId`, `clientIsActive`, `provider`, `status`, `validationStatus`, `accountConnectionStatus` |
+| `GET /platform/integrations/mpesa` | one row per merchant profile with `blockers` (derived from stored states only); callback and Pull kept independent |
+| `GET /platform/audit` | filters `clientId`, `userId`, `action` (comma list), `resource`, `resourceId`, `from`, `to`; redacted metadata |
+| `GET /platform/health` | see B4 |
+
+Never returned: `credentialsRef`, encrypted account numbers/hashes, tokens, raw provider payloads, secrets.
+
+### B4. Health and job outcomes
+- Health is evidence-based and makes **no live provider calls**. Config presence ≠ operational. Co-op: adapter implemented, config presence, `providerVerified: null`, `operationalCapability: 'unverified'`; KCB/EQUITY/NCBA `not_implemented`. Daraja: platform app credential presence only; **no OAuth outcome is persisted**, so none is claimed; per-Till state comes from merchant profiles; ingestion evidence from `MpesaIngestionEvent` timestamps. Celcom: requires base URL, partner ID, API key and sender ID (previously only two were checked); `sent` = provider-accepted, handset delivery is not tracked.
+- Scheduler status reports `initializedInThisProcess`, registered jobs, running jobs and `lastOutcome` per job. Outcomes (`SUCCESS`, `PARTIAL_FAILURE`, `FAILED`, `SKIPPED`, `BLOCKED`, `RUNNING`) are classified from the summary each job returns, with start/finish/duration and counts. Jobs that return no counts (`smsReminder`) report `counts: null`. Intervals, lock behaviour and process roles are unchanged.
+
+### B5. Known limitations
+- Subscription `endDate`/`status` still do not affect entitlement (no automatic expiry; separate decision).
+- Job outcome telemetry is Redis/in-memory operational data, not financial truth; per-client job counts exist only for `bankSync`.
+- Audit queries on `userId`/`createdAt` rely on new non-unique indexes declared on the model; they are not created by this change at startup.
+- Provider-verified Co-op/Daraja readiness cannot be shown without a live-check mechanism that is out of scope.
