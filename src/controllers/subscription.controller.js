@@ -1,5 +1,5 @@
 // src/controllers/subscription.controller.js
-// Client-scoped subscription view + upgrade. Identity always from session.
+// Client-scoped subscription view (read-only; upgrade retired). Identity always from session.
 import { subscriptionService } from '../services/subscription.service.js';
 import { apiResponse } from '../utils/apiResponse.js';
 
@@ -16,16 +16,14 @@ export const subscriptionController = {
     }
   },
 
+  /**
+   * Retired: plan/product authority belongs to the platform Manager
+   * (PATCH /api/v1/platform/clients/:clientId/subscription). Never mutates.
+   */
   async upgrade(req, res, next) {
     try {
-      const plan = req.body?.plan;
-      const sub = await subscriptionService.upgrade(
-        req.clientId,
-        plan,
-        req.currentUser,
-        { ip: req.ip, userAgent: req.headers['user-agent'] }
-      );
-      apiResponse.success(res, sub, 'Subscription upgraded');
+      apiResponse.error(res, 'FORBIDDEN',
+        'Subscription changes are managed by the platform. Contact your account manager.', 403);
     } catch (err) {
       next(err);
     }

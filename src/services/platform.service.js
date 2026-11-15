@@ -17,7 +17,7 @@ import { isDatabaseReady } from '../config/database.js';
 import { checkRedisHealth, isRedisReady } from '../config/redis.js';
 import { env } from '../config/environment.js';
 import { Errors } from '../utils/errors.js';
-import { audit } from './audit.service.js';
+import { audit, auditRequired } from './audit.service.js';
 import { getBackgroundJobStatus } from '../jobs/scheduler.js';
 
 const SALT_ROUNDS = 12;
@@ -195,7 +195,7 @@ export const platformService = {
    * Does not create SUPER_ADMIN users. Password is never returned.
    */
   async provisionClient(
-    { clientName, ownerName, email, phone, password, plan = 'trial' },
+    { clientName, ownerName, email, phone, password, plan = 'trial', products = [], startDate, endDate },
     actor,
     reqMeta = {}
   ) {
@@ -206,10 +206,10 @@ export const platformService = {
     session.startTransaction();
     try {
       const [client] = await Client.create([{ name: clientName, isActive: true }], { session });
-      // Client-scoped subscription (unique on clientId). Idempotent create
-      // avoids colliding with any residual documents if a prior attempt
-      // partially committed outside a transaction on older deploys.
-      await subscriptionService.ensureForClient(client._id, { plan: plan || 'trial', status: 'active' }, { session });
+      // Manager-assigned plan + explicit products, inserted atomically with the client.
+      await subscriptionService.createForManager(
+        client._id, { plan, products, startDate, endDate }, actor, { session }
+      );
 
       const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
       const [owner] = await User.create(
@@ -227,19 +227,20 @@ export const platformService = {
         { session }
       );
 
-      await session.commitTransaction();
-
-      await audit({
+      // Required audit: same transaction, so a failed audit rolls back client+subscription+owner.
+      await auditRequired({
         clientId: client._id,
         userId: actor._id,
         action: 'CLIENT_CREATED',
         resource: 'Client',
-        resourceId: client._id,
+        resourceId: String(client._id),
         description: `Provisioned client "${clientName}" with owner ${email}`,
-        metadata: { plan, ownerUserId: String(owner._id) },
+        metadata: { plan, products, ownerUserId: String(owner._id) },
         ipAddress: reqMeta.ip,
         userAgent: reqMeta.userAgent,
-      });
+      }, { session });
+
+      await session.commitTransaction();
 
       return {
         client: { id: client._id, name: client.name, isActive: client.isActive },
@@ -258,6 +259,82 @@ export const platformService = {
     } finally {
       session.endSession();
     }
+  },
+
+  /**
+   * Sole ongoing Manager mutation of plan/products/dates. Subscription save and the
+   * required audit record share one transaction; audit failure rolls the change back.
+   */
+  async updateClientSubscription(clientId, patch, actor, reqMeta = {}) {
+    if (!mongoose.isValidObjectId(clientId)) throw Errors.NotFound('Client not found');
+    const client = await Client.findById(clientId).select('_id name').lean();
+    if (!client) throw Errors.NotFound('Client not found');
+
+    const session = await mongoose.startSession();
+    try {
+      let result;
+      await session.withTransaction(async () => {
+        result = await subscriptionService.updateByManager(client._id, patch, actor, { session });
+        await auditRequired({
+          clientId: client._id,
+          userId: actor._id,
+          action: 'SUBSCRIPTION_UPDATED_BY_MANAGER',
+          resource: 'Subscription',
+          resourceId: result.subscription.id,
+          description: `Manager updated subscription for client "${client.name}"`,
+          metadata: { before: result.before, after: result.after },
+          ipAddress: reqMeta.ip,
+          userAgent: reqMeta.userAgent,
+        }, { session });
+      });
+      return result.subscription;
+    } finally {
+      await session.endSession();
+    }
+  },
+
+  /**
+   * Read-only entitlement inventory. Includes active+inactive clients and clients with no
+   * subscription. Products come ONLY from Subscription.products; integration state is not used.
+   */
+  async entitlementInventory({ page = 1, limit = 50, product, isActive } = {}) {
+    const p = Math.max(1, parseInt(page, 10) || 1);
+    const l = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const filter = {};
+    if (isActive === 'true' || isActive === true) filter.isActive = true;
+    if (isActive === 'false' || isActive === false) filter.isActive = false;
+
+    const pipeline = [
+      { $match: filter },
+      { $lookup: { from: 'subscriptions', localField: '_id', foreignField: 'clientId', as: 'sub' } },
+      { $addFields: { sub: { $first: '$sub' } } },
+    ];
+    if (product === 'NONE') pipeline.push({ $match: { $or: [{ sub: null }, { 'sub.products.0': { $exists: false } }] } });
+    else if (product === 'BOTH') pipeline.push({ $match: { 'sub.products': { $all: ['BANKING', 'MPESA'] } } });
+    else if (product === 'BANKING' || product === 'MPESA') pipeline.push({ $match: { 'sub.products': product } });
+    pipeline.push({ $sort: { createdAt: -1, _id: 1 } });
+
+    const [rows, countRow] = await Promise.all([
+      Client.aggregate([...pipeline, { $skip: (p - 1) * l }, { $limit: l }]),
+      Client.aggregate([...pipeline, { $count: 'total' }]),
+    ]);
+    return {
+      items: rows.map((c) => ({
+        clientId: String(c._id),
+        name: c.name,
+        isActive: c.isActive,
+        hasSubscription: !!c.sub,
+        plan: c.sub?.plan ?? null,
+        status: c.sub?.status ?? null,
+        products: c.sub?.products ?? [],
+        assignedByUserId: c.sub?.assignedByUserId ? String(c.sub.assignedByUserId) : null,
+        lastChangedByUserId: c.sub?.lastChangedByUserId ? String(c.sub.lastChangedByUserId) : null,
+        updatedAt: c.sub?.updatedAt ?? null,
+      })),
+      page: p,
+      limit: l,
+      total: countRow[0]?.total ?? 0,
+    };
   },
 
   async updateClient(clientId, { name }, actor, reqMeta = {}) {

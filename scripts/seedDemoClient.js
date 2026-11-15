@@ -46,7 +46,7 @@ async function main() {
 
   await Subscription.findOneAndUpdate(
     { clientId },
-    { $setOnInsert: { clientId, plan: 'trial', status: 'active', startDate: new Date() } },
+    { $setOnInsert: { clientId, plan: 'trial', status: 'active', products: [], startDate: new Date() } },
     { upsert: true }
   );
 

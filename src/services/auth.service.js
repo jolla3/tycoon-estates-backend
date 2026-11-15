@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import { User } from '../models/User.js';
 import { Client } from '../models/Client.js';
 import { Estate } from '../models/Estate.js';
-import { Subscription } from '../models/Subscription.js';
+import { subscriptionService } from './subscription.service.js';
 import { Errors } from '../utils/errors.js';
 
 const SALT_ROUNDS = 12;
@@ -19,11 +19,7 @@ export const authService = {
     if (existing) throw Errors.Conflict('A user with this email already exists');
 
     const client = await Client.create({ name: clientName });
-    try {
-      await Subscription.create({ clientId: client._id, plan: 'trial', status: 'active' });
-    } catch (err) {
-      if (err?.code !== 11000) throw err;
-    }
+    await subscriptionService.ensureDefaultForClient(client._id);
 
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
     const owner = await User.create({

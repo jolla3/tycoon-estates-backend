@@ -74,6 +74,25 @@ export const platformController = {
     }
   },
 
+  async updateClientSubscription(req, res, next) {
+    try {
+      const sub = await platformService.updateClientSubscription(
+        req.params.clientId, req.body, req.currentUser, meta(req)
+      );
+      apiResponse.success(res, sub, 'Subscription updated');
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async entitlementInventory(req, res, next) {
+    try {
+      apiResponse.success(res, await platformService.entitlementInventory(req.query));
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async activateClient(req, res, next) {
     try {
       const client = await platformService.activateClient(
