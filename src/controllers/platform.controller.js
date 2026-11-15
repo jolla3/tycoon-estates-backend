@@ -131,15 +131,31 @@ export const platformController = {
 
   async listAudit(req, res, next) {
     try {
-      apiResponse.success(
-        res,
-        await platformService.listAudit({
-          page: parseInt(req.query.page || '1', 10),
-          limit: parseInt(req.query.limit || '50', 10),
-          action: req.query.action,
-          clientId: req.query.clientId,
-        })
-      );
+      apiResponse.success(res, await platformService.listAudit(req.query));
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async bankingIntegrations(req, res, next) {
+    try {
+      apiResponse.success(res, await platformService.listBankingIntegrations(req.query));
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async mpesaIntegrations(req, res, next) {
+    try {
+      apiResponse.success(res, await platformService.listMpesaIntegrations(req.query));
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async clientDiagnostics(req, res, next) {
+    try {
+      apiResponse.success(res, await platformService.clientDiagnostics(req.params.clientId));
     } catch (err) {
       next(err);
     }

@@ -47,6 +47,11 @@ router.get('/entitlement-inventory', platformController.entitlementInventory);
 router.post('/clients/:clientId/activate', platformController.activateClient);
 router.post('/clients/:clientId/deactivate', platformController.deactivateClient);
 
+router.get('/clients/:clientId/diagnostics', platformController.clientDiagnostics);
+
+router.get('/integrations/banking', platformController.bankingIntegrations);
+router.get('/integrations/mpesa', platformController.mpesaIntegrations);
+
 router.get('/users', platformController.listUsers);
 router.get('/audit', platformController.listAudit);
 router.get('/subscriptions', platformController.listSubscriptions);

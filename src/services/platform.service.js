@@ -22,9 +22,52 @@ import { getPlatformHealth } from './platformHealth.service.js';
 import {
   bankingSummaryByClient, mpesaSummaryByClient, buildClientDirectoryFilter,
   integrationDistributions, emptyBanking, emptyMpesa, pageParams,
+  listBankingIntegrations, listMpesaIntegrations,
 } from './platformIntegrations.service.js';
+import { checkEntitlement } from './entitlement.service.js';
+import { getBackgroundJobStatus } from '../jobs/scheduler.js';
 
 const SALT_ROUNDS = 12;
+
+const SENSITIVE_KEY = /pass(word)?|secret|token|credential|api[-_]?key|authorization|envelope|hash|payload|accountnumber|msisdn|phone|cookie|session/i;
+
+/** Recursively redacts sensitive keys; bounded depth/size so metadata can never leak raw payloads. */
+export function redactMetadata(value, depth = 0) {
+  if (value == null || depth > 4) return value == null ? value : '[truncated]';
+  if (Array.isArray(value)) return value.slice(0, 50).map((v) => redactMetadata(v, depth + 1));
+  if (typeof value === 'object') {
+    if (typeof value.toHexString === 'function') return String(value);
+    if (value instanceof Date) return value;
+    const out = {};
+    for (const [k, v] of Object.entries(value).slice(0, 50)) {
+      out[k] = SENSITIVE_KEY.test(k) ? '[redacted]' : redactMetadata(v, depth + 1);
+    }
+    return out;
+  }
+  return typeof value === 'string' ? value.slice(0, 500) : value;
+}
+
+function toSafeAudit(a) {
+  const actor = a.userId && typeof a.userId === 'object' && a.userId.email !== undefined ? a.userId : null;
+  const client = a.clientId && typeof a.clientId === 'object' && a.clientId.name !== undefined ? a.clientId : null;
+  return {
+    id: String(a._id),
+    createdAt: a.createdAt,
+    action: a.action,
+    resource: a.resource || null,
+    resourceId: a.resourceId || null,
+    description: a.description || null,
+    actor: actor
+      ? { id: String(actor._id), name: actor.name, email: actor.email, role: actor.role }
+      : { id: a.userId ? String(a.userId._id || a.userId) : null },
+    targetClient: client
+      ? { id: String(client._id), name: client.name, isActive: client.isActive }
+      : { id: a.clientId ? String(a.clientId._id || a.clientId) : null },
+    metadata: redactMetadata(a.metadata),
+    ipAddress: a.ipAddress || null,
+    userAgent: a.userAgent ? String(a.userAgent).slice(0, 200) : null,
+  };
+}
 
 export const platformService = {
   // ── Overview (aggregated, few queries) ──────────────────────────────
@@ -476,25 +519,77 @@ export const platformService = {
   },
 
   // ── Platform audit ──────────────────────────────────────────────────
-  async listAudit({ page = 1, limit = 50, action, clientId } = {}) {
+  /**
+   * Read-only Superadmin audit view. Filters: clientId, actor (userId), action (comma list),
+   * resource, resourceId, from/to. Returns a safe shape with redacted metadata.
+   */
+  async listAudit(q = {}) {
+    const { page, limit, skip } = pageParams(q);
     const filter = {};
-    if (action) filter.action = action;
-    if (clientId) filter.clientId = clientId;
+    const bad = (v) => v != null && !mongoose.isValidObjectId(v);
+    if (bad(q.clientId) || bad(q.userId)) return { items: [], total: 0, page, limit };
+    if (q.clientId) filter.clientId = q.clientId;
+    if (q.userId) filter.userId = q.userId;
+    if (q.action) filter.action = { $in: String(q.action).split(',').map((x) => x.trim()).filter(Boolean).slice(0, 20) };
+    if (q.resource) filter.resource = String(q.resource);
+    if (q.resourceId) filter.resourceId = String(q.resourceId);
+    if (q.from || q.to) {
+      filter.createdAt = {};
+      const from = q.from ? new Date(q.from) : null;
+      const to = q.to ? new Date(q.to) : null;
+      if (from && !Number.isNaN(from.getTime())) filter.createdAt.$gte = from;
+      if (to && !Number.isNaN(to.getTime())) filter.createdAt.$lte = to;
+      if (!Object.keys(filter.createdAt).length) delete filter.createdAt;
+    }
 
-    const skip = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
-    const lim = Math.min(100, Math.max(1, limit));
-
-    const [items, total] = await Promise.all([
-      AuditLog.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(lim)
-        .populate('userId', 'name email role')
-        .lean(),
+    const [rows, total] = await Promise.all([
+      AuditLog.find(filter).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit)
+        .populate('userId', 'name email role').populate('clientId', 'name isActive').lean(),
       AuditLog.countDocuments(filter),
     ]);
+    return { items: rows.map(toSafeAudit), total, page, limit };
+  },
 
-    return { items, total, page: Math.max(1, page), limit: lim };
+  /** Platform-wide read-only Banking / M-PESA integration monitoring. */
+  listBankingIntegrations: (q) => listBankingIntegrations(q),
+  listMpesaIntegrations: (q) => listMpesaIntegrations(q),
+
+  /**
+   * Read-only diagnostics for ONE client (works for inactive clients). Every query is scoped
+   * to clientId; no impersonation, no mutation, no change to ordinary client access rules.
+   */
+  async clientDiagnostics(clientId) {
+    const detail = await this.getClient(clientId);
+    const [banking, mpesa, recentAudit, jobs] = await Promise.all([
+      checkEntitlement(clientId, 'BANKING'),
+      checkEntitlement(clientId, 'MPESA'),
+      AuditLog.find({ clientId }).sort({ createdAt: -1, _id: -1 }).limit(25)
+        .populate('userId', 'name email role').lean(),
+      getBackgroundJobStatus(),
+    ]);
+    const key = String(clientId);
+    return {
+      client: detail,
+      // Why ordinary customer operations are (not) available right now.
+      operationalAccess: {
+        clientActive: detail.isActive === true,
+        ordinaryOperationsBlocked: detail.isActive !== true,
+        entitlement: { BANKING: banking, MPESA: mpesa },
+      },
+      recentAudit: recentAudit.map(toSafeAudit),
+      jobOutcomes: jobs.jobs.map((j) => ({
+        name: j.name,
+        lastRunAt: j.lastRunAt,
+        lastOutcome: j.lastOutcome
+          ? {
+              outcome: j.lastOutcome.outcome,
+              finishedAt: j.lastOutcome.finishedAt || null,
+              // Per-client counts only where the job reports them (e.g. bankSync).
+              forThisClient: (j.lastOutcome.clients || []).find((c) => c.clientId === key) || null,
+            }
+          : null,
+      })),
+    };
   },
 
   // ── Subscriptions (read-only what the model supports) ───────────────
