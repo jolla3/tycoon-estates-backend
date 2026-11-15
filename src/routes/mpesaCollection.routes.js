@@ -4,9 +4,10 @@ import { mpesaCollectionController as c } from '../controllers/mpesaCollection.c
 import { authenticate } from '../middlewares/authenticate.js';
 import { authorize } from '../middlewares/authorize.js';
 import { clientContext } from '../middlewares/clientContext.js';
+import { requireProduct } from '../middlewares/requireProduct.js';
 
 const router = Router();
-const base = [authenticate, clientContext];
+const base = [authenticate, clientContext, requireProduct('MPESA')];
 const admin = authorize('CLIENT_OWNER', 'CLIENT_ADMIN', 'SUPER_ADMIN');
 
 router.get('/tenants/:tenantId/account', ...base, c.account);

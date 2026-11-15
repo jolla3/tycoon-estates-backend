@@ -13,6 +13,7 @@ import { SmsMessage } from '../models/SmsMessage.js';
 import { MpesaSubmissionLink } from '../models/MpesaSubmissionLink.js';
 import { sealEnvelope, openEnvelope, envelopeKeyId } from '../utils/g5Envelope.js';
 import { getSmsProvider } from './sms/sms.factory.js';
+import { isEntitled } from './entitlement.service.js';
 import { env } from '../config/environment.js';
 import { logger } from '../config/logger.js';
 
@@ -152,6 +153,18 @@ export async function dispatchProtectedBatch(limit = 20) {
     ).select('+payloadEnvelope');
     if (!row) break;
     processed += 1;
+
+    // Superadmin V2: protected collection SMS requires active Client + MPESA. Release the
+    // lease fenced by our token back to queued; nothing decrypted, sent or consumed.
+    // Deferred rows get a short nextRetryAt so the claim loop does not re-select them.
+    if (!(await isEntitled(row.clientId, 'MPESA'))) {
+      await SmsMessage.updateOne(
+        { _id: row._id, dispatchLeaseToken: token, status: 'processing', sendStartedAt: null },
+        { $set: { status: 'queued', dispatchLeaseToken: null, dispatchLeaseExpiresAt: null,
+          nextRetryAt: new Date(Date.now() + 5 * 60_000) } }
+      );
+      continue;
+    }
 
     const complete = (set) => SmsMessage.updateOne(
       { _id: row._id, dispatchLeaseToken: token, status: 'processing' },

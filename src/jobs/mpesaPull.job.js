@@ -14,6 +14,7 @@ import {
   ingestPullPayload,
 } from '../services/mpesa/darajaPull.service.js';
 import { createDarajaOAuthClientFromEnv } from '../services/mpesa/darajaOAuth.client.js';
+import { checkEntitlement } from '../services/entitlement.service.js';
 import { env } from '../config/environment.js';
 import { logger } from '../config/logger.js';
 import { INGESTION_SOURCE } from '../services/mpesa/daraja.constants.js';
@@ -45,9 +46,22 @@ export async function mpesaPullJob() {
   }).limit(50);
 
   const ownerId = `pull-job:${crypto.randomBytes(4).toString('hex')}`;
-  const summary = { profiles: profiles.length, acquired: 0, busy: 0, errors: 0 };
+  const summary = { profiles: profiles.length, acquired: 0, busy: 0, errors: 0, blocked: 0 };
+  const gateCache = new Map();
 
   for (const profile of profiles) {
+    // Superadmin V2: active Client + explicit MPESA required before any Pull work.
+    // Checked before lease acquisition, so nothing is held or fenced for blocked clients.
+    const gateKey = String(profile.clientId);
+    if (!gateCache.has(gateKey)) {
+      gateCache.set(gateKey, await checkEntitlement(profile.clientId, 'MPESA'));
+    }
+    const gate = gateCache.get(gateKey);
+    if (!gate.entitled) {
+      summary.blocked += 1;
+      logger.info({ clientId: gateKey, reason: gate.reason }, 'Pull skipped — client not entitled to MPESA');
+      continue;
+    }
     const lease = await acquirePullLease(profile, ownerId);
     if (lease.status !== 'ACQUIRED') {
       summary.busy += 1;
