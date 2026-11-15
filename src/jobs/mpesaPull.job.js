@@ -46,7 +46,7 @@ export async function mpesaPullJob() {
   }).limit(50);
 
   const ownerId = `pull-job:${crypto.randomBytes(4).toString('hex')}`;
-  const summary = { profiles: profiles.length, acquired: 0, busy: 0, errors: 0, blocked: 0 };
+  const summary = { profiles: profiles.length, acquired: 0, busy: 0, errors: 0, blocked: 0, providerFailures: 0, succeeded: 0 };
   const gateCache = new Map();
 
   for (const profile of profiles) {
@@ -131,8 +131,10 @@ export async function mpesaPullJob() {
           await releasePullLease(profile._id, ownerId, fenceToken, { status: 'SUCCEEDED' });
         }
       } else {
+        summary.providerFailures += 1;
         await releasePullLease(profile._id, ownerId, fenceToken, { status: 'FAILED' });
       }
+      if (allOk) summary.succeeded += 1;
     } catch (err) {
       summary.errors += 1;
       logger.error(
@@ -143,5 +145,11 @@ export async function mpesaPullJob() {
     }
   }
 
-  return summary;
+  return {
+    ...summary,
+    attempted: summary.acquired,
+    successful: summary.succeeded,
+    skipped: summary.busy,
+    failed: summary.errors + summary.providerFailures,
+  };
 }

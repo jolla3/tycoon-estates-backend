@@ -18,7 +18,7 @@ import { checkRedisHealth, isRedisReady } from '../config/redis.js';
 import { env } from '../config/environment.js';
 import { Errors } from '../utils/errors.js';
 import { audit, auditRequired } from './audit.service.js';
-import { getBackgroundJobStatus } from '../jobs/scheduler.js';
+import { getPlatformHealth } from './platformHealth.service.js';
 import {
   bankingSummaryByClient, mpesaSummaryByClient, buildClientDirectoryFilter,
   integrationDistributions, emptyBanking, emptyMpesa, pageParams,
@@ -519,38 +519,6 @@ export const platformService = {
 
   // ── System health (safe, verified) ──────────────────────────────────
   async systemHealth() {
-    const mongoReady = isDatabaseReady();
-    const redisResult = await checkRedisHealth(400);
-
-    const bankConfigured = Boolean(
-      env.COOP_CLIENT_ID && env.COOP_CLIENT_SECRET && env.COOP_USERNAME && env.COOP_PASSWORD
-    );
-    const smsConfigured = Boolean(env.CELCOM_PARTNER_ID && env.CELCOM_API_KEY);
-
-    return {
-      application: 'healthy',
-      mongo: mongoReady ? 'healthy' : 'unhealthy',
-      redis: redisResult.status,
-      redisLatencyMs: redisResult.latencyMs ?? null,
-      bankProvider: {
-        name: 'COOP',
-        configured: bankConfigured,
-        implemented: true,
-        // Live sandbox verification is separate from configuration
-        liveVerified: false,
-      },
-      smsProvider: {
-        name: 'CELCOM',
-        configured: smsConfigured,
-        implemented: true,
-        liveVerified: false,
-      },
-      otherBankProviders: [
-        { name: 'KCB', implemented: false },
-        { name: 'EQUITY', implemented: false },
-        { name: 'NCBA', implemented: false },
-      ],
-      backgroundJobs: await getBackgroundJobStatus(),
-    };
+    return getPlatformHealth();
   },
 };
