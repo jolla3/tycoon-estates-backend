@@ -9,6 +9,9 @@ import {
   recordJobStart,
   recordJobSuccess,
   recordJobFailure,
+  recordJobOutcome,
+  classifyJobResult,
+  JOB_OUTCOME,
   getJobMetrics,
 } from './jobMetrics.js';
 import { logger } from '../config/logger.js';
@@ -37,12 +40,24 @@ const startedAt = new Date().toISOString();
 function runSafely(name, fn) {
   return () =>
     withLock(`job-lock:${name}`, LOCK_TTL_MS[name], async () => {
+      const startedAtMs = Date.now();
+      const startedIso = new Date(startedAtMs).toISOString();
       await recordJobStart(name);
       try {
-        await fn();
+        const result = await fn();
         await recordJobSuccess(name, INTERVALS[name]);
+        const classified = classifyJobResult(result);
+        await recordJobOutcome(name, {
+          ...classified, startedAt: startedIso, finishedAt: new Date().toISOString(),
+          durationMs: Date.now() - startedAtMs, error: null,
+        });
       } catch (err) {
         await recordJobFailure(name, err.message, INTERVALS[name]);
+        await recordJobOutcome(name, {
+          outcome: JOB_OUTCOME.FAILED, counts: null, reason: null, startedAt: startedIso,
+          finishedAt: new Date().toISOString(), durationMs: Date.now() - startedAtMs,
+          error: String(err.message || 'unknown').slice(0, 300),
+        });
         throw err;
       }
     }).catch((err) => logger.error({ job: name, error: err.message }, 'Background job failed'));
@@ -66,6 +81,12 @@ export async function getBackgroundJobStatus() {
   const metrics = await getJobMetrics(JOB_NAMES, INTERVALS);
   return {
     schedulerStartedAt: startedAt,
+    // Timers exist only in the process that called startBackgroundJobs(); this reports THIS
+    // process. Run evidence below comes from shared (Redis) metrics written by whichever
+    // process actually runs the jobs.
+    initializedInThisProcess: timers.length > 0,
+    registeredJobs: JOB_NAMES,
+    runningJobs: metrics.filter((m) => m.status === 'running').map((m) => m.name),
     multiInstanceSafe: true,
     intervalsMs: INTERVALS,
     jobs: metrics.map((m) => ({
@@ -77,6 +98,7 @@ export async function getBackgroundJobStatus() {
       lastError: m.lastError || null,
       intervalMs: m.intervalMs || INTERVALS[m.name] || null,
       nextScheduledRunAt: m.nextScheduledRunAt || null,
+      lastOutcome: m.status === 'running' ? { outcome: JOB_OUTCOME.RUNNING } : (m.lastOutcome || null),
     })),
   };
 }

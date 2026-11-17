@@ -513,3 +513,9 @@ Add required audit for high-risk Manager actions: provisioning, plan/date change
 ### 14.7 Out of scope
 
 No frontend inspection or UI delivery, billing/invoice engine, inferred payment state, second ledger, new G5 inbox, broad rewrite of audit behavior, or product gate on rent-status/standard SMS processing.
+
+---
+
+## Implementation status (branch `feat/superadmin-subscription-entitlements`)
+
+Backend implementation of §14 is in source; behavioural verification is **pending** (no tests/installs were run). Authoritative implemented contracts: Appendix B of `TYCOON_SUPERADMIN_CURRENT_BACKEND_MAP.md`. Adversarial-review items addressed in code: single subscription writer authority, fail-closed entitlement shared by HTTP and workers, provider ingress kept outside product middleware, required transactional audit for Manager mutations, evidence-based health. Still open: provider-verified readiness evidence, automatic subscription expiry, per-client job counts beyond `bankSync`.

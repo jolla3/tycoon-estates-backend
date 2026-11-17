@@ -15,6 +15,11 @@ const SubscriptionSchema = new Schema(
     status: { type: String, enum: ['active', 'past_due', 'canceled'], default: 'active' },
     startDate: { type: Date, default: Date.now },
     endDate: Date,
+    // Superadmin V2: sole entitlement authority. Explicit Manager assignment only;
+    // never inferred from plan, status, dates, payments or integration state.
+    products: { type: [{ type: String, enum: ['BANKING', 'MPESA'] }], default: [] },
+    assignedByUserId: { type: Schema.Types.ObjectId, ref: 'User' },
+    lastChangedByUserId: { type: Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true }
 );

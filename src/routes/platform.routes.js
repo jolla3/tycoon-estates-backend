@@ -19,7 +19,17 @@ const provisionSchema = z.object({
   phone: z.string().min(7).max(30).optional(),
   password: z.string().min(8).max(128),
   plan: z.enum(['trial', 'basic', 'pro']).optional(),
-});
+  products: z.array(z.enum(['BANKING', 'MPESA'])).max(2).optional(),
+  startDate: z.coerce.date().optional(),
+  endDate: z.coerce.date().optional(),
+}).strict();
+
+const updateSubscriptionSchema = z.object({
+  plan: z.enum(['trial', 'basic', 'pro']).optional(),
+  products: z.array(z.enum(['BANKING', 'MPESA'])).max(2).optional(),
+  startDate: z.coerce.date().optional(),
+  endDate: z.coerce.date().nullable().optional(),
+}).strict().refine((v) => Object.keys(v).length > 0, { message: 'No changes supplied' });
 
 const updateClientSchema = z.object({
   name: z.string().min(2).max(200).optional(),
@@ -32,8 +42,15 @@ router.get('/clients', platformController.listClients);
 router.post('/clients', validate(provisionSchema), platformController.provisionClient);
 router.get('/clients/:clientId', platformController.getClient);
 router.patch('/clients/:clientId', validate(updateClientSchema), platformController.updateClient);
+router.patch('/clients/:clientId/subscription', validate(updateSubscriptionSchema), platformController.updateClientSubscription);
+router.get('/entitlement-inventory', platformController.entitlementInventory);
 router.post('/clients/:clientId/activate', platformController.activateClient);
 router.post('/clients/:clientId/deactivate', platformController.deactivateClient);
+
+router.get('/clients/:clientId/diagnostics', platformController.clientDiagnostics);
+
+router.get('/integrations/banking', platformController.bankingIntegrations);
+router.get('/integrations/mpesa', platformController.mpesaIntegrations);
 
 router.get('/users', platformController.listUsers);
 router.get('/audit', platformController.listAudit);

@@ -64,6 +64,9 @@ export async function rentStatusJob() {
 
   return {
     estates: estates.length,
+    attempted: estates.length,
+    successful: estates.length - errors.length,
+    failed: errors.length,
     created: createdTotal,
     failedEstates: errors.length,
     errors,

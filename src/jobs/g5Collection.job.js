@@ -6,7 +6,10 @@ import { matchPendingSubmissions } from '../services/mpesa/mpesaSubmission.servi
 import { dispatchProtectedBatch } from '../services/g5ProtectedSms.service.js';
 
 export async function g5CollectionJob() {
-  if (env.G5_SUBMISSIONS_ENABLED === '1') await matchPendingSubmissions(50);
-  // Protected dispatch is default-off; both the job and the service fail closed.
-  if (env.G5_PROTECTED_SMS_ENABLED === '1') await dispatchProtectedBatch(20);
+  const submissionsOn = env.G5_SUBMISSIONS_ENABLED === '1';
+  const smsOn = env.G5_PROTECTED_SMS_ENABLED === '1';
+  if (!submissionsOn && !smsOn) return { ran: false, reason: 'g5_features_disabled' };
+  const matched = submissionsOn ? await matchPendingSubmissions(50) : 0;
+  const dispatched = smsOn ? await dispatchProtectedBatch(20) : 0;
+  return { attempted: matched + dispatched, successful: matched + dispatched, failed: 0, blocked: 0, skipped: 0 };
 }

@@ -14,6 +14,7 @@ import { evaluateEvidence, postVerifiedReceipt, postingGate } from './mpesaPosti
 import { DARAJA_PROVIDER } from './daraja.constants.js';
 import { isWellFormedToken, digestToken } from '../../utils/g5Token.js';
 import { sealEnvelope, envelopeKeyId, evidenceDigest } from '../../utils/g5Envelope.js';
+import { isEntitled } from '../entitlement.service.js';
 import { env } from '../../config/environment.js';
 import { logger } from '../../config/logger.js';
 
@@ -27,6 +28,9 @@ function canonicalText(text) {
 export async function matchSubmission(submissionId) {
   const sub = await MpesaSmsSubmission.findById(submissionId);
   if (!sub || ![SUBMISSION_STATE.PARSED, SUBMISSION_STATE.UNMATCHED].includes(sub.state)) return sub?.state || null;
+  // Superadmin V2: protected matching requires active Client + MPESA. Evidence is left
+  // untouched (state unchanged, nothing consumed) so it resumes once entitlement returns.
+  if (!(await isEntitled(sub.clientId, 'MPESA'))) return sub.state;
   const link = await MpesaSubmissionLink.findById(sub.linkId);
   if (!link) return setState(sub, SUBMISSION_STATE.MANUAL_REVIEW, 'LINK_MISSING');
   // Merchant must still be operational for posting; link may already be rotated.

@@ -72,6 +72,53 @@ export async function recordJobFailure(name, errorMessage, intervalMs) {
   }
 }
 
+export const JOB_OUTCOME = Object.freeze({
+  SUCCESS: 'SUCCESS', PARTIAL_FAILURE: 'PARTIAL_FAILURE', FAILED: 'FAILED',
+  SKIPPED: 'SKIPPED', BLOCKED: 'BLOCKED', RUNNING: 'RUNNING',
+});
+
+const num = (v) => (Number.isFinite(v) ? v : 0);
+
+/**
+ * Classifies a job's returned summary into a typed outcome. Jobs that report no counts are
+ * SUCCESS only in the sense "completed without throwing"; counts are then reported as null
+ * rather than invented.
+ */
+export function classifyJobResult(result) {
+  if (result == null || typeof result !== 'object') {
+    return { outcome: JOB_OUTCOME.SUCCESS, counts: null, reason: null };
+  }
+  if (result.ran === false) {
+    return { outcome: JOB_OUTCOME.SKIPPED, counts: null, reason: String(result.reason || 'skipped').slice(0, 100) };
+  }
+  const counts = {
+    attempted: num(result.attempted), successful: num(result.successful),
+    skipped: num(result.skipped), failed: num(result.failed), blocked: num(result.blocked),
+  };
+  let outcome = JOB_OUTCOME.SUCCESS;
+  if (counts.failed > 0) {
+    outcome = counts.successful > 0 || counts.attempted > counts.failed ? JOB_OUTCOME.PARTIAL_FAILURE : JOB_OUTCOME.FAILED;
+  } else if (counts.blocked > 0 && counts.attempted === 0) {
+    outcome = JOB_OUTCOME.BLOCKED;
+  } else if (counts.blocked > 0) {
+    outcome = JOB_OUTCOME.PARTIAL_FAILURE;
+  }
+  const clients = Array.isArray(result.clients) ? result.clients.slice(0, 50) : undefined;
+  return { outcome, counts, reason: null, ...(clients ? { clients } : {}) };
+}
+
+/** Persists the typed outcome of the most recent completed run (operational telemetry only). */
+export async function recordJobOutcome(name, outcomeInfo) {
+  const prev = memory.get(name) || { name };
+  const entry = { ...prev, name, lastOutcome: outcomeInfo };
+  memory.set(name, entry);
+  try {
+    await withRedisTimeout(getRedisClient().set(key(name), JSON.stringify(entry), 'EX', 86400 * 7));
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
 export async function getJobMetrics(names, intervals = {}) {
   const out = [];
   for (const name of names) {

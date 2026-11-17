@@ -17,3 +17,15 @@ export async function audit({ clientId, estateId, userId, action, resource, reso
 export async function listAuditLogs(clientId, { limit = 100 } = {}) {
   return AuditLog.find({ clientId }).sort({ createdAt: -1 }).limit(limit);
 }
+
+/**
+ * Required audit write (Superadmin V2). Unlike audit(), failures PROPAGATE so the caller's
+ * business mutation fails. Pass the caller's Mongo `session` so the audit record commits or
+ * rolls back atomically with the mutation. Use only for high-risk Manager mutations.
+ */
+export async function auditRequired({ clientId, estateId, userId, action, resource, resourceId, description, metadata, ipAddress, userAgent }, { session } = {}) {
+  await AuditLog.create(
+    [{ clientId, estateId, userId, action, resource, resourceId, description, metadata, ipAddress, userAgent }],
+    session ? { session } : undefined
+  );
+}
