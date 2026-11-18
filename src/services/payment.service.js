@@ -1,13 +1,8 @@
 // src/services/payment.service.js
 import mongoose from 'mongoose';
 import { Payment } from '../models/Payment.js';
-import { PaymentAllocation } from '../models/PaymentAllocation.js';
 import { House } from '../models/House.js';
-import { Tenant } from '../models/Tenant.js';
 import { rentService } from './rent.service.js';
-import { ledgerService } from './ledger.service.js';
-import { planAllocation, statusAfterPayment } from '../utils/allocation.js';
-import { money } from '../utils/money.js';
 import { dateUtil } from '../utils/date.js';
 import { paginationParams, paginatedResponse } from '../utils/pagination.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
@@ -15,6 +10,7 @@ import { Errors } from '../utils/errors.js';
 import { supportsMongoTransactions } from '../config/database.js';
 import { audit } from './audit.service.js';
 import { tenancyService } from './tenancy.service.js';
+import { accountingPostingService } from './accountingPosting.service.js';
 
 export const paymentService = {
   async list(clientId, estateFilter, query) {
@@ -42,12 +38,14 @@ export const paymentService = {
    * - Ledger.runningBalanceCents = authoritative account balance
    */
   async recordManual(clientId, body, estateFilter = null, actor = null, reqMeta = {}) {
-    const { houseId, amountCents, paymentDate, paymentReference, period, tenantId } = body;
+    const { houseId, amountCents, paymentDate, paymentReference, period, tenantId, tenancyId } = body;
     if (!houseId) throw Errors.InvalidRequest('houseId is required');
     const amount = Math.trunc(Number(amountCents));
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
       throw Errors.InvalidRequest('amountCents must be a positive integer');
     }
+    const payDate = paymentDate ? new Date(paymentDate) : new Date();
+    if (Number.isNaN(payDate.getTime())) throw Errors.InvalidRequest('paymentDate is not a valid date');
 
     const house = await House.findOne({
       _id: houseId,
@@ -56,131 +54,43 @@ export const paymentService = {
     });
     if (!house) throw Errors.HouseNotFound();
 
-    let tenant = null;
-    if (tenantId) {
-      tenant = await Tenant.findOne({
-        _id: tenantId,
-        clientId,
-        ...estateFilterClause(estateFilter),
-      });
-      if (!tenant) throw Errors.TenantNotFound();
-    } else if (house.tenantId) {
-      tenant = await Tenant.findOne({ _id: house.tenantId, clientId });
-    }
-
-    const payPeriod = period || dateUtil.currentPeriod();
-    const payDate = paymentDate ? new Date(paymentDate) : new Date();
-
-    // Soft idempotency: same client + house + reference + amount
-    if (paymentReference) {
-      const existing = await Payment.findOne({
-        clientId,
-        houseId,
-        paymentReference,
-        amountCents: amount,
-        status: 'CONFIRMED',
-      }).lean();
-      if (existing) {
-        return { payment: existing, allocations: [], reused: true };
-      }
-    }
-
-    const run = async (session) => {
-      const charges = await rentService.outstandingChargesForHouse(clientId, house._id, {
-        session,
-      });
-      if (tenant || house.status === 'occupied') {
-        await rentService.ensureChargesForHouse(clientId, house, tenant, payPeriod, { session });
-      }
-      const activeTen = await tenancyService.getActiveForHouse(clientId, house._id, { session });
-      const allOutstanding = activeTen
-        ? await rentService.outstandingChargesForTenancy(clientId, activeTen._id, { session })
-        : [];
-      const plan = planAllocation(allOutstanding, amount);
-      const primaryPeriod = plan[0]?.charge?.period || payPeriod;
-
-      const [payment] = await Payment.create(
-        [
-          {
-            clientId,
-            estateId: house.estateId,
-            houseId: house._id,
-            tenantId: tenant?._id || null,
-            tenancyId: (await tenancyService.getActiveForHouse(clientId, house._id, { session }))?._id || null,
-            origin: 'MANUAL',
-            tenderMethod: body.tenderMethod || null,
-            recordedByUserId: actor?._id || null,
-            recordedAt: new Date(),
-            evidenceReference: paymentReference || body.evidenceReference || null,
-            amountCents: amount,
-            paymentDate: payDate,
-            paymentReference: paymentReference || null,
-            period: primaryPeriod,
-            status: 'CONFIRMED',
-          },
-        ],
-        session ? { session } : undefined
-      );
-
-      const allocationDocs = [];
-      for (const slice of plan) {
-        const charge = slice.charge;
-        // Operational cache on RentCharge (not authoritative balance)
-        charge.amountPaidCents = money.add(charge.amountPaidCents || 0, slice.amountCents);
-        charge.balanceCents = money.subtract(charge.amountDueCents, charge.amountPaidCents);
-        charge.status = statusAfterPayment(charge.amountDueCents, charge.amountPaidCents);
-        await charge.save(session ? { session } : undefined);
-
-        allocationDocs.push({
-          clientId,
-          estateId: house.estateId,
-          paymentId: payment._id,
-          rentChargeId: charge._id,
-          amountCents: slice.amountCents,
-          chargeType: charge.chargeType || 'RENT',
-          period: charge.period,
-        });
-      }
-      if (allocationDocs.length) {
-        await PaymentAllocation.create(allocationDocs, session ? { session } : undefined);
-      }
-
-      // Authoritative financial movement
-      await ledgerService.postEntry(
-        {
-          clientId,
-          estateId: house.estateId,
-          houseId: house._id,
-          tenantId: tenant?._id || null,
-          entryType: 'PAYMENT',
-          amountCents: amount, // credit
-          referenceType: 'Payment',
-          referenceId: payment._id,
-          description: paymentReference
-            ? `Manual payment ${paymentReference}`
-            : 'Manual payment',
-          period: primaryPeriod,
-        },
-        { session }
-      );
-
-      return { payment, allocations: allocationDocs, reused: false };
-    };
-
-    let result;
-    if (supportsMongoTransactions() === false) {
+    if (supportsMongoTransactions() !== true) {
       throw Errors.ServiceUnavailable('MongoDB transactions required for financial posting');
     }
+    const payPeriod = period || dateUtil.currentPeriod();
+
+    // One validated tenancy drives charges, Payment.tenancyId, allocations and the
+    // ledger entry. The tenant comes from that tenancy, never from house.tenantId.
     const session = await mongoose.startSession();
-    session.startTransaction();
+    let result;
+    let tenancy;
     try {
-      result = await run(session);
-      await session.commitTransaction();
-    } catch (err) {
-      await session.abortTransaction();
-      throw err;
+      await session.withTransaction(async () => {
+        tenancy = await tenancyService.resolveForManualPayment(
+          clientId, house, { period: payPeriod, tenancyId, tenantId }, { session }
+        );
+        await rentService.ensureChargesForTenancy(clientId, tenancy, house, payPeriod, { session });
+        const outstanding = await rentService.outstandingChargesForTenancy(clientId, tenancy._id, { session });
+        result = await accountingPostingService.postConfirmedPayment({
+          clientId,
+          estateId: tenancy.estateId,
+          houseId: house._id,
+          tenantId: tenancy.tenantId,
+          tenancyId: tenancy._id,
+          amountCents: amount,
+          paymentDate: payDate,
+          paymentDateWasExplicit: Boolean(paymentDate),
+          paymentReference: paymentReference || null,
+          period: payPeriod,
+          origin: 'MANUAL',
+          tenderMethod: body.tenderMethod || null,
+          recordedByUserId: actor?._id || null,
+          evidenceReference: paymentReference || body.evidenceReference || null,
+          charges: outstanding,
+        }, { session });
+      });
     } finally {
-      session.endSession();
+      await session.endSession();
     }
 
     await audit({
@@ -191,11 +101,18 @@ export const paymentService = {
       resource: 'Payment',
       resourceId: result.payment._id,
       description: `Manual payment ${amount} cents for house ${house.houseNumber}`,
-      metadata: { amountCents: amount, reused: result.reused },
+      metadata: { amountCents: amount, reused: result.reused, tenancyId: String(tenancy._id), period: payPeriod },
       ipAddress: reqMeta.ip,
       userAgent: reqMeta.userAgent,
     });
 
     return result;
+  },
+
+  /** Choices for the manual-payment form (human-readable tenancies for a house + period). */
+  async manualOptions(clientId, estateFilter, { houseId, period }) {
+    const house = await House.findOne({ _id: houseId, clientId, ...estateFilterClause(estateFilter) });
+    if (!house) throw Errors.HouseNotFound();
+    return tenancyService.manualPaymentOptions(clientId, house, period || dateUtil.currentPeriod());
   },
 };

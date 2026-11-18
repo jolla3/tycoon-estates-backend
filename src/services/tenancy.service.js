@@ -6,6 +6,9 @@ import { House } from '../models/House.js';
 import { Errors } from '../utils/errors.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import { supportsMongoTransactions } from '../config/database.js';
+import {
+  classifyTenanciesForPeriod, tenancyIneligibleReason, TENANCY_RESOLUTION,
+} from '../utils/manualPaymentTenancy.js';
 
 function requireTransactions() {
   if (supportsMongoTransactions() === false) {
@@ -65,6 +68,61 @@ export const tenancyService = {
       .lean();
     if (candidates.length === 1) return candidates[0];
     return null;
+  },
+
+  /**
+   * Resolve the single Tenancy a manual payment for (house, period) belongs to.
+   * Explicit tenancyId is validated against client/estate/house/tenant/period;
+   * otherwise exactly one eligible tenancy must exist. Fails closed.
+   */
+  async resolveForManualPayment(clientId, house, { period, tenancyId = null, tenantId = null }, { session } = {}) {
+    const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
+    if (tenancyId) {
+      const t = await Tenancy.findOne({ ...base, _id: tenancyId }).session(session || null).lean();
+      if (!t) throw Errors.InvalidRequest('Selected tenancy does not belong to this house');
+      if (tenantId && String(t.tenantId) !== String(tenantId)) {
+        throw Errors.InvalidRequest('Selected tenancy belongs to a different tenant');
+      }
+      const reason = tenancyIneligibleReason(t, period);
+      if (reason) throw Errors.InvalidRequest(`Selected tenancy cannot take a payment for ${period}: ${reason}`);
+      return t;
+    }
+    const candidates = await Tenancy.find(base).session(session || null).lean();
+    const r = classifyTenanciesForPeriod(candidates, period, { tenantId });
+    if (r.status === TENANCY_RESOLUTION.UNIQUE) return r.tenancy;
+    if (r.status === TENANCY_RESOLUTION.AMBIGUOUS) {
+      throw Errors.Conflict(`More than one tenancy covers ${period} for this house; choose which tenancy this payment is for`);
+    }
+    throw Errors.InvalidRequest(`No tenancy fully covers ${period} for this house; a payment cannot be attributed to a tenant`);
+  },
+
+  /** Read model for the manual-payment form: human-readable choices, never raw ids as labels. */
+  async manualPaymentOptions(clientId, house, period) {
+    const tenancies = await Tenancy.find({
+      clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] },
+    }).sort({ startAt: -1 }).limit(50).lean();
+    const tenants = await Tenant.find({ clientId, _id: { $in: tenancies.map((t) => t.tenantId) } })
+      .select('name').lean();
+    const nameById = new Map(tenants.map((t) => [String(t._id), t.name]));
+    const r = classifyTenanciesForPeriod(tenancies, period);
+    return {
+      houseId: String(house._id),
+      period,
+      resolution: r.status,
+      defaultTenancyId: r.status === TENANCY_RESOLUTION.UNIQUE ? String(r.tenancy._id) : null,
+      options: tenancies.map((t) => {
+        const reason = tenancyIneligibleReason(t, period);
+        return {
+          tenancyId: String(t._id),
+          tenantName: nameById.get(String(t.tenantId)) || 'Unknown tenant',
+          startAt: t.startAt,
+          endAt: t.endAt || null,
+          status: t.status,
+          coversPeriod: reason === null,
+          reason,
+        };
+      }),
+    };
   },
 
   async open({ clientId, estateId, houseId, tenantId, startAt, actorUserId = null }, { session: outer } = {}) {
