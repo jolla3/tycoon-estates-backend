@@ -134,10 +134,13 @@ export const tenancyService = {
     const run = async (session) => {
       const house = await House.findOne({ _id: houseId, clientId }).session(session);
       if (!house) throw Errors.HouseNotFound();
-      if (house.tenantId && !house.tenantId.equals(tenantId)) {
-        throw Errors.Conflict('House already has a different active tenant');
+      if (house.isActive === false) {
+        throw Errors.HouseNotFound('House is inactive and cannot receive a tenant');
       }
-      const existing = await Tenancy.findOne({ houseId, status: 'ACTIVE' }).session(session);
+      if (house.status !== 'vacant' || house.tenantId) {
+        throw Errors.Conflict('House is not vacant and cannot receive another tenant');
+      }
+      const existing = await Tenancy.findOne({ clientId, houseId, status: 'ACTIVE' }).session(session);
       if (existing) throw Errors.Conflict('House already has an active tenancy');
       let tenancy;
       try {

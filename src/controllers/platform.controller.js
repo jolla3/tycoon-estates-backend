@@ -3,6 +3,7 @@
 // the route layer (authorize('SUPER_ADMIN')); this controller assumes it.
 
 import { platformService } from '../services/platform.service.js';
+import { platformMpesaProfileService } from '../services/platformMpesaProfile.service.js';
 import { apiResponse } from '../utils/apiResponse.js';
 
 function meta(req) {
@@ -148,6 +149,17 @@ export const platformController = {
   async mpesaIntegrations(req, res, next) {
     try {
       apiResponse.success(res, await platformService.listMpesaIntegrations(req.query));
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  async createMpesaProfile(req, res, next) {
+    try {
+      const profile = await platformMpesaProfileService.create(
+        req.params.clientId, req.body, req.currentUser, meta(req)
+      );
+      apiResponse.success(res, profile, 'M-PESA merchant profile created in draft state', 201);
     } catch (err) {
       next(err);
     }

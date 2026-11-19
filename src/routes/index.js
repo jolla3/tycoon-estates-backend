@@ -19,6 +19,7 @@ import subscriptionRoutes from './subscription.routes.js';
 import houseTypeRoutes from './houseType.routes.js';
 import billingRoutes from './billing.routes.js';
 import mpesaCollectionRoutes from './mpesaCollection.routes.js';
+import mpesaTransactionRoutes from './mpesaTransaction.routes.js';
 
 const router = Router();
 
@@ -40,5 +41,6 @@ router.use('/subscription', subscriptionRoutes);
 router.use('/house-types', houseTypeRoutes);
 router.use('/billing', billingRoutes);
 router.use('/mpesa-collection', mpesaCollectionRoutes);
+router.use('/mpesa-transactions', mpesaTransactionRoutes);
 
 export default router;

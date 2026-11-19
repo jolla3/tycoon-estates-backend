@@ -35,6 +35,13 @@ const updateClientSchema = z.object({
   name: z.string().min(2).max(200).optional(),
 });
 
+export const createMpesaProfileSchema = z.object({
+  displayName: z.string().trim().min(1).max(120).optional(),
+  businessShortCode: z.string().trim().regex(/^\\d{1,20}$/, 'Business shortcode must contain digits only'),
+  // The current G5 posting model maps one Till profile to one estate.
+  estateId: z.string().regex(/^[a-f\\d]{24}$/i, 'Invalid estate id'),
+}).strict();
+
 router.get('/overview', platformController.overview);
 router.get('/health', platformController.health);
 
@@ -48,6 +55,7 @@ router.post('/clients/:clientId/activate', platformController.activateClient);
 router.post('/clients/:clientId/deactivate', platformController.deactivateClient);
 
 router.get('/clients/:clientId/diagnostics', platformController.clientDiagnostics);
+router.post('/clients/:clientId/mpesa-profiles', validate(createMpesaProfileSchema), platformController.createMpesaProfile);
 
 router.get('/integrations/banking', platformController.bankingIntegrations);
 router.get('/integrations/mpesa', platformController.mpesaIntegrations);
