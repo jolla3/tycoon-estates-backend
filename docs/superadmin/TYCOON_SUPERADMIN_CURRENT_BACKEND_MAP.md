@@ -1,5 +1,38 @@
 # Tycoon Estates Superadmin — Current Backend Map
 
+## Current post-merge implementation amendment — 2026-11-19 (authoritative)
+
+Verified backend main: 25d9969eb4f1c734f360337f0a3d64b83d465a6a. The older baseline/status tables below are historical architecture evidence; this amendment supersedes contradictory current-status statements.
+
+### Banking credential setup
+
+- Existing customer routes are mounted at /bank/connections and /bank/accounts.
+- clientContext supports SUPER_ADMIN only when an explicit clientId is supplied in query or path, and validates that the target Client is active.
+- requireProduct(BANKING) still applies to these customer routes.
+- Connection create/reauthorize/disconnect and account create/sync/statement mutations currently authorize only CLIENT_OWNER and CLIENT_ADMIN. This is the backend permission blocker for Superadmin onboarding.
+- The next change should narrowly add SUPER_ADMIN to those route allowlists after clientContext, retain requireProduct, pass the selected client explicitly, and reuse connectionService/bankService and encrypted BankCredential. No second credential store is required.
+
+### M-PESA merchant profiles
+
+- MpesaMerchantProfile exists and stores clientId, Buy Goods Till shortcode, optional estateId, lifecycle/capability/registration evidence and actor IDs.
+- platformIntegrations.service.js only reads and redacts profile data for the console. There is no HTTP route/controller/service for Superadmin profile creation or management.
+- darajaC2b.service.js and darajaPull.service.js implement registration calls, but they are not exposed as Superadmin profile-management HTTP routes.
+- Tycoon owns the Daraja application Consumer Key/Secret/environment at process level. A client profile stores that client's Till/shortcode, not a duplicate of the platform application's secrets.
+- New profile creation must validate Client and optional Estate ownership; begin at DRAFT with unknown capabilities and no registration evidence. A caller must not set ACTIVE or VERIFIED by request input.
+
+### Canonical M-PESA transaction history
+
+- MpesaTransaction stores canonical provider receipts with provider verification, claim/posting state and attribution fields.
+- There is no client-facing paginated list/read route or safe transaction DTO.
+- The next API should use authenticated clientContext, requireProduct(MPESA), pagination, client scope and estateFilterClause; expose allowlisted receipt fields only. Preserve distinctions among canonical receipts, SMS submissions and G3 Payments.
+- The frontend should render M-PESA receipts as a source within the existing Transactions page, rather than a separate page.
+
+### Post-P0 fixes and verification
+
+- P0 frontend-contract fixes are merged in backend main: HouseType create estateId contract, safe BankTransaction DTO, and explicit manual-payment tenancy resolution.
+- The manual-options query still has a latest-50 limit while the payment resolver searches all eligible tenancies.
+- Nineteen DB-backed integration tests were added but not executed; no live deployment/provider check is claimed.
+
 **Status:** Static map of verified backend state plus the target boundaries to preserve  
 **Date:** 2026-11-14  
 **Repository:** `jolla3/tycoon-estates-backend`  
