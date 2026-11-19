@@ -93,6 +93,9 @@ export const tenancyService = {
     if (r.status === TENANCY_RESOLUTION.AMBIGUOUS) {
       throw Errors.Conflict(`More than one tenancy covers ${period} for this house; choose which tenancy this payment is for`);
     }
+    if (tenantId && classifyTenanciesForPeriod(candidates, period).status !== TENANCY_RESOLUTION.NONE) {
+      throw Errors.InvalidRequest('tenantId does not match any tenancy covering this period for this house');
+    }
     throw Errors.InvalidRequest(`No tenancy fully covers ${period} for this house; a payment cannot be attributed to a tenant`);
   },
 

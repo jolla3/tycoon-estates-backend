@@ -1,22 +1,23 @@
 // Pure tenancy-resolution rules for manual payments (no DB access).
 // A house selected today does not prove who owed rent in an older period, so the
 // payment must be bound to ONE validated Tenancy that covers the whole period.
-import { isTenancyEligibleForPeriod } from './tenancyEligibility.js';
+import { isTenancyEligibleForPeriod, tenancyPeriodEligibility } from './tenancyEligibility.js';
 
 export const TENANCY_RESOLUTION = Object.freeze({ UNIQUE: 'UNIQUE', AMBIGUOUS: 'AMBIGUOUS', NONE: 'NONE' });
 
-/** Human-readable reason a tenancy cannot take a payment for `period` (null when it can). */
+const REASONS = Object.freeze({
+  NO_PERIOD: 'Invalid billing period',
+  BAD_STATUS: 'Tenancy is not active or closed',
+  BAD_START: 'Tenancy has an invalid start date',
+  BAD_END: 'Tenancy has an invalid end date',
+  STARTS_AFTER_PERIOD_START: 'Tenancy began after the start of this period (partial-period billing is not supported yet)',
+  ENDS_BEFORE_PERIOD_END: 'Tenancy ended before the end of this period (partial-period billing is not supported yet)',
+});
+
+/** Human-readable reason a tenancy cannot take a payment for `period` (null when it can). Uses the same boundary as isTenancyEligibleForPeriod. */
 export function tenancyIneligibleReason(tenancy, period) {
-  if (!tenancy || !['ACTIVE', 'CLOSED'].includes(tenancy.status)) return 'Tenancy is not active or closed';
-  if (isTenancyEligibleForPeriod(tenancy, period)) return null;
-  const start = new Date(tenancy.startAt);
-  if (Number.isNaN(start.getTime())) return 'Tenancy has an invalid start date';
-  // Distinguish by checking whether the start alone already fails the period start.
-  const periodStart = new Date(`${period}-01T00:00:00Z`);
-  const startedLate = start.getTime() > periodStart.getTime() + 24 * 3600 * 1000;
-  return startedLate
-    ? 'Tenancy began after the start of this period (partial-period billing is not supported yet)'
-    : 'Tenancy ended before the end of this period (partial-period billing is not supported yet)';
+  const { code } = tenancyPeriodEligibility(tenancy, period);
+  return code ? REASONS[code] : null;
 }
 
 /**

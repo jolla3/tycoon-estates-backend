@@ -17,7 +17,10 @@ import { Tenancy } from '../../src/models/Tenancy.js';
 import { RentCharge } from '../../src/models/RentCharge.js';
 import { Payment } from '../../src/models/Payment.js';
 import { Ledger } from '../../src/models/Ledger.js';
+import { PaymentAllocation } from '../../src/models/PaymentAllocation.js';
 import { paymentService } from '../../src/services/payment.service.js';
+import { ledgerService } from '../../src/services/ledger.service.js';
+import { jest } from '@jest/globals';
 
 describeWithMongo('manual payment tenancy attribution', () => {
   let client, otherClient, estate, house, otherHouse, tenantA, tenantB, tenancyA, tenancyB;
@@ -114,7 +117,7 @@ describeWithMongo('manual payment tenancy attribution', () => {
   });
 
   test('tenantId that does not own the resolved tenancy is rejected', async () => {
-    await expect(record({ period: HIST, tenantId: String(tenantB._id), paymentReference: 'X-4' })).rejects.toBeDefined();
+    await expect(record({ period: HIST, tenantId: String(tenantB._id), paymentReference: 'X-4' })).rejects.toMatchObject({ code: 'INVALID_REQUEST', message: expect.stringMatching(/tenantId does not match/) });
     expect(await Payment.countDocuments({})).toBe(0);
   });
 
@@ -135,5 +138,86 @@ describeWithMongo('manual payment tenancy attribution', () => {
     const none = await paymentService.manualOptions(client._id, null, { houseId: String(house._id), period: '2025-01' });
     expect(none.resolution).toBe('NONE');
     expect(none.defaultTenancyId).toBeNull();
+  });
+
+  test('two eligible tenancies: rejected until tenancyId is given, then only that tenancy is charged', async () => {
+    const tenantC = await Tenant.create({ clientId: client._id, estateId: estate._id, houseId: house._id, name: 'Carol Overlap', phone: '+254711000004' });
+    const overlap = await Tenancy.create({
+      clientId: client._id, estateId: estate._id, houseId: house._id, tenantId: tenantC._id,
+      startAt: new Date('2026-01-01T00:00:00+03:00'), endAt: new Date('2026-07-01T00:00:00+03:00'), status: 'CLOSED', closeReason: 'MOVE_OUT',
+    });
+    await expect(record({ period: HIST, paymentReference: 'M-1' })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await Payment.countDocuments({})).toBe(0);
+    expect(await RentCharge.countDocuments({})).toBe(0);
+    const { payment } = await record({ period: HIST, paymentReference: 'M-2', tenancyId: String(overlap._id) });
+    expect(String(payment.tenancyId)).toBe(String(overlap._id));
+    expect(String(payment.tenantId)).toBe(String(tenantC._id));
+    expect(await RentCharge.countDocuments({ tenancyId: tenancyA._id })).toBe(0);
+  });
+
+  test('explicit tenancy with a tenantId that is not its tenant is rejected and writes nothing', async () => {
+    await expect(record({ period: HIST, tenancyId: String(tenancyA._id), tenantId: String(tenantB._id), paymentReference: 'T-1' }))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(await Payment.countDocuments({})).toBe(0);
+    expect(await RentCharge.countDocuments({})).toBe(0);
+  });
+
+  test('Payment, RentCharge, PaymentAllocation and Ledger all carry the same tenancy', async () => {
+    const { payment, allocations } = await record({ period: HIST, amountCents: 300000, paymentReference: 'K-1' });
+    const id = String(tenancyA._id);
+    expect(String(payment.tenancyId)).toBe(id);
+    const stored = await Payment.findById(payment._id).lean();
+    expect(String(stored.tenancyId)).toBe(id);
+    const allocs = await PaymentAllocation.find({ paymentId: payment._id }).lean();
+    expect(allocs.length).toBeGreaterThan(0);
+    expect(allocations.length).toBe(allocs.length);
+    expect(allocs.every((a) => String(a.tenancyId) === id)).toBe(true);
+    const charges = await RentCharge.find({ _id: { $in: allocs.map((a) => a.rentChargeId) } }).lean();
+    expect(charges.every((c) => String(c.tenancyId) === id)).toBe(true);
+    const ledger = await Ledger.find({ referenceType: 'Payment', referenceId: payment._id }).lean();
+    expect(ledger).toHaveLength(1);
+    expect(String(ledger[0].tenancyId)).toBe(id);
+    expect(ledger[0].amountCents).toBe(300000);
+    expect(allocs.reduce((n, a) => n + a.amountCents, 0)).toBeLessThanOrEqual(300000);
+    // Nothing leaked onto the current tenancy.
+    expect(await PaymentAllocation.countDocuments({ tenancyId: tenancyB._id })).toBe(0);
+    expect(await Ledger.countDocuments({ tenancyId: tenancyB._id })).toBe(0);
+  });
+
+  test('overpayment is kept: full amount on the ledger, remainder reported as unapplied', async () => {
+    const res = await record({ period: HIST, amountCents: 99999999, paymentReference: 'O-1' });
+    expect(res.unappliedCents).toBeGreaterThan(0);
+    const ledger = await Ledger.findOne({ referenceType: 'Payment', referenceId: res.payment._id }).lean();
+    expect(ledger.amountCents).toBe(99999999);
+  });
+
+  test('a reference already used for another tenancy is never silently reused', async () => {
+    const first = await record({ period: HIST, paymentReference: 'DUP-1' });
+    await expect(record({ period: CUR, paymentReference: 'DUP-1' })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(await Payment.countDocuments({})).toBe(1);
+    expect(String((await Payment.findOne({})).tenancyId)).toBe(String(tenancyA._id));
+    // The aborted attempt must not have generated charges for the other tenancy.
+    expect(await RentCharge.countDocuments({ tenancyId: tenancyB._id })).toBe(0);
+    expect(first.reused).toBe(false);
+  });
+
+  test('ledger failure rolls back the payment, allocations, charge updates and generated charges', async () => {
+    const original = ledgerService.postEntry.bind(ledgerService);
+    const spy = jest.spyOn(ledgerService, 'postEntry').mockImplementation(async (payload, opts) => {
+      if (payload.entryType === 'PAYMENT') throw new Error('simulated ledger failure');
+      return original(payload, opts);
+    });
+    try {
+      await expect(record({ period: HIST, paymentReference: 'RB-1' })).rejects.toThrow('simulated ledger failure');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await Payment.countDocuments({})).toBe(0);
+    expect(await PaymentAllocation.countDocuments({})).toBe(0);
+    expect(await RentCharge.countDocuments({})).toBe(0);
+    expect(await Ledger.countDocuments({})).toBe(0);
+    // And a clean retry afterwards succeeds.
+    const ok = await record({ period: HIST, paymentReference: 'RB-1' });
+    expect(ok.reused).toBe(false);
   });
 });

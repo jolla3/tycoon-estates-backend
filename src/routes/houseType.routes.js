@@ -29,8 +29,9 @@ export const houseTypeCreateSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
-// Estate ownership is immutable; estateId is intentionally not accepted on update.
-export const houseTypeUpdateSchema = houseTypeCreateSchema.omit({ estateId: true }).partial();
+// Estate ownership is immutable. estateId stays in the update schema (validated, optional) so
+// the service can REJECT an attempted move with a 422 instead of silently ignoring it.
+export const houseTypeUpdateSchema = houseTypeCreateSchema.partial();
 
 router.get('/', authenticate, clientContext, houseTypeController.list);
 router.get('/:id/workspace', authenticate, clientContext, houseTypeController.workspace);

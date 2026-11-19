@@ -14,10 +14,13 @@ describe('houseType route schemas', () => {
   test('create rejects a malformed estateId', () => {
     expect(houseTypeCreateSchema.safeParse({ estateId: 'not-an-id', name: '1BR' }).success).toBe(false);
   });
-  test('update does not carry estateId (ownership immutable)', () => {
+  test('update forwards estateId so the service can reject an ownership move', () => {
     const r = houseTypeUpdateSchema.safeParse({ estateId: ESTATE, name: 'Renamed' });
     expect(r.success).toBe(true);
-    expect(r.data).toEqual({ name: 'Renamed' });
+    expect(r.data.estateId).toBe(ESTATE);
+  });
+  test('update rejects a malformed estateId', () => {
+    expect(houseTypeUpdateSchema.safeParse({ estateId: 'nope' }).success).toBe(false);
   });
   test('update still accepts partial fields', () => {
     expect(houseTypeUpdateSchema.safeParse({ defaultRentCents: 1000 }).success).toBe(true);
