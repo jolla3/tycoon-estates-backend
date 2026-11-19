@@ -1,5 +1,17 @@
 # Tycoon Estates Superadmin — Current Backend Map
 
+## Design review hardening — 2026-11-19
+
+Before implementation, the plan was challenged for hidden assumptions and unsafe shortcuts:
+
+1. **One Till to several estates is not supported by the current model.** MpesaMerchantProfile has one optional estateId, and the G5 posting evidence gate rejects a profile with no estate mapping or a mapping that differs from the tenant link estate. The first onboarding form must select one estate per Till profile. Do not pretend one Till can be shared across estates. A single shortcode is unique per client, so duplicating the same Till across estates is not a workaround. Multi-estate mapping is a separate model/product decision.
+2. **Create-profile is not provider registration.** C2B registration requires callback and validation URLs; Pull registration additionally requires a nominated number and callback URL. These values are not part of the client Till identity. Profile creation must not call provider registration with guessed URLs or numbers and must not promote the profile to ACTIVE/VERIFIED.
+3. **Merchant uniqueness is migration-controlled.** MpesaMerchantProfile has autoIndex:false and its (clientId,businessShortCode) unique index is explicit migration-controlled. Profile creation must fail closed when the expected unique-index gate is not ready; do not rely on an application-level pre-check alone for race safety.
+4. **Transaction history must not combine record types.** M-PESA history reads canonical MpesaTransaction receipts, not SMS submissions and not ledger Payment rows. The DTO must be safe and scope by client plus the selected estate's merchant profiles/attribution.
+5. **Banking access stays entitlement-gated.** Superadmin must use one explicit active clientId through clientContext. The existing BANKING entitlement check remains active. Do not add a global/bypass route or store new credentials. Existing Co-op credentials remain encrypted in BankCredential.
+6. **Tenant availability must be authoritative.** Filter active houses and exclude active tenancies, but also recheck inside the same Mongo transaction that opens the tenancy. A dropdown is not a concurrency or authorization boundary.
+7. **No broad UI redesign.** Fix the platform content shrink/wrap and breakpoint issues at the shell/evidence components. Do not replace the whole Superadmin UI or introduce a new design system.
+
 ## Current post-merge implementation amendment — 2026-11-19 (authoritative)
 
 Verified backend main: 25d9969eb4f1c734f360337f0a3d64b83d465a6a. The older baseline/status tables below are historical architecture evidence; this amendment supersedes contradictory current-status statements.
