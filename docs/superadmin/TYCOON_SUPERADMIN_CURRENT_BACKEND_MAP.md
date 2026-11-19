@@ -57,6 +57,19 @@ Backend review branch: `docs/superadmin-onboarding-and-history`. This is not on 
 
 **Current code boundary (not target product):** one DRAFT BUY_GOODS_TILL profile maps to one estate. Multi-estate mappings, PAYBILL, BillRef routing, shared callback registration evidence and protected Pull-number lifecycle are not implemented. The manual-options latest-50 mismatch remains open. No browser, DB replica-set integration or live provider tests are claimed.
 
+## Adversarial source review result — 2026-11-19 (verified against branch HEAD `e491899`)
+
+The sections above were checked against source. They are accurate; the findings below add facts, they do not change the target.
+
+- **Deployment model (verified):** `env.DARAJA_ENVIRONMENT` is a single process-wide value (`sandbox` default) and the OAuth client is built from it; there is no per-profile environment field and one deployment uses one MongoDB. Sandbox and live therefore do not share a database in the supported topology, so the global ownership index is `{provider, businessShortCode}` without an environment key. The profile still records the environment of each registration attempt so a shared-DB deployment would be detected rather than silently mixed.
+- **Scope mismatch (verified):** `resolveMerchantProfilesByShortCode` filters by `provider + businessShortCode` across all clients while the only unique index is `{clientId, businessShortCode}`; two clients can both own a shortcode and every receipt for it quarantines as `ambiguous_merchant`.
+- **Evidence gate (verified):** `evaluateEvidence` requires `profile.estateId === link.estateId` and `txn.transactionType === CustomerBuyGoodsOnline`; `normalizeC2bConfirmation` and `normalizePullTransactionRow` reject `CustomerPayBillOnline` as `unsupported_transaction_type`.
+- **Link merchant selection (verified):** `resolveOperationalMerchant` uses `.limit(2)` and returns null when two merchants are active for an estate, so a second channel silently disables links.
+- **History leak (verified):** `mpesaTransactionService.list` adds `merchantProfileId $in <profiles mapped to the estate>` to the estate scope; every receipt of a shared merchant would show to every mapped estate.
+- **Validation (verified):** `handleC2bValidation` accepts every request. External validation is not enabled for any merchant and must stay off.
+- **Receipt identity gate (verified):** `inspectMpesaIndexes` hard-codes `canonicalReceiptIdentity=false`; automatic posting is blocked by design and remains so.
+- **Correction to the status section above:** the new tests listed there are unit tests that can run without a database; only replica-set integration tests need MongoDB. None of the integration tests were executed in this review environment (no MongoDB/Redis available).
+
 ## Design review hardening — 2026-11-19
 
 Before implementation, the plan was challenged for hidden assumptions and unsafe shortcuts:

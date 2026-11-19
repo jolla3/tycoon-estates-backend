@@ -15,6 +15,18 @@ This correction does **not** upgrade any provider evidence classification. In pa
 
 For PayBill allocation, treat `BillRefNumber` as an optional provider value. Tycoon must resolve it against an explicit, unique merchant collection-reference mapping to exactly one tenant + estate. Missing, unknown, retired or ambiguous references remain unallocated. Do not attribute every receipt from a shared PayBill to every estate mapped to that merchant. The existing Till workflow retains tenant SMS/link evidence and active merchant-estate mapping checks.
 
+### PayBill `BillRefNumber` and callback evidence (reviewed 2026-11-19)
+
+| Item | Finding | Classification |
+|---|---|---|
+| `BillRefNumber` meaning | "Account number for which the customer is making the payment. Applicable only to Customer PayBill Transactions." | `THIRD-PARTY-MIRROR-OF-DARAJA-DOCS` (a published mirror of the Daraja C2B page; not fetched from the authenticated portal) |
+| Format / length | Callback table: "Alpha-numeric, up to 20 chars". No minimum and no further charset rules are stated; the page's own samples contain spaces ("Sample Transaction"), so the provider does not guarantee a clean charset. | `THIRD-PARTY-MIRROR-OF-DARAJA-DOCS`; re-verify on the authenticated portal |
+| Optional / required | Described as usually null for Till; the page does not say it is mandatory for PayBill. Treat as optional. | `BLOCKED/UNKNOWN` for PayBill mandatoriness |
+| Validation rejection | A merchant can reject with a non-zero `ResultCode` (e.g. `C2B00012 Invalid Account Number`) only when external validation is enabled by Safaricom for the shortcode. | `THIRD-PARTY-MIRROR-OF-DARAJA-DOCS`; not enabled for any Tycoon merchant |
+| Callback authentication | No signature, HMAC, shared secret or auth header is described. Callbacks are plain JSON `POST`s. | `BLOCKED/UNKNOWN` — unchanged |
+
+**Tycoon collection-reference format (`PROPOSED`, source-implemented in `src/utils/mpesaCollectionReference.js`).** Tycoon issues its own references so that a tenant types a short code on the M-PESA PayBill prompt. Format: `T` + 8 random characters from the Crockford base-32 alphabet (no `I L O U`) + 1 check character = **10 characters**, comfortably inside the documented 20. Inbound values are normalized by trimming, uppercasing, removing spaces and hyphens and mapping `O→0`, `I/L→1`; anything that is then not exactly a well-formed reference stays **unallocated** — it is never fuzzy-matched. The check character only catches typos; it is not a secret and not authentication. `BillRefNumber` is routing evidence, not proof of payment: a receipt still needs its own receipt identity and G5/G3 safeguards.
+
 The target data-model proposal and migration/receipt-visibility rules are in the authoritative correction section at the top of `docs/superadmin/TYCOON_SUPERADMIN_CURRENT_BACKEND_MAP.md` and in the frontend `architecture.md`. They are target architecture only; current code remains Till-only with one estateId.
 
 
