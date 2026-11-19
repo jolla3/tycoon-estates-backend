@@ -10,6 +10,7 @@ import { Errors } from '../utils/errors.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import mongoose from 'mongoose';
 import { tenancyService } from './tenancy.service.js';
+import { toBankTransactionDTO } from '../utils/bankTransactionDto.js';
 
 export const transactionService = {
   async list(clientId, estateFilter, query) {
@@ -28,14 +29,17 @@ export const transactionService = {
     }
 
     const [items, total] = await Promise.all([
-      BankTransaction.find(filter).sort({ transactionDate: -1 }).skip(skip).limit(limit),
+      BankTransaction.find(filter).sort({ transactionDate: -1 }).skip(skip).limit(limit).lean(),
       BankTransaction.countDocuments(filter),
     ]);
-    return paginatedResponse(items, total, { page, limit });
+    return paginatedResponse(items.map(toBankTransactionDTO), total, { page, limit });
   },
 
   /** Section 20: dedicated unmatched-transactions view for admin review. */
-  unmatched: (clientId, estateFilter) => BankTransaction.find({ clientId, ...estateFilterClause(estateFilter), matchStatus: 'UNMATCHED' }).sort({ transactionDate: -1 }),
+  async unmatched(clientId, estateFilter) {
+    const rows = await BankTransaction.find({ clientId, ...estateFilterClause(estateFilter), matchStatus: 'UNMATCHED' }).sort({ transactionDate: -1 }).lean();
+    return rows.map(toBankTransactionDTO);
+  },
 
   /** Manual admin assignment of an UNMATCHED transaction to a house (section 12/20). Both the transaction and the target house are re-verified against clientId — a house belonging to a different client can never be assigned to, even by guessing its _id. Same atomicity guarantee as the automatic reconcile() path: Payment + RentCharge + BankTransaction.matchStatus are written in one Mongo transaction. */
   async assignToHouse(clientId, transactionId, houseId, estateFilter = null) {
@@ -137,6 +141,6 @@ export const transactionService = {
         balanceCents: Math.max(remainingBalanceCents, 0),
       });
     }
-    return bankTransaction;
+    return toBankTransactionDTO(bankTransaction);
   },
 };

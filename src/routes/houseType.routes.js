@@ -15,7 +15,12 @@ const billingLine = z.object({
   dueDay: z.coerce.number().int().min(1).max(31).optional(),
 });
 
-const createSchema = z.object({
+const objectId = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid estateId');
+
+// estateId is required on create: the service enforces estate ownership, but the
+// validator previously stripped it (validate() replaces req.body with parsed data).
+export const houseTypeCreateSchema = z.object({
+  estateId: objectId,
   name: z.string().min(1).max(80),
   description: z.string().max(500).optional(),
   defaultRentCents: z.coerce.number().int().min(0).optional(),
@@ -24,7 +29,9 @@ const createSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
-const updateSchema = createSchema.partial();
+// Estate ownership is immutable. estateId stays in the update schema (validated, optional) so
+// the service can REJECT an attempted move with a 422 instead of silently ignoring it.
+export const houseTypeUpdateSchema = houseTypeCreateSchema.partial();
 
 router.get('/', authenticate, clientContext, houseTypeController.list);
 router.get('/:id/workspace', authenticate, clientContext, houseTypeController.workspace);
@@ -34,7 +41,7 @@ router.post(
   authenticate,
   clientContext,
   authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
-  validate(createSchema),
+  validate(houseTypeCreateSchema),
   houseTypeController.create
 );
 router.patch(
@@ -42,7 +49,7 @@ router.patch(
   authenticate,
   clientContext,
   authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
-  validate(updateSchema),
+  validate(houseTypeUpdateSchema),
   houseTypeController.update
 );
 router.post(

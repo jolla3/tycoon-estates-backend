@@ -13,6 +13,17 @@ export const paymentController = {
     }
   },
 
+  async manualOptions(req, res, next) {
+    try {
+      apiResponse.success(
+        res,
+        await paymentService.manualOptions(req.clientId, req.estateFilter, req.query)
+      );
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async create(req, res, next) {
     try {
       const result = await paymentService.recordManual(
@@ -28,6 +39,9 @@ export const paymentController = {
           payment: result.payment,
           allocations: result.allocations,
           reused: result.reused,
+          tenancyId: result.payment?.tenancyId ?? null,
+          unappliedCents: result.unappliedCents ?? 0,
+          remainingBalanceCents: result.remainingBalanceCents ?? null,
         },
         result.reused ? 'Payment already recorded (idempotent)' : 'Payment recorded',
         result.reused ? 200 : 201
