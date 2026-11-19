@@ -1,5 +1,17 @@
 # Tycoon Estates Superadmin — Current Backend Map
 
+## Review-branch implementation status — 2026-11-19 (not merged)
+
+Backend review branch `docs/superadmin-onboarding-and-history` @ `59afbda14c70feffbc9f53b323ef2792b81d539d`. This is not on main or deployed.
+
+- House list with `status=vacant` now excludes `isActive:false`, any non-null House.tenantId and any House with an ACTIVE Tenancy under the same client. `tenancyService.open` rechecks active state, vacancy and existing active tenancy inside its Mongo transaction.
+- Existing bank connection and account mutation routes now allow SUPER_ADMIN after authenticate + `clientContext` + `requireProduct('BANKING')` + role authorization. Superadmin must provide explicit clientId in query; clientId is never trusted from body.
+- `POST /platform/clients/:clientId/mpesa-profiles` creates a DRAFT BUY_GOODS_TILL profile for one client-owned estate. It checks active Client and same-client Estate inside the transaction, requires `merchantRegistration` readiness (`uniq_client_business_shortcode`), sets capabilities UNKNOWN and registration states NONE, and records required audit in the transaction. No Daraja secrets are stored.
+- `GET /mpesa-transactions` requires auth, `clientContext` and MPESA entitlement, checks canonical query indexes, and returns a paginated allowlisted M-PESA receipt DTO. Client and estate filters are enforced through clientId, mapped merchant profiles and attributedEstateId.
+- New unit schema/DTO tests were added for Till profile input and receipt query/DTO. They have not been executed.
+
+**Boundaries:** one Till profile maps to one estate; no multi-estate Till support. Profile creation is DRAFT only. C2B/Pull registration is not triggered because callback/validation URLs and nominated Pull number require explicit platform configuration. The manual-options latest-50 mismatch remains open. No browser, DB replica-set integration or live provider tests are claimed.
+
 ## Design review hardening — 2026-11-19
 
 Before implementation, the plan was challenged for hidden assumptions and unsafe shortcuts:
