@@ -1,5 +1,23 @@
 # G5 — Daraja C2B + Pull Transactions Contract Evidence
 
+## Product-scope correction — 2026-11-19
+
+The provider evidence below was assembled for the earlier G5.3 Buy Goods/Till slice. Its original scope statement is historical and is no longer a product-scope prohibition on PayBill. The product target now includes both `PAYBILL` and `BUY_GOODS_TILL`, with one shortcode merchant profile mapped to multiple same-client estates.
+
+This correction does **not** upgrade any provider evidence classification. In particular:
+
+- The existing owner-supplied C2B evidence records `Pay Bill` as a callback transaction type and identifies `BillRefNumber` as an optional callback field. That establishes a normalization/routing requirement, not a complete PayBill rent-allocation implementation.
+- The reviewed Safaricom C2B documentation describes Register URL as mapping confirmation/validation URLs to a shortcode and says external validation is optional and must be enabled for the shortcode. Tycoon should own shared platform callback URLs and register them against each merchant shortcode; clients do not need separate callback servers.
+- Safaricom's public C2B reference document is available at [Safaricom M-PESA Integration API overview](https://www.safaricom.co.ke/images/Downloads/Tender_Documents/EOI_Safaricom_M-PESA_Integration_V1_002.pdf). The current Daraja API directory is [Safaricom Developers Portal](https://developer.safaricom.co.ke/apis). Re-check the authenticated Daraja portal's current merchant-specific contract before implementation/production registration.
+- The current `handleC2bValidation` implementation accepts every request. This is not evidence that validation is implemented safely. External validation must remain disabled until shortcode activation, reference validation, callback trust, acknowledgement timing and failure behavior are proven.
+- The current source Pull registration contract requires `shortCode`, `nominatedNumber` and `callBackUrl`. The nominated number is a merchant-specific KYC value; the callback URL is Tycoon platform configuration. Protect the nominated number and record the callback-config version/snapshot.
+- Callback authentication has not been established by the evidence collected for this repository. A shortcode in an inbound body is not authentication. Public callback processing and automated G3 posting remain gated until authenticity/abuse controls are evidenced.
+
+For PayBill allocation, treat `BillRefNumber` as an optional provider value. Tycoon must resolve it against an explicit, unique merchant collection-reference mapping to exactly one tenant + estate. Missing, unknown, retired or ambiguous references remain unallocated. Do not attribute every receipt from a shared PayBill to every estate mapped to that merchant. The existing Till workflow retains tenant SMS/link evidence and active merchant-estate mapping checks.
+
+The target data-model proposal and migration/receipt-visibility rules are in the authoritative correction section at the top of `docs/superadmin/TYCOON_SUPERADMIN_CURRENT_BACKEND_MAP.md` and in the frontend `architecture.md`. They are target architecture only; current code remains Till-only with one estateId.
+
+
 **Updated:** 2026-11-14
 **Scope:** Buy Goods / Till C2B confirmation and Pull Transactions only. No STK, B2C, B2B, PayBill redesign, Tenant attribution, or G3 posting.
 
