@@ -12,12 +12,11 @@ import { safeMerchantProfile } from './platformIntegrations.service.js';
 export const platformMpesaProfileService = {
   async create(clientId, { businessShortCode, displayName, estateId }, actor, reqMeta = {}) {
     if (!mongoose.isValidObjectId(clientId)) throw Errors.NotFound('Client not found');
-    const client = await Client.findById(clientId).select('_id name isActive').lean();
-    if (!client) throw Errors.NotFound('Client not found');
-    if (client.isActive !== true) throw Errors.InvalidRequest('M-PESA profiles can only be configured for an active client');
 
-    const estate = await Estate.findOne({ _id: estateId, clientId }).select('_id name').lean();
-    if (!estate) throw Errors.InvalidRequest('Select an estate belonging to this client');
+    const shortcode = String(businessShortCode || '').trim();
+    if (!/^\d{1,20}$/.test(shortcode)) {
+      throw Errors.InvalidRequest('Business shortcode must contain digits only');
+    }
 
     // Schema autoIndex is disabled. The migration-controlled unique index is
     // required before profile creation so concurrent duplicate shortcodes fail closed.
@@ -26,13 +25,26 @@ export const platformMpesaProfileService = {
       throw Errors.ServiceUnavailable('M-PESA merchant profile uniqueness index is not ready');
     }
 
-    const shortcode = String(businessShortCode || '').trim();
-    if (!/^\d{1,20}$/.test(shortcode)) throw Errors.InvalidRequest('Business shortcode must contain digits only');
-
     const session = await mongoose.startSession();
     let profile;
     try {
       await session.withTransaction(async () => {
+        // Recheck both client state and estate ownership inside the transaction.
+        const client = await Client.findById(clientId)
+          .select('_id name isActive')
+          .session(session)
+          .lean();
+        if (!client) throw Errors.NotFound('Client not found');
+        if (client.isActive !== true) {
+          throw Errors.InvalidRequest('M-PESA profiles can only be configured for an active client');
+        }
+
+        const estate = await Estate.findOne({ _id: estateId, clientId })
+          .select('_id name')
+          .session(session)
+          .lean();
+        if (!estate) throw Errors.InvalidRequest('Select an estate belonging to this client');
+
         const [created] = await MpesaMerchantProfile.create([{
           clientId,
           provider: 'SAFARICOM',
@@ -49,6 +61,7 @@ export const platformMpesaProfileService = {
           updatedByUserId: actor?._id || null,
         }], { session });
         profile = created;
+
         await auditRequired({
           clientId,
           estateId: estate._id,
@@ -68,11 +81,14 @@ export const platformMpesaProfileService = {
         }, { session });
       });
     } catch (err) {
-      if (err?.code === 11000) throw Errors.Conflict('This Till shortcode is already registered for this client');
+      if (err?.code === 11000) {
+        throw Errors.Conflict('This Till shortcode is already registered for this client');
+      }
       throw err;
     } finally {
       await session.endSession();
     }
+
     return safeMerchantProfile(profile.toObject());
   },
 };
