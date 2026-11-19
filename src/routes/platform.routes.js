@@ -37,9 +37,9 @@ const updateClientSchema = z.object({
 
 export const createMpesaProfileSchema = z.object({
   displayName: z.string().trim().min(1).max(120).optional(),
-  businessShortCode: z.string().trim().regex(/^\\d{1,20}$/, 'Business shortcode must contain digits only'),
+  businessShortCode: z.string().trim().regex(/^\d{1,20}$/, 'Business shortcode must contain digits only'),
   // The current G5 posting model maps one Till profile to one estate.
-  estateId: z.string().regex(/^[a-f\\d]{24}$/i, 'Invalid estate id'),
+  estateId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid estate id'),
 }).strict();
 
 router.get('/overview', platformController.overview);

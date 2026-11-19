@@ -9,7 +9,7 @@ import { validate } from '../middlewares/validate.js';
 const router = Router();
 
 export const mpesaTransactionListSchema = z.object({
-  estateId: z.string().regex(/^[a-f\\d]{24}$/i).optional(),
+  estateId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   page: z.coerce.number().int().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   verificationState: z.enum(['UNVERIFIED', 'MATCHED', 'CONFLICT', 'MANUAL_REVIEW']).optional(),

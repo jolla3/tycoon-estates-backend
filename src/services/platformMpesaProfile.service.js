@@ -27,7 +27,7 @@ export const platformMpesaProfileService = {
     }
 
     const shortcode = String(businessShortCode || '').trim();
-    if (!/^\\d{1,20}$/.test(shortcode)) throw Errors.InvalidRequest('Business shortcode must contain digits only');
+    if (!/^\d{1,20}$/.test(shortcode)) throw Errors.InvalidRequest('Business shortcode must contain digits only');
 
     const session = await mongoose.startSession();
     let profile;
