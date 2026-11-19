@@ -81,6 +81,27 @@ export async function allocateReceiptByReference(txn, profile, { session = null 
 }
 
 export const mpesaReferenceService = {
+  toView(r) {
+    return {
+      id: String(r._id), merchantProfileId: String(r.merchantProfileId), estateId: String(r.estateId),
+      tenantId: String(r.tenantId), tenancyId: String(r.tenancyId), reference: r.reference,
+      status: r.status, retiredAt: r.retiredAt || null, retiredReason: r.retiredReason || null, createdAt: r.createdAt,
+    };
+  },
+
+  async list({ clientId, merchantProfileId, query = {} }) {
+    const limit = Math.min(Math.max(Number(query.limit) || 25, 1), 100);
+    const page = Math.max(Number(query.page) || 1, 1);
+    const filter = { clientId, merchantProfileId };
+    if (query.status === 'ACTIVE' || query.status === 'RETIRED') filter.status = query.status;
+    if (query.estateId && mongoose.isValidObjectId(query.estateId)) filter.estateId = query.estateId;
+    const [rows, total] = await Promise.all([
+      MpesaCollectionReference.find(filter).sort({ createdAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      MpesaCollectionReference.countDocuments(filter),
+    ]);
+    return { items: rows.map((r) => mpesaReferenceService.toView(r)), total, page, limit };
+  },
+
   /** Issue (or return the existing ACTIVE) reference for one real tenancy on one PayBill. */
   async issue({ clientId, merchantProfileId, tenancyId, actor, reqMeta = {} }) {
     const session = await mongoose.startSession();

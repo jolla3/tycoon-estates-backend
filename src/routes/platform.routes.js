@@ -48,6 +48,7 @@ export const createMpesaProfileSchema = z.object({
 
 export const estateMappingSchema = z.object({ estateId: objectId('estate id') }).strict();
 export const pullNumberSchema = z.object({ msisdn: z.string().trim().min(9).max(16) }).strict();
+export const issueReferenceSchema = z.object({ tenancyId: objectId('tenancy id') }).strict();
 export const reconcileSchema = z.object({ outcome: z.enum(['NOT_REGISTERED', 'REGISTERED']) }).strict();
 
 router.get('/overview', platformController.overview);
@@ -73,6 +74,10 @@ router.put('/clients/:clientId/mpesa-profiles/:profileId/pull-number', validate(
 router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/c2b', platformController.registerMpesaC2b);
 router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/pull', platformController.registerMpesaPull);
 router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/:kind/reconcile', validate(reconcileSchema), platformController.reconcileMpesaRegistration);
+
+router.get('/clients/:clientId/mpesa-profiles/:profileId/references', platformController.listMpesaReferences);
+router.post('/clients/:clientId/mpesa-profiles/:profileId/references', validate(issueReferenceSchema), platformController.issueMpesaReference);
+router.delete('/clients/:clientId/mpesa-profiles/:profileId/references/:referenceId', platformController.retireMpesaReference);
 
 router.get('/integrations/banking', platformController.bankingIntegrations);
 router.get('/integrations/mpesa', platformController.mpesaIntegrations);

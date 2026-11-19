@@ -5,6 +5,7 @@
 import { platformService } from '../services/platform.service.js';
 import { platformMpesaProfileService } from '../services/platformMpesaProfile.service.js';
 import { mpesaRegistrationService } from '../services/mpesa/mpesaRegistration.service.js';
+import { mpesaReferenceService } from '../services/mpesa/mpesaReference.service.js';
 import { apiResponse } from '../utils/apiResponse.js';
 
 function meta(req) {
@@ -214,6 +215,31 @@ export const platformController = {
       apiResponse.success(res, await mpesaRegistrationService.reconcile({
         clientId: req.params.clientId, profileId: req.params.profileId, kind: req.params.kind,
         outcome: req.body.outcome, actor: req.currentUser, reqMeta: meta(req) }));
+    } catch (err) { next(err); }
+  },
+
+  async listMpesaReferences(req, res, next) {
+    try {
+      apiResponse.success(res, await mpesaReferenceService.list({
+        clientId: req.params.clientId, merchantProfileId: req.params.profileId, query: req.query }));
+    } catch (err) { next(err); }
+  },
+
+  async issueMpesaReference(req, res, next) {
+    try {
+      const { reference, created } = await mpesaReferenceService.issue({
+        clientId: req.params.clientId, merchantProfileId: req.params.profileId,
+        tenancyId: req.body.tenancyId, actor: req.currentUser, reqMeta: meta(req) });
+      apiResponse.success(res, mpesaReferenceService.toView(reference), created ? 'Reference issued' : 'Active reference already exists', created ? 201 : 200);
+    } catch (err) { next(err); }
+  },
+
+  async retireMpesaReference(req, res, next) {
+    try {
+      const row = await mpesaReferenceService.retire({
+        clientId: req.params.clientId, referenceId: req.params.referenceId, reason: 'ADMIN',
+        actor: req.currentUser, reqMeta: meta(req) });
+      apiResponse.success(res, mpesaReferenceService.toView(row));
     } catch (err) { next(err); }
   },
 
