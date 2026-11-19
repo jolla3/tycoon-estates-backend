@@ -1,5 +1,6 @@
 // src/services/tenancy.service.js
 import mongoose from 'mongoose';
+import { MpesaCollectionReference } from '../models/MpesaCollectionReference.js';
 import { Tenancy } from '../models/Tenancy.js';
 import { Tenant } from '../models/Tenant.js';
 import { House } from '../models/House.js';
@@ -26,6 +27,15 @@ export function tenancyContains(tenancy, eventTime) {
   if (tenancy.endAt == null) return true;
   const end = new Date(tenancy.endAt).getTime();
   return Number.isFinite(end) && t < end; // endAt is exclusive
+}
+
+/** PayBill references are retired (never reassigned) in the same transaction as the tenancy close. */
+async function retireTenancyReferences(clientId, tenancyId, session) {
+  await MpesaCollectionReference.updateMany(
+    { clientId, tenancyId, status: 'ACTIVE' },
+    { $set: { status: 'RETIRED', retiredAt: new Date(), retiredReason: 'TENANCY_CLOSED' } },
+    { session },
+  );
 }
 
 export const tenancyService = {
@@ -99,32 +109,72 @@ export const tenancyService = {
     throw Errors.InvalidRequest(`No tenancy fully covers ${period} for this house; a payment cannot be attributed to a tenant`);
   },
 
-  /** Read model for the manual-payment form: human-readable choices, never raw ids as labels. */
-  async manualPaymentOptions(clientId, house, period) {
-    const tenancies = await Tenancy.find({
-      clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] },
-    }).sort({ startAt: -1 }).limit(50).lean();
-    const tenants = await Tenant.find({ clientId, _id: { $in: tenancies.map((t) => t.tenantId) } })
+  /**
+   * Read model for the manual-payment form: human-readable tenancies for a house + period.
+   * Period resolution uses EVERY tenancy that can cover the period (never a truncated "latest N"),
+   * while the browsable option list is paginated and searchable by tenant name, so older
+   * tenancies are always reachable and nothing unbounded is loaded.
+   */
+  async manualPaymentOptions(clientId, house, period, { page = 1, limit = 20, search = '' } = {}) {
+    const pageSize = Math.min(Math.max(Number(limit) || 20, 1), 50);
+    const pageNo = Math.max(Number(page) || 1, 1);
+    const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
+
+    // 1. Resolution over every candidate that could cover the period (DB prefilter is deliberately
+    //    loose by 2 days; the exact boundary rule is applied in memory by classifyTenanciesForPeriod).
+    const [y, m] = String(period).split('-').map(Number);
+    const margin = 2 * 24 * 3600 * 1000;
+    const periodStart = new Date(Date.UTC(y, m - 1, 1) - margin);
+    const periodEnd = new Date(Date.UTC(y, m, 1) + margin);
+    const candidates = await Tenancy.find({
+      ...base,
+      startAt: { $lte: periodEnd },
+      $or: [{ endAt: null }, { endAt: { $gte: periodStart } }],
+    }).sort({ startAt: -1 }).limit(200).lean();
+    const r = classifyTenanciesForPeriod(candidates, period);
+
+    // 2. Browsable page (optionally filtered by tenant name).
+    const listFilter = { ...base };
+    const term = String(search || '').trim().slice(0, 80);
+    if (term) {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const matches = await Tenant.find({ clientId, name: { $regex: escaped, $options: 'i' } }).select('_id').limit(500).lean();
+      listFilter.tenantId = { $in: matches.map((t) => t._id) };
+    }
+    const [pageRows, total] = await Promise.all([
+      Tenancy.find(listFilter).sort({ startAt: -1, _id: -1 }).skip((pageNo - 1) * pageSize).limit(pageSize).lean(),
+      Tenancy.countDocuments(listFilter),
+    ]);
+
+    const wanted = new Map();
+    for (const t of [...pageRows, ...r.eligible]) wanted.set(String(t._id), t);
+    const tenants = await Tenant.find({ clientId, _id: { $in: [...wanted.values()].map((t) => t.tenantId) } })
       .select('name').lean();
     const nameById = new Map(tenants.map((t) => [String(t._id), t.name]));
-    const r = classifyTenanciesForPeriod(tenancies, period);
+    const toOption = (t) => {
+      const reason = tenancyIneligibleReason(t, period);
+      return {
+        tenancyId: String(t._id),
+        tenantName: nameById.get(String(t.tenantId)) || 'Unknown tenant',
+        startAt: t.startAt,
+        endAt: t.endAt || null,
+        status: t.status,
+        coversPeriod: reason === null,
+        reason,
+      };
+    };
     return {
       houseId: String(house._id),
       period,
       resolution: r.status,
       defaultTenancyId: r.status === TENANCY_RESOLUTION.UNIQUE ? String(r.tenancy._id) : null,
-      options: tenancies.map((t) => {
-        const reason = tenancyIneligibleReason(t, period);
-        return {
-          tenancyId: String(t._id),
-          tenantName: nameById.get(String(t.tenantId)) || 'Unknown tenant',
-          startAt: t.startAt,
-          endAt: t.endAt || null,
-          status: t.status,
-          coversPeriod: reason === null,
-          reason,
-        };
-      }),
+      // Always present regardless of page/search so the form can show who can take the payment.
+      eligibleOptions: r.eligible.map(toOption),
+      options: pageRows.map(toOption),
+      page: pageNo,
+      limit: pageSize,
+      total,
+      hasMore: pageNo * pageSize < total,
     };
   },
 
@@ -195,6 +245,7 @@ export const tenancyService = {
       tenancy.closeReason = reason;
       tenancy.closedByUserId = actorUserId;
       await tenancy.save({ session });
+      await retireTenancyReferences(clientId, tenancy._id, session);
       await House.updateOne(
         { _id: tenancy.houseId, clientId, tenantId: tenancy.tenantId },
         { tenantId: null, status: 'vacant' },
@@ -248,6 +299,7 @@ export const tenancyService = {
           current.closeReason = 'TRANSFER';
           current.closedByUserId = actorUserId;
           await current.save({ session });
+          await retireTenancyReferences(clientId, current._id, session);
           await House.updateOne(
             { _id: current.houseId, clientId },
             { tenantId: null, status: 'vacant' },

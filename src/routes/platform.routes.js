@@ -35,12 +35,20 @@ const updateClientSchema = z.object({
   name: z.string().min(2).max(200).optional(),
 });
 
+const objectId = (label) => z.string().regex(/^[a-f\d]{24}$/i, `Invalid ${label}`);
+
 export const createMpesaProfileSchema = z.object({
+  merchantType: z.enum(['PAYBILL', 'BUY_GOODS_TILL']).default('BUY_GOODS_TILL'),
   displayName: z.string().trim().min(1).max(120).optional(),
   businessShortCode: z.string().trim().regex(/^\d{1,20}$/, 'Business shortcode must contain digits only'),
-  // The current G5 posting model maps one Till profile to one estate.
-  estateId: z.string().regex(/^[a-f\d]{24}$/i, 'Invalid estate id'),
-}).strict();
+  // One merchant may serve several estates of the SAME client. Legacy single estateId still accepted.
+  estateIds: z.array(objectId('estate id')).min(1).max(100).optional(),
+  estateId: objectId('estate id').optional(),
+}).strict().refine((v) => v.estateIds?.length || v.estateId, { message: 'Select at least one estate' });
+
+export const estateMappingSchema = z.object({ estateId: objectId('estate id') }).strict();
+export const pullNumberSchema = z.object({ msisdn: z.string().trim().min(9).max(16) }).strict();
+export const reconcileSchema = z.object({ outcome: z.enum(['NOT_REGISTERED', 'REGISTERED']) }).strict();
 
 router.get('/overview', platformController.overview);
 router.get('/health', platformController.health);
@@ -56,6 +64,15 @@ router.post('/clients/:clientId/deactivate', platformController.deactivateClient
 
 router.get('/clients/:clientId/diagnostics', platformController.clientDiagnostics);
 router.post('/clients/:clientId/mpesa-profiles', validate(createMpesaProfileSchema), platformController.createMpesaProfile);
+
+router.get('/mpesa/callback-config', platformController.mpesaCallbackConfig);
+router.get('/clients/:clientId/mpesa-profiles/:profileId', platformController.getMpesaProfile);
+router.post('/clients/:clientId/mpesa-profiles/:profileId/estates', validate(estateMappingSchema), platformController.mapMpesaEstate);
+router.delete('/clients/:clientId/mpesa-profiles/:profileId/estates/:estateId', platformController.unmapMpesaEstate);
+router.put('/clients/:clientId/mpesa-profiles/:profileId/pull-number', validate(pullNumberSchema), platformController.setMpesaPullNumber);
+router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/c2b', platformController.registerMpesaC2b);
+router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/pull', platformController.registerMpesaPull);
+router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/:kind/reconcile', validate(reconcileSchema), platformController.reconcileMpesaRegistration);
 
 router.get('/integrations/banking', platformController.bankingIntegrations);
 router.get('/integrations/mpesa', platformController.mpesaIntegrations);

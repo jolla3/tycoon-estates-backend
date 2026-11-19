@@ -66,7 +66,7 @@ describe('Buy Goods C2B confirmation fixture', () => {
     expect(n.validationErrors).toEqual([]);
   });
 
-  test('normalizes Pay Bill but rejects it from the Buy Goods product scope', () => {
+  test('normalizes Pay Bill as a supported collection type (routing happens later)', () => {
     const n = normalizeC2bConfirmation({
       TransactionType: 'Pay Bill',
       TransID: 'PAYBILL123',
@@ -75,8 +75,8 @@ describe('Buy Goods C2B confirmation fixture', () => {
       BusinessShortCode: '600987',
     });
     expect(n.transactionType).toBe('CustomerPayBillOnline');
-    expect(n.ok).toBe(false);
-    expect(n.validationErrors).toContain('unsupported_transaction_type');
+    expect(n.ok).toBe(true);
+    expect(n.validationErrors).toEqual([]);
   });
 
   test('accepts the canonical Buy Goods transaction type', () => {
@@ -133,8 +133,8 @@ describe('documented TransactionPull row', () => {
     expect(n.billRefNumber).toBe('37207636392');
     expect(n.msisdn).toBe('722000000');
     expect(n.transactionType).toBe('CustomerPayBillOnline');
-    expect(n.ok).toBe(false);
-    expect(n.validationErrors).toContain('unsupported_transaction_type');
+    expect(n.ok).toBe(true);
+    expect(n.validationErrors).toEqual([]);
   });
 
   test('requires merchant shortcode context when Pull row does not include shortcode', () => {

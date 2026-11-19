@@ -118,3 +118,13 @@ describe('manual payment request schemas', () => {
     expect(manualOptionsQuerySchema.safeParse({ houseId: oid(1), period: '2026-03' }).success).toBe(true);
   });
 });
+
+describe('manual-options pagination/search query', () => {
+  const oidv = 'a'.repeat(24);
+  test('accepts bounded page/limit/search and rejects unbounded values or unknown keys', () => {
+    expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, page: '2', limit: '50', search: 'wanjiru' }).success).toBe(true);
+    expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, limit: '500' }).success).toBe(false);
+    expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, page: '0' }).success).toBe(false);
+    expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, unexpected: 1 }).success).toBe(false);
+  });
+});

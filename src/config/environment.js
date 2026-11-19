@@ -94,6 +94,8 @@ export const env = {
   DARAJA_ENVIRONMENT: optional('DARAJA_ENVIRONMENT') || 'sandbox',
   DARAJA_CONSUMER_KEY: optional('DARAJA_CONSUMER_KEY'),
   DARAJA_CONSUMER_SECRET: optional('DARAJA_CONSUMER_SECRET'),
+  /** Public https origin Tycoon hosts the shared Daraja callbacks on (platform-owned, not per client). */
+  DARAJA_CALLBACK_BASE_URL: optional('DARAJA_CALLBACK_BASE_URL'),
   DARAJA_CALLBACKS_ENABLED: optional('DARAJA_CALLBACKS_ENABLED') === '1' ? '1' : '',
   DARAJA_CALLBACKS_LAB: optional('DARAJA_CALLBACKS_LAB') === '1' ? '1' : '',
   /** Explicit opt-in for scheduled Pull query/reconciliation (default off). */

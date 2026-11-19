@@ -14,6 +14,8 @@ import {
   DARAJA_PROVIDER,
 } from './daraja.constants.js';
 import { logger } from '../../config/logger.js';
+import { allocateReceiptByReference } from './mpesaReference.service.js';
+import { C2B_COMMAND, MERCHANT_TYPE } from './daraja.constants.js';
 
 const LEASE_TTL_MS = 120_000;
 
@@ -201,6 +203,18 @@ export async function processClaimedEvent(event, leaseToken, normalized, { sessi
   }
 
   const profile = resolution.profile;
+  // A shortcode is one product: PayBill merchants only accept Pay Bill receipts and Tills only
+  // Buy Goods. A mismatch is quarantined, never coerced.
+  const expectedType = profile.merchantType === MERCHANT_TYPE.PAYBILL ? C2B_COMMAND.PAYBILL : C2B_COMMAND.BUY_GOODS;
+  if (normalized.transactionType !== expectedType) {
+    await completeIngestionEvent(event._id, leaseToken, {
+      state: INGESTION_STATE.QUARANTINED,
+      quarantineCategory: 'merchant_type_mismatch',
+      reasonCode: 'transaction_type_does_not_match_merchant_type',
+      session,
+    });
+    return { quarantined: true, reason: 'merchant_type_mismatch', transaction: null };
+  }
   await MpesaIngestionEvent.updateOne(
     { _id: event._id, processingLeaseToken: leaseToken },
     { $set: { merchantProfileId: profile._id, clientId: profile.clientId } },
@@ -209,6 +223,13 @@ export async function processClaimedEvent(event, leaseToken, normalized, { sessi
 
   try {
     const upsert = await upsertCanonicalTransaction(normalized, profile, { session });
+    // PayBill routing: exact reference resolution only. Failure leaves the receipt UNALLOCATED.
+    if (upsert.transaction && !upsert.conflict && profile.merchantType === MERCHANT_TYPE.PAYBILL) {
+      const alloc = await allocateReceiptByReference(upsert.transaction, profile, { session });
+      if (alloc.changed) {
+        upsert.transaction = await MpesaTransaction.findById(upsert.transaction._id).session(session || null);
+      }
+    }
     const completed = await completeIngestionEvent(event._id, leaseToken, {
       state: upsert.conflict ? INGESTION_STATE.QUARANTINED : INGESTION_STATE.PROCESSED,
       quarantineCategory: upsert.conflict ? 'conflict' : null,

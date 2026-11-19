@@ -1,10 +1,18 @@
 import { MpesaTransaction } from '../models/MpesaTransaction.js';
-import { MpesaMerchantProfile } from '../models/MpesaMerchantProfile.js';
 import { paginationParams, paginatedResponse } from '../utils/pagination.js';
-import { estateFilterClause } from '../utils/estateFilter.js';
 import { inspectMpesaIndexes } from '../utils/mpesaIndexReadiness.js';
 import { Errors } from '../utils/errors.js';
 import { toMpesaTransactionDTO } from '../utils/mpesaTransactionDto.js';
+
+/**
+ * Receipt visibility scope. Restricted users: exact reference allocation or verified attribution
+ * only. Client-wide scope (estateFilter null): everything, including UNALLOCATED receipts.
+ */
+export function receiptScopeClause(estateFilter) {
+  if (!estateFilter) return null;
+  const ids = Array.isArray(estateFilter) ? estateFilter : [estateFilter];
+  return { $or: [{ allocatedEstateId: { $in: ids } }, { attributedEstateId: { $in: ids } }] };
+}
 
 export const mpesaTransactionService = {
   async list(clientId, estateFilter, query = {}) {
@@ -24,25 +32,18 @@ export const mpesaTransactionService = {
       if (query.endDate) filter.transactionAt.$lte = new Date(query.endDate);
     }
 
-    // Resolve estate access through client-owned merchant profiles, and include
-    // receipts already attributed to the same estate. clientId remains mandatory.
-    if (estateFilter) {
-      const profiles = await MpesaMerchantProfile.find({
-        clientId,
-        ...estateFilterClause(estateFilter),
-      }).select('_id').lean();
-      const profileIds = profiles.map((p) => p._id);
-      const attributedClause = Array.isArray(estateFilter)
-        ? { attributedEstateId: { $in: estateFilter } }
-        : { attributedEstateId: estateFilter };
-      const scopes = [attributedClause];
-      if (profileIds.length) scopes.push({ merchantProfileId: { $in: profileIds } });
-      filter.$or = scopes;
-    }
+    if (query.allocationState) filter.allocationState = query.allocationState;
+
+    // Estate-restricted users see ONLY receipts tied to their estate by exact reference
+    // allocation or a verified attribution. Membership of a shared merchant in the estate is
+    // deliberately NOT a predicate (it would leak every receipt of a shared PayBill/Till to every
+    // mapped estate). Unallocated receipts are visible only to the client-wide scope.
+    const scope = receiptScopeClause(estateFilter);
+    if (scope) Object.assign(filter, scope);
 
     const [items, total] = await Promise.all([
       MpesaTransaction.find(filter)
-        .select('merchantProfileId businessShortCode receiptNumber amountCents currency transactionAt billRefNumber transactionType sourceChannels verificationState conflictReason claimState postingState postedAt attributedEstateId createdAt')
+        .select('merchantProfileId businessShortCode receiptNumber amountCents currency transactionAt billRefNumber transactionType sourceChannels verificationState conflictReason claimState postingState postedAt attributedEstateId allocationState allocationReason allocatedEstateId createdAt')
         .sort({ transactionAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit)

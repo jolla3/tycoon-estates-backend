@@ -21,7 +21,13 @@ export const manualPaymentSchema = z.object({
   tenancyId: objectId.optional(),
 });
 
-export const manualOptionsQuerySchema = z.object({ houseId: objectId, period: periodString.optional() });
+export const manualOptionsQuerySchema = z.object({
+  houseId: objectId,
+  period: periodString.optional(),
+  page: z.coerce.number().int().min(1).max(10000).optional(),
+  limit: z.coerce.number().int().min(1).max(50).optional(),
+  search: z.string().trim().max(80).optional(),
+}).strict();
 
 router.get('/', authenticate, clientContext, paymentController.list);
 router.get(

@@ -16,10 +16,13 @@ const MpesaMerchantProfileSchema = new Schema(
       type: String,
       required: true,
       default: 'BUY_GOODS_TILL',
-      enum: ['BUY_GOODS_TILL'],
+      enum: ['PAYBILL', 'BUY_GOODS_TILL'],
     },
     displayName: { type: String, default: null },
     businessShortCode: { type: String, required: true },
+    // DEPRECATED legacy single-estate association. Not authoritative: the active
+    // MpesaMerchantProfileEstate mappings decide estate authorization. Kept until the
+    // backfill migration is verified; never read for authorization.
     estateId: { type: Schema.Types.ObjectId, ref: 'Estate', default: null },
     callbackCapability: {
       type: String,
@@ -47,6 +50,39 @@ const MpesaMerchantProfileSchema = new Schema(
       enum: ['NONE', 'REQUESTED', 'ACCEPTED', 'ALREADY_REGISTERED', 'REJECTED', 'UNCERTAIN'],
       default: 'NONE',
     },
+    // Registration evidence (no secrets). Written only by the explicit registration service.
+    c2bRegistration: {
+      type: new Schema({
+        environment: { type: String, default: null },
+        configId: { type: String, default: null },
+        configVersion: { type: String, default: null },
+        confirmationUrl: { type: String, default: null },
+        validationUrl: { type: String, default: null },
+        responseType: { type: String, default: null },
+        attemptedAt: { type: Date, default: null },
+        succeededAt: { type: Date, default: null },
+        providerResponseCode: { type: String, default: null },
+        providerConversationId: { type: String, default: null },
+      }, { _id: false }),
+      default: () => ({}),
+    },
+    pullRegistration: {
+      type: new Schema({
+        environment: { type: String, default: null },
+        configId: { type: String, default: null },
+        configVersion: { type: String, default: null },
+        callbackUrl: { type: String, default: null },
+        attemptedAt: { type: Date, default: null },
+        succeededAt: { type: Date, default: null },
+        providerResponseStatus: { type: String, default: null },
+      }, { _id: false }),
+      default: () => ({}),
+    },
+    // Merchant-KYC nominated MSISDN for Pull registration. Encrypted at rest; never
+    // returned by any API; only the registration service decrypts it.
+    pullNominatedMsisdnEncrypted: { type: String, default: null, select: false },
+    pullNominatedMsisdnMasked: { type: String, default: null },
+    pullNominatedMsisdnSetAt: { type: Date, default: null },
     lastC2bRegisteredAt: { type: Date, default: null },
     lastPullRegisteredAt: { type: Date, default: null },
     createdByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
@@ -56,9 +92,16 @@ const MpesaMerchantProfileSchema = new Schema(
 );
 
 /**
- * Unique {clientId, businessShortCode} is migration-controlled only.
- * autoIndex: false — schema declaration documents intent; boot must not install it.
+ * One owner per shortcode per provider. DARAJA_ENVIRONMENT is process-wide and one
+ * deployment uses one database, so no environment key is part of the index.
+ * Migration-controlled only; autoIndex: false so boot never installs it.
  */
+MpesaMerchantProfileSchema.index(
+  { provider: 1, businessShortCode: 1 },
+  { unique: true, name: 'uniq_provider_business_shortcode' }
+);
+// Legacy per-client index (superseded by the global ownership index above). It is no
+// longer required by readiness and is dropped only by an explicit, verified migration step.
 MpesaMerchantProfileSchema.index(
   { clientId: 1, businessShortCode: 1 },
   { unique: true, name: 'uniq_client_business_shortcode' }

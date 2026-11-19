@@ -12,6 +12,8 @@ export const MPESA_COLLECTIONS = {
   inbox: 'mpesaingestionevents',
   transactions: 'mpesatransactions',
   checkpoints: 'mpesapullcheckpoints',
+  profileEstates: 'mpesamerchantprofileestates',
+  references: 'mpesacollectionreferences',
 };
 
 /** Non-unique indexes required for normal G5 operation. Never unique. */
@@ -60,12 +62,44 @@ export const REQUIRED_OPERATIONAL_INDEXES = [
   },
 ];
 
+/** One owner per provider shortcode (aligned with the callback resolver's lookup scope). */
 export const MERCHANT_UNIQUE_INDEX = {
+  collection: MPESA_COLLECTIONS.merchant,
+  name: 'uniq_provider_business_shortcode',
+  key: { provider: 1, businessShortCode: 1 },
+  unique: true,
+};
+
+/** Superseded per-client index; not required, never relied on for ownership. */
+export const LEGACY_MERCHANT_UNIQUE_INDEX = {
   collection: MPESA_COLLECTIONS.merchant,
   name: 'uniq_client_business_shortcode',
   key: { clientId: 1, businessShortCode: 1 },
   unique: true,
 };
+
+export const PROFILE_ESTATE_UNIQUE_INDEX = {
+  collection: MPESA_COLLECTIONS.profileEstates,
+  name: 'uniq_mpesa_profile_estate',
+  key: { merchantProfileId: 1, estateId: 1 },
+  unique: true,
+};
+
+export const REFERENCE_UNIQUE_INDEXES = [
+  {
+    collection: MPESA_COLLECTIONS.references,
+    name: 'uniq_mpesa_ref_merchant_reference',
+    key: { merchantProfileId: 1, reference: 1 },
+    unique: true,
+  },
+  {
+    collection: MPESA_COLLECTIONS.references,
+    name: 'uniq_mpesa_ref_active_tenancy',
+    key: { merchantProfileId: 1, tenancyId: 1 },
+    unique: true,
+    partialFilterExpression: { status: 'ACTIVE' },
+  },
+];
 
 export const CHECKPOINT_UNIQUE_INDEX = {
   collection: MPESA_COLLECTIONS.checkpoints,
@@ -81,7 +115,9 @@ export function indexMatches(indexes, spec) {
     const keyOk = JSON.stringify(idx.key) === JSON.stringify(spec.key);
     const uniqueOk = Boolean(idx.unique) === Boolean(spec.unique);
     const nameOk = spec.name == null || idx.name === spec.name;
-    return keyOk && uniqueOk && nameOk;
+    const partialOk = JSON.stringify(idx.partialFilterExpression || null)
+      === JSON.stringify(spec.partialFilterExpression || null);
+    return keyOk && uniqueOk && nameOk && partialOk;
   });
 }
 
@@ -96,6 +132,8 @@ function emptyGates() {
     durableInbox: false,
     merchantOperationalQueries: false,
     merchantRegistration: false,
+    profileEstateMapping: false,
+    collectionReferences: false,
     canonicalQueryIndexes: false,
     canonicalReceiptIdentity: false,
     pullReconciliation: false,
@@ -158,6 +196,8 @@ export async function inspectMpesaIndexes() {
   report.collections[MPESA_COLLECTIONS.inbox] = await list(MPESA_COLLECTIONS.inbox);
   report.collections[MPESA_COLLECTIONS.transactions] = await list(MPESA_COLLECTIONS.transactions);
   report.collections[MPESA_COLLECTIONS.checkpoints] = await list(MPESA_COLLECTIONS.checkpoints);
+  report.collections[MPESA_COLLECTIONS.profileEstates] = await list(MPESA_COLLECTIONS.profileEstates);
+  report.collections[MPESA_COLLECTIONS.references] = await list(MPESA_COLLECTIONS.references);
 
   const gateOk = (gate) => REQUIRED_OPERATIONAL_INDEXES
     .filter((spec) => spec.gate === gate)
@@ -170,6 +210,14 @@ export async function inspectMpesaIndexes() {
     report.collections[MPESA_COLLECTIONS.merchant],
     MERCHANT_UNIQUE_INDEX,
   );
+  report.gates.profileEstateMapping = indexMatches(
+    report.collections[MPESA_COLLECTIONS.profileEstates],
+    PROFILE_ESTATE_UNIQUE_INDEX,
+  );
+  report.gates.collectionReferences = REFERENCE_UNIQUE_INDEXES.every((spec) => indexMatches(
+    report.collections[spec.collection],
+    spec,
+  ));
   report.gates.pullReconciliation = indexMatches(
     report.collections[MPESA_COLLECTIONS.checkpoints],
     CHECKPOINT_UNIQUE_INDEX,

@@ -4,6 +4,7 @@
 
 import { platformService } from '../services/platform.service.js';
 import { platformMpesaProfileService } from '../services/platformMpesaProfile.service.js';
+import { mpesaRegistrationService } from '../services/mpesa/mpesaRegistration.service.js';
 import { apiResponse } from '../utils/apiResponse.js';
 
 function meta(req) {
@@ -163,6 +164,57 @@ export const platformController = {
     } catch (err) {
       next(err);
     }
+  },
+
+  async mpesaCallbackConfig(req, res, next) {
+    try { apiResponse.success(res, platformMpesaProfileService.callbackConfig()); } catch (err) { next(err); }
+  },
+
+  async getMpesaProfile(req, res, next) {
+    try { apiResponse.success(res, await platformMpesaProfileService.get(req.params.clientId, req.params.profileId)); } catch (err) { next(err); }
+  },
+
+  async mapMpesaEstate(req, res, next) {
+    try {
+      apiResponse.success(res, await platformMpesaProfileService.addEstate(
+        req.params.clientId, req.params.profileId, req.body.estateId, req.currentUser, meta(req)));
+    } catch (err) { next(err); }
+  },
+
+  async unmapMpesaEstate(req, res, next) {
+    try {
+      apiResponse.success(res, await platformMpesaProfileService.removeEstate(
+        req.params.clientId, req.params.profileId, req.params.estateId, req.currentUser, meta(req)));
+    } catch (err) { next(err); }
+  },
+
+  async setMpesaPullNumber(req, res, next) {
+    try {
+      apiResponse.success(res, await platformMpesaProfileService.setPullNominatedNumber(
+        req.params.clientId, req.params.profileId, req.body.msisdn, req.currentUser, meta(req)));
+    } catch (err) { next(err); }
+  },
+
+  async registerMpesaC2b(req, res, next) {
+    try {
+      apiResponse.success(res, await mpesaRegistrationService.registerC2b({
+        clientId: req.params.clientId, profileId: req.params.profileId, actor: req.currentUser, reqMeta: meta(req) }));
+    } catch (err) { next(err); }
+  },
+
+  async registerMpesaPull(req, res, next) {
+    try {
+      apiResponse.success(res, await mpesaRegistrationService.registerPull({
+        clientId: req.params.clientId, profileId: req.params.profileId, actor: req.currentUser, reqMeta: meta(req) }));
+    } catch (err) { next(err); }
+  },
+
+  async reconcileMpesaRegistration(req, res, next) {
+    try {
+      apiResponse.success(res, await mpesaRegistrationService.reconcile({
+        clientId: req.params.clientId, profileId: req.params.profileId, kind: req.params.kind,
+        outcome: req.body.outcome, actor: req.currentUser, reqMeta: meta(req) }));
+    } catch (err) { next(err); }
   },
 
   async clientDiagnostics(req, res, next) {

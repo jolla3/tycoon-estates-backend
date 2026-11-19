@@ -14,6 +14,7 @@ export const mpesaTransactionListSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
   verificationState: z.enum(['UNVERIFIED', 'MATCHED', 'CONFLICT', 'MANUAL_REVIEW']).optional(),
   postingState: z.enum(['NOT_POSTED', 'PROCESSING', 'POSTED', 'FAILED_RETRYABLE', 'FAILED_TERMINAL']).optional(),
+  allocationState: z.enum(['UNALLOCATED', 'ALLOCATED_BY_REFERENCE', 'ALLOCATED_BY_EVIDENCE']).optional(),
   businessShortCode: z.string().trim().min(1).max(20).optional(),
   startDate: z.coerce.date().optional(),
   endDate: z.coerce.date().optional(),
