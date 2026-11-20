@@ -199,7 +199,8 @@ export async function postAllocatedReceipt({ transactionId, clientId, actorUserI
   });
 }
 
-async function executeFencedPosting({ txn, clientId, estateId, tenantId, actorUserId, ipAddress, evidence }) {
+/** Exported ONLY so replica-set tests can exercise the fence beneath postingGate(); never call from app code. */
+export async function executeFencedPosting({ txn, clientId, estateId, tenantId, actorUserId, ipAddress, evidence }) {
   const submission = evidence.type === 'SMS_SUBMISSION' ? evidence.submission : null;
   // Already fully posted receipt: never a second Payment.
   if (txn.postingState === 'POSTED') {

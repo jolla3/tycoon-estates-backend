@@ -450,3 +450,16 @@ Never returned: `credentialsRef`, encrypted account numbers/hashes, tokens, raw 
 - Job outcome telemetry is Redis/in-memory operational data, not financial truth; per-client job counts exist only for `bankSync`.
 - Audit queries on `userId`/`createdAt` rely on new non-unique indexes declared on the model; they are not created by this change at startup.
 - Provider-verified Co-op/Daraja readiness cannot be shown without a live-check mechanism that is out of scope.
+
+## G5.4 follow-up hardening (review round 2)
+
+| Area | Change | Evidence |
+|---|---|---|
+| Migration preflight | `analyzeIntegrity` verifies `Profile.clientId === Mapping.clientId === Estate.clientId`; reports `estate_missing`, `estate_client_mismatch`, `mapping_profile_missing`, `mapping_client_mismatch`, `duplicate_mapping_key`, `duplicate_reference_key`, `duplicate_active_tenancy_reference`, `reference_*_mismatch`, `shortcode_collision`. Any violation blocks `--execute`; nothing is repaired or backfilled. | unit: `migrationPreflight.test.js`; real-data: `g54.hardening` (NOT EXECUTED) |
+| Reference issuance | Requires `collectionReferences` readiness (503 `MPESA_REFERENCE_INDEXES_NOT_READY`). No `exists()` pre-check: unique indexes decide; duplicate-key classified by index (`active_tenancy` returns the winner, `reference` redraws). One transaction per attempt. | unit (mocked): `referenceIssuance.test.js`; races: `g54.hardening` (NOT EXECUTED) |
+| Manual payment | No candidate caps. Eligibility is one exact DB predicate (`eligibleTenancyFilter`, same boundaries as `tenancyPeriodEligibility`); resolution uses `limit(2)` as a decision bound; `eligibleTotal` is a count; tenant search is a `$lookup` + `$facet`. `period` must be `YYYY-MM`. | unit: `manualPaymentBeyondLimits.test.js` (1,000 tenancies, oldest eligible) |
+| Registration | Pull fails closed (`MPESA_PULL_ELIGIBILITY_UNVERIFIED`, 409) until `PULL_REGISTRATION_ELIGIBILITY[type].verified` is set with evidence. Token preflight before any REQUESTED claim; durable `*_REGISTRATION_SENDING` audit before the request; pre-send failure releases the claim and audits `*_NOT_SENT`; timeouts / post-send errors / 5xx are UNCERTAIN; REQUESTED/UNCERTAIN need operator reconcile. Success is registration evidence only. | unit: `registrationLifecycle.test.js` |
+| Receipt identity | Decision: not establishable from provider evidence; gate stays false. Evidence E1–E5 listed in `G5_DARAJA_C2B_PULL_EVIDENCE.md` §7. **G3 settlement from M-PESA is not complete while `postingGate()` rejects.** | `canonicalIdentityGate.test.js` |
+| Tenant references | `GET /api/mpesa/tenants/:tenantId/references?page&limit` (any MPESA role, estate-scoped, `Cache-Control: no-store`) and `POST` `{tenancyId, merchantProfileId}` (owner/admin). Rows are keyed by exact tenancy; retired references listed separately with `retiredCount`; `canIssue` only for an ACTIVE tenancy with no active reference. No SMS delivery added (see below). | unit: `tenantReferenceView.test.js` |
+
+Reference delivery: the existing protected SMS outbox is built for credentialed links and confirmations. Sending routing identifiers through it would add a new message type and dispatch path; this round deliberately provides an operator view with copy instead, and leaves SMS delivery as a separate, flag-gated decision.

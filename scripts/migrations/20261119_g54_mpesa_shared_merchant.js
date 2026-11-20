@@ -146,7 +146,7 @@ export function buildPlan({ analysis, indexesBySpec, execute }) {
 
 const CAP = 5000;
 
-async function inventory(db) {
+export async function collectInventory(db) {
   const profiles = db.collection('mpesamerchantprofiles');
   const mappingsCol = db.collection('mpesamerchantprofileestates');
   const refsCol = db.collection('mpesacollectionreferences');
@@ -203,7 +203,7 @@ async function main() {
   if (EXECUTE) assertConnectedTarget(mongoose.connection, expected);
   const db = mongoose.connection.db;
 
-  const inv = await inventory(db);
+  const inv = await collectInventory(db);
   const indexesBySpec = {};
   for (const spec of INDEX_SPECS) {
     const present = await db.collection(spec.collection).indexes().catch(() => []);
