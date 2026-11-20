@@ -5,13 +5,20 @@ import { authenticate } from '../middlewares/authenticate.js';
 import { authorize } from '../middlewares/authorize.js';
 import { clientContext } from '../middlewares/clientContext.js';
 import { requireProduct } from '../middlewares/requireProduct.js';
+import { validate } from '../middlewares/validate.js';
+import { z } from 'zod';
 
 const router = Router();
+const objectId = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid id');
+export const issueTenantReferenceSchema = z.object({ tenancyId: objectId, merchantProfileId: objectId }).strict();
+export const referencesQuerySchema = z.object({ page: z.coerce.number().int().min(1).optional(), limit: z.coerce.number().int().min(1).max(20).optional() }).strict();
 const base = [authenticate, clientContext, requireProduct('MPESA')];
 const admin = authorize('CLIENT_OWNER', 'CLIENT_ADMIN', 'SUPER_ADMIN');
 
 router.get('/tenants/:tenantId/account', ...base, c.account);
 router.get('/tenants/:tenantId/payments', ...base, c.payments);
+router.get('/tenants/:tenantId/references', ...base, validate(referencesQuerySchema, 'query'), c.references);
+router.post('/tenants/:tenantId/references', ...base, admin, validate(issueTenantReferenceSchema), c.issueReference);
 router.get('/tenants/:tenantId/link', ...base, admin, c.inspectLink);
 router.post('/tenants/:tenantId/link', ...base, admin, c.issueLink);
 router.post('/tenants/:tenantId/link/revoke', ...base, admin, c.revokeLink);

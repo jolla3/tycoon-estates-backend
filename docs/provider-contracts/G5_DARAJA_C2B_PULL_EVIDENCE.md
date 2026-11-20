@@ -117,3 +117,19 @@ The target data-model proposal and migration/receipt-visibility rules are in the
 - Pull registration eligibility, nominated number, Buy Goods Pull transaction-type fixture, pagination terminal semantics and full 48-hour entitlement remain unverified.
 - The exact canonical receipt identity and its unique index remain gated by B01/B02. G3 posting remains disabled.
 - No callback simulation, Pull registration, Pull query, production API request, migration, or G3 payment posting was performed as part of this correction.
+
+## 7. Canonical receipt identity decision (G5.4 follow-up)
+
+**Decision: NOT established. `gates.canonicalReceiptIdentity` stays hard-coded `false`; automatic posting stays disabled; G3 settlement from M-PESA is NOT complete.** `postingGate()` rejects with `CANONICAL_RECEIPT_IDENTITY_NOT_PROVEN` even when every other index is present (contract test `tests/unit/mpesa/canonicalIdentityGate.test.js`).
+
+The shared-shortcode redesign makes `{provider, businessShortCode, receiptNumber}` the natural candidate key, and the migration-controlled global shortcode owner index removes one prior ambiguity. That is still a *design* inference, not provider evidence. Outstanding evidence, each required before the gate may be derived from a real index:
+
+| # | Evidence required | Why |
+|---|---|---|
+| E1 | Official statement (or controlled production-grade observation) that C2B `TransID` / Pull `transactionId` is unique per shortcode, or globally, and that it is stable across retries | A wrong scope either merges two real payments (loss) or splits one (double credit) |
+| E2 | Proof that the C2B confirmation `TransID` and the Pull `transactionId` for the same payment are the same value | Callback/Pull convergence depends on it |
+| E3 | Behaviour for PayBill vs Buy Goods (same value space? `BusinessShortCode` vs Till/Store) and for Head Office / Store hierarchies (B01) | Determines whether shortcode is the right scope component |
+| E4 | Authenticated callback contract (callback authentication is unknown) | An unauthenticated callback cannot establish identity |
+| E5 | A migration-controlled unique index, its dry-run duplicate inventory on real data, and readiness verified on a replica set | Database constraint is the final authority |
+
+When E1–E5 exist: implement the migration (duplicate preflight blocking `--execute`), add the exact spec to `mpesaIndexReadiness.js`, derive the gate from it, and add conflict handling for duplicate-key on first insert. Do not remove the hard-coded blocker before then. PayBill allocation (reference routing) and Till evidence checks are implemented and tested, but they route/verify payments; they do not settle them while this gate is closed.
