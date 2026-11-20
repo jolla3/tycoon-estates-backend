@@ -1,41 +1,80 @@
 // src/services/banking/providers/coop/coop.client.js
-//
-// Thin axios wrapper: injects the Bearer token, generates
-// MessageReference (required + unique on every documented request body,
-// 1–27 chars), and centralizes the "MessageCode !== 0 is an error"
-// response convention shared by every Co-op Connect endpoint.
+// Thin axios wrapper. Does not log raw response bodies, tokens, or account numbers.
 
 import axios from 'axios';
 import crypto from 'crypto';
 import { Errors } from '../../../../utils/errors.js';
-import { isCoopSuccess } from './coop.schemas.js';
+import { isCoopSuccess, getCoopMessageCode } from './coop.schemas.js';
 import { logger } from '../../../../config/logger.js';
 
-/** 1–27 chars per the documented MessageReference constraint. */
 export function generateMessageReference() {
   return crypto.randomBytes(10).toString('hex').slice(0, 20);
 }
 
-export async function coopPost({ baseUrl, path, token, body, timeout = 15000 }) {
+/**
+ * @param {object} opts
+ * @param {boolean} [opts.allowNonSuccessMessageCode] when true, return body for caller classification
+ */
+export async function coopPost({
+  baseUrl,
+  path,
+  token,
+  body,
+  timeout = 15000,
+  allowNonSuccessMessageCode = false,
+}) {
+  if (
+    baseUrl
+    && !String(baseUrl).startsWith('https://')
+    && process.env.NODE_ENV !== 'test'
+    && process.env.JEST_WORKER_ID == null
+  ) {
+    throw Errors.BankProviderUnavailable('Co-op resource URL must use HTTPS');
+  }
+
   let response;
   try {
     response = await axios.post(`${baseUrl}${path}`, body, {
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
       timeout,
+      validateStatus: () => true,
     });
   } catch (err) {
-    if (err.response) {
-      logger.error({ path, status: err.response.status, data: err.response.data }, 'Co-op API call failed');
-      throw Errors.BankProviderUnavailable(`Co-op Bank returned HTTP ${err.response.status}`);
+    if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+      logger.warn({ path }, 'Co-op API timeout');
+      throw Errors.BankProviderUnavailable('Co-op Bank request timed out');
     }
-    logger.error({ path, error: err.message }, 'Co-op API call failed (network)');
+    logger.warn({ path, error: err.message }, 'Co-op API network failure');
     throw Errors.BankProviderUnavailable('Could not reach Co-op Bank');
   }
 
-  if (!isCoopSuccess(response.data)) {
-    logger.warn({ path, messageCode: response.data?.MessageCode, description: response.data?.MessageDescription }, 'Co-op returned a non-success MessageCode');
-    throw Errors.BankProviderUnavailable(response.data?.MessageDescription || 'Co-op Bank rejected the request');
+  const status = response.status;
+  if (status === 401 || status === 403) {
+    logger.warn({ path, status }, 'Co-op API authentication/authorization failure');
+    throw Errors.BankAuthFailed('Co-op Bank rejected the access token or scope');
+  }
+  if (status === 429) {
+    logger.warn({ path, status }, 'Co-op API rate limited');
+    throw Errors.BankProviderUnavailable('Co-op Bank rate limit exceeded');
+  }
+  if (status < 200 || status >= 300) {
+    logger.warn({ path, status }, 'Co-op API HTTP error');
+    throw Errors.BankProviderUnavailable(`Co-op Bank returned HTTP ${status}`);
   }
 
-  return response.data;
+  const data = response.data;
+  if (allowNonSuccessMessageCode) {
+    return data;
+  }
+
+  if (!isCoopSuccess(data)) {
+    const code = getCoopMessageCode(data);
+    logger.warn({ path, messageCode: code }, 'Co-op returned a non-success MessageCode');
+    throw Errors.BankProviderUnavailable('Co-op Bank rejected the request');
+  }
+
+  return data;
 }
