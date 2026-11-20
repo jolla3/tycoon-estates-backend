@@ -2,8 +2,8 @@
 
 **Status:** Architecture locked for implementation.  
 **Repository:** `jolla3/tycoon-estates-backend`  
-**Verified GitHub `main` HEAD:** `e0b49c2f122be7ae3ed14eaba9eecfeacee7ce13` (`v2.0.3`)  
-**Workspace baseline:** Diff-clean vs HEAD for `src/`, `tests/`, `scripts/`, package files.  
+**Verified GitHub `main` HEAD for this audit:** `25d9969eb4f1c734f360337f0a3d64b83d465a6a` (rechecked 2026-11-20)  
+**Audit baseline:** GitHub `main` at the commit above. Section 2 records the historical pre-G4 starting point, not the current as-built source.  
 **Requirements:** `PRD.md` · **Agent constraints:** `architecture-summary.md` · **Crosswalk:** `SOURCE_CROSSWALK.md`
 
 ## 1. Architecture objective and boundary
@@ -17,7 +17,7 @@ G4 introduces a connection-scoped, provider-neutral bank integration layer while
 
 MUST NOT introduce a second payment or ledger engine. Co-op is the only G4 adapter. Daraja/M-PESA is G5.
 
-## 2. Source baseline (VERIFIED at e0b49c2; recheck before coding)
+## 2. Historical source baseline (e0b49c2; original pre-G4 starting point)
 
 | Path | Observation | G4 treatment |
 |------|-------------|--------------|
@@ -354,9 +354,15 @@ The webhook has its separate `COOP_WEBHOOK_LAB_OVERRIDE=1` flag. That override i
 
 ### Synchronization entitlement semantics
 
-COOP's supported sync strategy is the FullStatement date-window strategy. The account `statement` entitlement authorizes that strategy; `poll` is not required when `statement` is true. The AccountTransactions list-polling path remains disabled because its item schema is not verified.
+**As-built mismatch requiring correction:** COOP's selected strategy is the FullStatement date-window strategy, but `bankSync.service.js` currently defines `hasBankSyncEntitlement()` as `poll === true || statement === true`. That generic OR allows a poll-only entitlement to authorize FullStatement. The implementation does revalidate the account and parent connection during sync, but its capability predicate is not resource-specific.
 
-The orchestration layer checks entitlement before acquiring the sync lease and revalidates it during the run. A statement entitlement must not be interpreted as authorization for an unverified list-polling strategy.
+Required authorization rule:
+- FullStatement date-window sync requires `statement === true`.
+- Manual date-range statement import also requires `statement === true`.
+- AccountTransactions list polling, only after stable transaction identity and response ordering are verified, requires `poll === true`.
+- A capability for one Co-op resource must never authorize another resource.
+
+The orchestration layer checks entitlement before acquiring the sync lease and revalidates it during the run. Preserve those checks while making them strategy-specific. The AccountTransactions polling path remains disabled until its schema/identity contract is verified.
 
 ### Callback credential scope
 
@@ -365,3 +371,117 @@ The current contract evidence supports a platform/application-level Co-op INS Ba
 ### Verification boundary
 
 Local unit, HTTP integration and Mongo concurrency results are recorded in `docs/G4_FINAL_IMPLEMENTATION_REVIEW.md`. They prove the tested local application behavior, not Co-op sandbox verification, provider certification, production key-management readiness or successful deployment migrations.
+
+
+## 17. Co-op Connect 2.0.0: current implementation audit and correction contract
+
+**Normative implementation reference:** [`docs/provider-contracts/COOP_CONNECT_2_0_0_ALIGNMENT.md`](docs/provider-contracts/COOP_CONNECT_2_0_0_ALIGNMENT.md). Do not treat the original source baseline or earlier password-grant comments in code as current provider truth.
+
+### 17.1 Identity and credential ownership (PRESERVE)
+
+There are two identifiers that happen to be named `clientId` in different domains:
+
+1. `BankConnection.clientId` / `BankCredential.clientId` is the Tycoon Client ObjectId. It comes from authenticated client context, owns the connection and binds the encrypted credential envelope.
+2. The Co-op OAuth client identifier is the bank-issued Consumer Key. It is credential material, not the Tycoon owner ID.
+
+The Tycoon ownership field, its ObjectId type, authorization boundary, AES-GCM associated-data binding, per-connection `credentialsRef`, and `credentialVersion` remain unchanged. The UI/API boundary must use unambiguous names (`consumerKey`, `consumerSecret`). The adapter may map these to OAuth terminology internally. Customer-supplied credential material MUST NOT be allowed to set the Tycoon owner.
+
+### 17.2 Authentication target
+
+The Co-op Connect 2.0.0 guide documents two ways of obtaining application credentials: a DCR example authenticated with registration-administrator credentials and returning an OAuth `clientId` / `clientSecret` pair, and a portal HOWTO that refers to generated Consumer Key / Consumer Secret (CK/SK). In the DCR sequence, the returned pair is then used for OAuth token acquisition. These are Co-op application credentials, never the Tycoon `BankConnection.clientId`.
+
+DCR is application setup, not ordinary Tycoon bank-account linking. The guide's `saasApp: true` flag does not establish whether one SaaS registration may access accounts belonging to multiple underlying customers, whether each Tycoon customer requires separate registration/consent, or how Co-op binds those accounts to each account holder. Do not ask a landlord for DCR administrator credentials and do not infer multi-customer account authorization from the SaaS flag. Obtain Co-op confirmation before production onboarding.
+
+The normal Tycoon connection workflow targets:
+
+- Consumer Key + Consumer Secret as the only required customer-supplied outbound credential pair.
+- HTTP Basic credentials formed from CK:SK.
+- A POST to the separately configured token URL with a form-style `grant_type=client_credentials` body.
+- No username/password fields in the normal connection form or mandatory provider credential schema.
+- No implicit password-grant fallback.
+
+The password grant is documented by Co-op; it is not inherently invalid. It is a distinct grant, and the supplied material does not establish that the account-enquiry resources used by Tycoon require it. Support it only behind an explicit resource-specific token-type decision backed by Co-op's OAuth2 Security / authorization documentation. Do not ask a landlord for retail internet/mobile banking credentials.
+
+**Token-method evidence conflict:** the PHP HOWTO uses POST and supplies the explicit `grant_type=client_credentials` body. Its snippet does not explicitly set a `Content-Type` header, although the body is form-style. The Java HOWTO shows GET with no explicit grant body. The Tycoon implementation target is POST with a form-urlencoded body because it is the clearest example containing the grant parameter; this is a selected implementation target, not sandbox-verified behaviour. Do not silently fall back to GET. Verify method, headers, body, required scope and accepted token type with Co-op.
+
+Do not infer client-credentials token TTL or refresh behaviour from the password-grant response containing `expires_in: 3600` and a `refresh_token`. Use validated response metadata; keep unknown lifecycle behaviour gated.
+
+Scopes are resource-specific. The generic `apim:subscribe apim:api_key` example is not proof of account-enquiry scopes. Do not guess, default, or make tenants type an arbitrary scope. Resolve scopes from the actual resource authorization declarations and configure them as reviewed provider/resource configuration. If the client-credentials sample obtains a token without an explicit scope, that alone does not prove the resulting token can invoke every subscribed resource.
+
+### 17.3 Endpoint and payload rules
+
+Use the exact operation paths in the Co-op 2.0.0 guide and the separate FullStatement OpenAPI. Keep token URL and API URLs separately configurable. The supplied enquiry samples use `developer.co-opbank.co.ke:8243`; the FullStatement OpenAPI names a separate sandbox server. Do not assume one host/base path applies to every environment and resource. Production URLs are not established by these sandbox/examples.
+
+- Account Validation: `POST /Enquiry/Validation/Account/1.0.0`; MessageCode `0` means valid and `-1` means invalid account number.
+- Account Transactions: `POST /Enquiry/AccountTransactions/1.0.0/Account`; the request sample sends `NoOfTransactions` as a string and describes a configurable limit with 500 as an example. The response sample includes account details, totals and transaction-enquiry rows.
+- **AccountTransactions is not a documented funds-transfer operation.** The guide's prose labels this snippet “Pesalink funds transfer request”, but the actual route is under `/Enquiry/AccountTransactions/` and the sample response is an account transaction enquiry. No funds-transfer request/response, debit instruction, beneficiary, consent or transfer status contract is established by this example. Do not implement outgoing transfers from this material.
+- The AccountTransactions item sample has `TransactionReference`, not `TransactionId`. The guide does not state that `TransactionReference` is unique or stable at account, provider, or connection scope. It also shows no transaction-item currency. Do not treat the reference as a proven idempotency key; keep polling disabled until identity and ordering guarantees are confirmed.
+- Mini Statement: `POST /Enquiry/MiniStatement/Account/1.0.0`; the supplied sample returns account/balance summary data and does not show a transaction array. Its top-level `Currency: KES` is an account-summary field, not evidence of a transaction-item currency mapping.
+- Full Statement: use the separate FullStatement OpenAPI operation/server and request shape. Use the FullStatement item mapper, not the generic AccountTransactions mapper.
+- Account Balance: the supplied materials do not establish the current code's `/AccountBalance` path. Keep the capability disabled until the exact resource path, request, response and authorization are supplied.
+
+The guide's Account Validation test-account examples include 11-digit numbers, while MiniStatement / AccountTransactions examples and the FullStatement schema include 14-character values. This is a source discrepancy, not a universal account-number rule. Verify accepted formats per operation with Co-op and encode only the verified rules. Keep account numbers as strings and preserve leading zeros.
+
+### 17.4 Response semantics and error classification
+
+Do not flatten every non-zero MessageCode into a generic provider outage. At minimum distinguish invalid parameter, invalid account, account authorization failure, missing/invalid token, wrong token type, resource subscription failure, insufficient scope, rate throttling, hard limits, temporarily blocked APIs, timeouts and transient backend unavailability.
+
+The guide's `-8` description varies by the surrounding resource example: it describes account/debit-account authorization failure, including a missing, invalid or account-not-belonging-to-the-API-consumer case. Treat it as an **account/resource authorization** failure, not as proof that the OAuth token itself is invalid. Confirm exact `-8` behaviour for each enabled enquiry resource with Co-op.
+
+Account Validation's invalid-account response is a business rejection, not a provider outage. The bank-service caller must require an explicit `valid === true` result before setting an account connected/validated. The provider adapter must classify MessageCode `-1` as invalid account and preserve the fail-closed behavior for all other failures. The current inner catch in `bank.service.connectAccount()` wraps every validation exception as `Errors.InvalidRequest`; correct it so only the explicit invalid-account result becomes a client input error. Token, scope, account authorization, rate-limit, timeout and upstream service errors must retain their typed categories. All classes of failure must prevent account persistence.
+
+### 17.5 Statement normalization
+
+`CoopBankProvider.getFullStatement()` currently uses `mapCoopPolledTransaction`, although `mapCoopFullStatementItem()` exists. The generic mapper reads fields such as `Amount` and `EventType`, which are not the documented FullStatement transaction shape. Scheduled sync has a remapping workaround; manual statement import calls `getFullStatement()` directly and does not receive that workaround.
+
+Correct the provider method so both manual and scheduled statement paths emit the same normalized transaction contract. Preserve `TransactionDate` separately from `ValueDate`, derive direction from `CreditAmount`/`DebitAmount` and/or documented C/D `TransactionType`, and require a stable transaction identifier. Do not weaken G3 normalized transaction validation or change the unique transaction index without a bank guarantee for ID uniqueness scope.
+
+### 17.6 Credential/token lifecycle
+
+`createBankProviderForConnection()` injects connection credentials correctly, but `getAdapterForConnection()` constructs a new adapter on each call. The token cache currently lives on the adapter's `CoopAuthService` instance, so it is discarded between normal banking requests. Implement a token manager/cache keyed by Tycoon BankConnection ID, credential version, grant type and effective scope/resource context. Reauthorization must invalidate only the matching connection/version. Do not share tokens by provider name and do not move plaintext credentials or tokens into an unapproved global store.
+
+Validate the token response. Do not silently assume a 3600-second lifetime for the client-credentials grant because the 3600 example belongs to the password-grant response. Use a returned and validated `expires_in`; treat absent or malformed token metadata explicitly. Persist the actual expiry hint to `BankConnection.authMeta.tokenExpiresAt` where available. Do not assume refresh-token issuance or behavior for client credentials from the separate password-grant sample.
+
+### 17.7 Inbound INS is a different trust boundary
+
+`COOP_INS_BASIC_SECRET` is the inbound callback verifier currently configured at platform level. It is not the outbound CK/SK pair and must not be collected in the customer connection form. The supplied Connect guide does not provide callback registration, retry, or exact credential-placement rules. Keep callback readiness gated.
+
+The current webhook normalization stores the full raw body, including its optional `Basic` field, as `BankTransaction.rawPayload`. Redact that field before persistence and quarantine. Do not store callback credentials in transaction data or logs.
+
+### 17.8 Capability and readiness rules
+
+A registered method is not an enabled capability. The current registry marks Balance as implemented and account-link entitlements are derived from registry booleans even while balance/webhook readiness is unverified. Do not activate unverified Balance or callback entitlements. AccountTransactions polling remains disabled; Balance remains disabled pending its resource contract; MiniStatement is not a transaction feed based on the supplied sample. Preserve the overall Co-op `operationalReady=false` gate until sandbox tests and provider authorization evidence exist.
+
+## 18. Effective connection state, direct statement import and callback authorization
+
+### 18.1 Parent connection lifecycle
+
+BankConnection.status and BankAccount.connectionStatus are independent state machines. The account field records the account's own link/validation state; it must not be overloaded to represent whether its parent OAuth connection is active.
+
+As built, connectionService.disconnect() updates only BankConnection.status. Linked BankAccounts retain connectionStatus connected and their previous entitlement flags. Add an explicit effective state for each account, either as a safe derived DTO field such as parentConnectionStatus or through another deterministic projection. A child account with a missing, disconnected, failed or reauthorization-required parent is not operational regardless of stale child flags.
+
+### 18.2 Every operation must verify its parent
+
+- Sync already checks the current parent connection before each page and before accepting the page. Preserve this behavior and its fencing tests.
+- Manual statement import currently checks the parent connection before the provider request, but it does not repeat the check before ingestNormalizedTransactionBatch(). Re-read the parent and verify same client, provider and active status after the provider response and immediately before ingestion. Apply the provider readiness/lab gate here too; a stale statement entitlement must not bypass it.
+- The inbound webhook currently finds a BankAccount by provider/account hash and checks webhookIngest, but does not verify BankAccount.connectionId against an active BankConnection owned by the same client. Add this check before normalization/ingestion. A callback after disconnect must be rejected or quarantined without creating a transaction.
+- On parent disconnect, the effective status must become unavailable immediately. A cascade to child records is optional; if chosen, avoid partial non-atomic state and preserve the account's own link/validation meaning.
+
+### 18.3 Resource-specific operation capability
+
+The present COOP sync strategy is FullStatement window retrieval. Require statement === true for that strategy; do not allow poll === true to substitute. Reserve poll for a future AccountTransactions strategy. Manual statement import also requires statement === true plus provider readiness/lab authorization. Balance and webhook account entitlements remain false for production until their own resource/callback contracts and readiness gates are verified.
+
+### 18.4 Create and reauthorization result semantics
+
+connectionController.create() always returns HTTP 201 when connectionService.create() returns. That service deliberately returns a persisted status=failed connection after initial authentication failure. API clients must inspect the returned status; 201 alone is not an authorization success. Reauthorization preserves the prior credential version on failed staged authentication, but the current service replaces the original cause with a generic BankAuthFailed. Preserve a sanitized stable error code/category for the frontend while never exposing credentials, tokens or raw response bodies.
+
+### 18.5 Acceptance tests
+
+- A poll-only account cannot start or complete FullStatement sync.
+- A statement-entitled account can use FullStatement only when the parent connection is active and the environment readiness/lab gate allows it.
+- Manual statement import rejects when readiness is false outside the explicit lab policy.
+- Disconnect during a manual statement request prevents the response from being ingested.
+- Webhook after disconnect, missing parent, wrong client, wrong provider or inactive parent does not ingest.
+- Effective BankAccount DTOs distinguish account link state from parent connection status.
+- HTTP 201 + connection status failed is rendered as resource-created/authentication-failed, not authorized.
+- Reauthorization failure preserves the prior credentials/version and returns a safe typed failure.
