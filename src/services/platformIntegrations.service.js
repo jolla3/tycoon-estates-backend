@@ -17,6 +17,7 @@ import { BankConnection } from '../models/BankConnection.js';
 import { BankAccount } from '../models/BankAccount.js';
 import { MpesaMerchantProfile } from '../models/MpesaMerchantProfile.js';
 import { MpesaIngestionEvent } from '../models/MpesaIngestionEvent.js';
+import { PULL_REGISTRATION_ELIGIBILITY } from './mpesa/daraja.constants.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 export const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -113,6 +114,8 @@ export function safeMerchantProfile(p, evidence, mappings) {
     pullRegistration: reg(p.pullRegistration),
     pullNominatedNumber: { captured: Boolean(p.pullNominatedMsisdnMasked), masked: p.pullNominatedMsisdnMasked || null },
     lastPullRegisteredAt: p.lastPullRegisteredAt || null,
+    // Registration is blocked until provider evidence exists for this merchant type (fail closed).
+    pullRegistrationEligible: Boolean(PULL_REGISTRATION_ELIGIBILITY[p.merchantType]?.verified),
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
     ...(mappings ? { estates: mappings.map((m) => ({ estateId: String(m.estateId), status: m.status })) } : {}),

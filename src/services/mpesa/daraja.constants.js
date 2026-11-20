@@ -84,3 +84,14 @@ export const ALLOCATION_STATE = Object.freeze({
   BY_REFERENCE: 'ALLOCATED_BY_REFERENCE',
   BY_EVIDENCE: 'ALLOCATED_BY_EVIDENCE',
 });
+
+/**
+ * Pull registration eligibility per merchant type. FAIL CLOSED: a type is eligible only when
+ * official provider evidence or a controlled sandbox observation is recorded here, in code review,
+ * with a reference. Nothing is inferred (B01/B03). The supplied portal text says the shortcode must
+ * be live in production; no Pull registration has ever been observed for either type.
+ */
+export const PULL_REGISTRATION_ELIGIBILITY = Object.freeze({
+  [MERCHANT_TYPE.PAYBILL]: Object.freeze({ verified: false, evidence: null }),
+  [MERCHANT_TYPE.BUY_GOODS_TILL]: Object.freeze({ verified: false, evidence: null }),
+});
