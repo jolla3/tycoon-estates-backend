@@ -5,7 +5,7 @@ export function getCoopCapabilityProfile() {
     name: 'COOP',
     adapterPresent: true,
     implemented: true,
-    operationalReady: false, // overall: live auth/sandbox not verified in this environment
+    operationalReady: false,
     capabilities: {
       authenticate: {
         adapterPresent: true,
@@ -15,16 +15,18 @@ export function getCoopCapabilityProfile() {
         sandboxVerified: false,
         operationalReady: false,
         blockers: ['oauth_scope_and_token_lifecycle_unverified', 'sandbox_not_verified'],
-        evidenceNote: 'Password grant implemented against portal-shaped /token; scopes/TTL not project-verified',
+        evidenceNote:
+          'CK/SK client_credentials implemented; scopes/TTL not project-verified against sandbox',
       },
       accountValidation: {
         adapterPresent: true,
-        contractVerified: false,
+        contractVerified: true,
         capabilityImplemented: true,
         credentialsConfigurable: true,
         sandboxVerified: false,
         operationalReady: false,
-        blockers: ['response_semantics_unverified', 'sandbox_not_verified'],
+        blockers: ['sandbox_not_verified'],
+        evidenceNote: 'MessageCode 0 / -1 semantics implemented; fail-closed on unknown codes',
       },
       polling: {
         adapterPresent: true,
@@ -34,7 +36,7 @@ export function getCoopCapabilityProfile() {
         sandboxVerified: false,
         operationalReady: false,
         blockers: ['accounttransactions_item_schema_unverified'],
-        evidenceNote: 'AccountTransactions list item schema not expanded in verified docs',
+        evidenceNote: 'AccountTransactions item identity/uniqueness not verified',
       },
       statementImport: {
         adapterPresent: true,
@@ -44,16 +46,18 @@ export function getCoopCapabilityProfile() {
         sandboxVerified: false,
         operationalReady: false,
         blockers: ['sandbox_not_verified'],
-        evidenceNote: 'FullStatement date-window path implemented; TransactionDate vs ValueDate preserved',
+        evidenceNote:
+          'FullStatement date-window path uses mapCoopFullStatementItem; TransactionDate vs ValueDate preserved',
       },
       balance: {
-        adapterPresent: true,
+        adapterPresent: false,
         contractVerified: false,
-        capabilityImplemented: true,
+        capabilityImplemented: false,
         credentialsConfigurable: true,
         sandboxVerified: false,
         operationalReady: false,
-        blockers: ['sandbox_not_verified'],
+        blockers: ['endpoint_not_verified'],
+        evidenceNote: 'Balance remains disabled pending verified resource documentation',
       },
       webhook: {
         adapterPresent: true,
@@ -63,7 +67,7 @@ export function getCoopCapabilityProfile() {
         sandboxVerified: false,
         operationalReady: false,
         blockers: ['callback_retry_ack_unverified', 'auth_limited_to_basic_shared_secret'],
-        evidenceNote: 'SendTransactionINS mapping exists; verification is Basic shared secret only',
+        evidenceNote: 'SendTransactionINS mapping exists; Basic shared secret only',
       },
     },
     evidenceNote: 'See docs/provider-contracts/CONTRACT_EVIDENCE.md',
