@@ -2,7 +2,7 @@
 
 **Status:** Architecture locked for implementation. Documentation is the implementation contract.  
 **Repository:** `jolla3/tycoon-estates-backend`  
-**Verified GitHub `main` HEAD (rechecked):** `e0b49c2f122be7ae3ed14eaba9eecfeacee7ce13` (`v2.0.3`, 2026-11-10 20:14:31 +0300)  
+**Verified GitHub `main` HEAD for this audit:** `25d9969eb4f1c734f360337f0a3d64b83d465a6a` (rechecked 2026-11-20)  
 **Workspace baseline:** Matches HEAD `src/`, `tests/`, `scripts/`, `package.json`, `package-lock.json` (diff clean).  
 **Historical G3 reference:** `1c93f0ed71ca45620ddc238f98fd6391b5a1f054` (`v2.0.1`)  
 **Full requirements:** `PRD.md`  
@@ -27,7 +27,7 @@ G4 builds a **provider-neutral, multi-client** bank integration foundation:
 3. Never destructive-reset local work to force-match GitHub.
 4. If HEAD advances, stop and report impact before coding on a stale baseline.
 
-## 3. Verified current source snapshot (`e0b49c2`)
+## 3. Historical source snapshot (`e0b49c2`; original pre-G4 baseline)
 
 | Fact | Path |
 |------|------|
@@ -130,3 +130,17 @@ Documentation lock ≠ implementation complete. Each phase needs exit evidence. 
 - COOP FullStatement sync accepts `statement` entitlement; the unverified AccountTransactions polling path remains disabled. Entitlements are checked again during the run.
 - Inbound INS Basic remains platform/application-level according to current contract evidence, not per-connection.
 - Local regression, HTTP integration and Mongo concurrency evidence is recorded in the final implementation review. None of it substitutes for provider sandbox verification.
+
+
+## 9. Co-op Connect 2.0.0 correction rules (READ BEFORE BANKING CHANGES)
+
+Full evidence and file-by-file requirements: [`docs/provider-contracts/COOP_CONNECT_2_0_0_ALIGNMENT.md`](docs/provider-contracts/COOP_CONNECT_2_0_0_ALIGNMENT.md).
+
+- **Never confuse IDs:** `BankConnection.clientId` is the Tycoon Client ObjectId from authenticated client context. Co-op OAuth `clientId` is the bank-issued Consumer Key inside encrypted credential material. Preserve Tycoon ownership; rename UI/API credential fields to `consumerKey` / `consumerSecret`.
+- Normal customer onboarding accepts CK/SK only. The Co-op guide documents a CK/SK `client_credentials` token request. Password grant is also documented but is not the default and is not proven necessary for the resources Tycoon calls. Do not require username/password or ask for a retail banking login.
+- Token POST URL and API resource URLs are separate configuration. Use exact documented versioned paths; never invent endpoint suffixes or scopes. The generic `apim:subscribe apim:api_key` sample is not proof of account-enquiry scope.
+- Account Validation: `/Enquiry/Validation/Account/1.0.0`; MessageCode `0` valid, `-1` invalid. Invalid account is not provider outage; only `valid === true` can activate an account.
+- FullStatement must map its documented `CreditAmount` / `DebitAmount` / C-D / `TransactionId` item shape consistently for manual and scheduled imports. Do not weaken G3 validation or idempotency.
+- AccountTransactions polling stays disabled until the transaction identifier is proved stable and its item mapping is verified. MiniStatement's supplied sample has balances and no transaction list. Balance endpoint path is still unverified.
+- Never persist inbound INS `Basic` credential in rawPayload/quarantine/logs. It is distinct from outbound CK/SK.
+- Keep Co-op `operationalReady=false` until token/resource scopes, endpoint contracts, sandbox behavior and callback gates have evidence. Detailed acceptance tests and blocked questions are in the linked audit.

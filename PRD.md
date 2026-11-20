@@ -2,8 +2,8 @@
 
 **Status:** Architecture locked for implementation.  
 **Repository:** `jolla3/tycoon-estates-backend`  
-**Verified GitHub `main` HEAD:** `e0b49c2f122be7ae3ed14eaba9eecfeacee7ce13` (`v2.0.3`)  
-**Workspace:** Matches HEAD (`diff` clean for `src/`, `tests/`, `scripts/`, package files).  
+**Verified GitHub `main` HEAD for this audit:** `25d9969eb4f1c734f360337f0a3d64b83d465a6a` (rechecked 2026-11-20)  
+**Audit baseline:** GitHub `main` at the commit above. The earlier `e0b49c2` source inventory below is historical and is not the current as-built implementation.  
 **Programme:** After G3 (tenancy-aware accounting); before G5 (Daraja/M-PESA).
 
 > GitHub is authoritative. Fetch and inspect current `main` HEAD before planning or changing code.
@@ -52,7 +52,7 @@ Only COOP is implemented. Unimplemented providers MUST NOT be connectable or adv
 - Frontend implementation in this repository.
 - Cross-client account transfer as an ordinary product flow.
 
-## 3. Verified source observations (`e0b49c2`)
+## 3. Historical source observations (`e0b49c2`; original pre-G4 baseline)
 
 - No `BankConnection` model.
 - `BankAccount`: unique `{provider, accountNumberHash}`; `connectionStatus` pending/connected/failed; `lastSyncedAt`.
@@ -248,3 +248,38 @@ No frontend source in this backend repository. G4 defines backend HTTP contracts
 - Lab mode does not bypass credential authentication, account validation, tenant ownership, callback authentication, quarantine or shared transaction ingestion.
 - The inbound Co-op INS Basic credential remains platform/application-level under the currently documented provider evidence. Do not represent it as a per-connection credential.
 - Sandbox verification remains outstanding. Passing local tests is not evidence of a successful provider sandbox session or production approval.
+
+
+## 14. Co-op Connect 2.0.0 contract alignment (mandatory)
+
+**Current implementation status: NOT YET CORRECTED.** The current code and the existing frontend review branch still implement a mandatory password-grant credential form. Co-op Connect 2.0.0 also documents a Consumer Key/Consumer Secret `client_credentials` flow. The customer-facing connection workflow must be aligned to the latter unless the authorization section for a specific resource explicitly requires an application-user token.
+
+The detailed, file-by-file, evidence-backed change specification is maintained in [`docs/provider-contracts/COOP_CONNECT_2_0_0_ALIGNMENT.md`](docs/provider-contracts/COOP_CONNECT_2_0_0_ALIGNMENT.md). That document is normative for implementation and records the current source behavior, mistaken assumptions, exact change, tests, and unresolved provider gates. Do not implement from this summary alone.
+
+### Locked identity distinction
+
+- `BankConnection.clientId` and `BankCredential.clientId` are Tycoon ownership identifiers. They are populated from the authenticated `req.clientId` / client context and bind credentials to the owning Tycoon Client.
+- Co-op's OAuth `clientId` is the Co-op-issued Consumer Key (CK). It is credential material inside the connection, not the Tycoon owner ID.
+- Co-op's OAuth `clientSecret` is the Co-op-issued Consumer Secret (SK).
+- Never rename, overwrite, accept from request body, or derive the Tycoon `clientId` from Co-op credential fields. The Co-op OAuth fields should be named `consumerKey` and `consumerSecret` at the UI/API boundary, or explicitly mapped to provider-internal OAuth names.
+
+### Required product and implementation corrections
+
+| Requirement | Required outcome |
+|---|---|
+| G4-COOP-AUTH-001 | Normal customer connection create/reauthorize accepts CK/SK only. Username/password are not mandatory and are not collected as ordinary bank-login credentials. |
+| G4-COOP-AUTH-002 | Default outbound token grant is `client_credentials`, using HTTP Basic CK:SK and a form-urlencoded `grant_type=client_credentials` body. |
+| G4-COOP-AUTH-003 | Password grant is not called by default. It remains an explicitly gated alternative only when a target API resource's authorization contract requires an application-user token. |
+| G4-COOP-AUTH-004 | Scopes are not guessed or copied from the generic `apim:subscribe apim:api_key` example. Resolve exact resource scopes from Co-op OAuth2 Security/resource authorization documentation before enabling scope-restricted calls. |
+| G4-COOP-API-001 | Configure token URL and API resource URLs independently. Use exact documented versioned resource paths; do not concatenate guessed endpoint names. |
+| G4-COOP-VAL-001 | Account Validation handles MessageCode `0` as valid and `-1` as invalid-account rejection. Other authorization, scope, throttling and provider failures retain distinct classifications. |
+| G4-COOP-STM-001 | FullStatement uses its documented transaction mapper for both manual import and scheduled synchronization. |
+| G4-COOP-POLL-001 | AccountTransactions polling remains disabled until the stable transaction identity and endpoint-specific response contract are verified. |
+| G4-COOP-SEC-001 | The inbound INS Basic callback credential is kept distinct from outbound CK/SK and must never be persisted in transaction rawPayload or quarantine content. |
+| G4-COOP-READY-001 | A method or registry flag is not proof of operational readiness. Unverified Balance, MiniStatement, polling and callback capabilities remain disabled or explicitly non-operational. |
+
+### Evidence and acceptance rule
+
+The Co-op Connect 2.0.0 guide confirms DCR grant registration for `client_credentials`, `password`, and `refresh_token`, and separately demonstrates the CK/SK-only `client_credentials` token request. It does **not** prove that every resource accepts the same grant or the same scope. Error `900905` explicitly warns that a resource can reject the wrong access-token type.
+
+Do not mark this work complete until the implementation and tests in the detailed alignment document pass. Local tests do not replace Co-op sandbox verification. Overall Co-op `operationalReady` remains false until the provider gates are closed with evidence.
