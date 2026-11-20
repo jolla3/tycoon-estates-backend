@@ -1,53 +1,52 @@
 // src/services/banking/providers/coop/coop.provider.js
-//
-// Implements BankProviderInterface for Co-operative Bank of Kenya against
-// the ACTUAL Co-op Connect 2.0.0 documentation (replacing the earlier
-// version's invented generic-REST endpoints). Covers:
-//   - AccountTransactions    (recent transactions)
-//   - AccountFullStatement   (historical / date-range sync & reconciliation)
-//   - AccountBalance
-//   - AccountValidation      (used when connecting/verifying an account)
-//   - SendTransactionINS     (Co-op -> our webhook; see verifyWebhookSignature)
-//
-// Deliberately NOT implemented (out of scope for a payment-monitoring
-// system, per the V2 brief): IFTAccountToAccount, PesaLinkSendToAccount,
-// PesaLinkSendToPhone, SendToMPesa, TransactionStatus, ExchangeRate.
+// Co-op Connect 2.0.0 adapter — versioned Enquiry paths, CK/SK auth,
+// explicit Account Validation semantics, FullStatement canonical mapping.
+// Balance and AccountTransactions polling remain non-operational.
 
 import { BankProviderInterface } from '../../bank.interface.js';
 import { CoopAuthService } from './coop.auth.js';
 import { coopPost, generateMessageReference } from './coop.client.js';
 import {
-  AccountTransactionsRequest,
   AccountFullStatementRequest,
-  AccountBalanceRequest,
   AccountValidationRequest,
+  getCoopMessageCode,
 } from './coop.schemas.js';
-import { mapCoopWebhookNotification, mapCoopPolledTransaction, extractAccountNumber } from './coop.mapper.js';
+import {
+  mapCoopWebhookNotification,
+  mapCoopFullStatementItem,
+} from './coop.mapper.js';
 import { env } from '../../../../config/environment.js';
 import { encryptionUtil } from '../../../../utils/encryption.js';
 import { logger } from '../../../../config/logger.js';
+import { Errors } from '../../../../utils/errors.js';
 
-const ENDPOINTS = {
-  ACCOUNT_TRANSACTIONS: '/AccountTransactions',
-  ACCOUNT_FULL_STATEMENT: '/AccountFullStatement',
-  ACCOUNT_BALANCE: '/AccountBalance',
-  ACCOUNT_VALIDATION: '/AccountValidation',
+export const COOP_RESOURCE_PATHS = {
+  ACCOUNT_VALIDATION: '/Enquiry/Validation/Account/1.0.0',
+  ACCOUNT_TRANSACTIONS: '/Enquiry/AccountTransactions/1.0.0/Account',
+  MINI_STATEMENT: '/Enquiry/MiniStatement/Account/1.0.0',
+  ACCOUNT_FULL_STATEMENT: '/Enquiry/FullStatement/Account/1.0.0',
 };
 
 export class CoopBankProvider extends BankProviderInterface {
   constructor(config = {}) {
     super();
-    // baseUrl is platform endpoint config (not customer secret).
     this.baseUrl = config.baseUrl || env.COOP_BASE_URL;
-    // Customer credential fields: connection-scoped only. No env fallback
-    // for clientId/secret/username/password/scope/ins secret on customer paths.
+    this.tokenUrl =
+      config.tokenUrl
+      || env.COOP_TOKEN_URL
+      || (this.baseUrl ? `${String(this.baseUrl).replace(/\/$/, '')}/token` : null);
+
+    const consumerKey = config.consumerKey ?? config.clientId;
+    const consumerSecret = config.consumerSecret ?? config.clientSecret;
+
     this.auth = new CoopAuthService({
-      baseUrl: this.baseUrl,
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-      username: config.username,
-      password: config.password,
-      scope: config.scope,
+      tokenUrl: this.tokenUrl,
+      consumerKey,
+      consumerSecret,
+      // Scope only from trusted config — never customer form input.
+      scope: config.scope || env.COOP_SCOPE || null,
+      connectionId: config.connectionId || null,
+      credentialVersion: config.credentialVersion || null,
     });
     this.insBasicSecret = config.insBasicSecret;
     this.connectionId = config.connectionId || null;
@@ -62,18 +61,10 @@ export class CoopBankProvider extends BankProviderInterface {
     return this.auth.getAccessToken();
   }
 
-  async getTransactions(bankAccount, { noOfTransactions = 50 } = {}) {
-    const token = await this.authenticate();
-    const accountNumber = encryptionUtil.decrypt(bankAccount.accountNumberEncrypted);
-
-    const requestBody = AccountTransactionsRequest.parse({
-      MessageReference: generateMessageReference(),
-      AccountNumber: accountNumber,
-      NoOfTransactions: noOfTransactions,
-    });
-
-    const data = await coopPost({ baseUrl: this.baseUrl, path: ENDPOINTS.ACCOUNT_TRANSACTIONS, token, body: requestBody });
-    return (data.Transactions || []).map(mapCoopPolledTransaction);
+  async getTransactions() {
+    throw Errors.Conflict(
+      'Co-op AccountTransactions polling is not operational until the item schema is verified'
+    );
   }
 
   async getFullStatement(bankAccount, startDate, endDate) {
@@ -87,65 +78,75 @@ export class CoopBankProvider extends BankProviderInterface {
       EndDate: endDate,
     });
 
-    const data = await coopPost({ baseUrl: this.baseUrl, path: ENDPOINTS.ACCOUNT_FULL_STATEMENT, token, body: requestBody, timeout: 20000 });
-    return (data.Transactions || []).map(mapCoopPolledTransaction);
+    const data = await coopPost({
+      baseUrl: this.baseUrl,
+      path: COOP_RESOURCE_PATHS.ACCOUNT_FULL_STATEMENT,
+      token,
+      body: requestBody,
+      timeout: 20000,
+    });
+
+    const items = Array.isArray(data.Transactions) ? data.Transactions : [];
+    return items.map(mapCoopFullStatementItem);
   }
 
-  async getAccountBalance(bankAccount) {
-    const token = await this.authenticate();
-    const accountNumber = encryptionUtil.decrypt(bankAccount.accountNumberEncrypted);
-
-    const requestBody = AccountBalanceRequest.parse({ MessageReference: generateMessageReference(), AccountNumber: accountNumber });
-    const data = await coopPost({ baseUrl: this.baseUrl, path: ENDPOINTS.ACCOUNT_BALANCE, token, body: requestBody });
-
-    return {
-      balance: data.ClearedBalance,
-      bookedBalance: data.BookedBalance,
-      availableBalance: data.AvailableBalance,
-      currency: data.Currency || 'KES',
-      accountName: data.AccountName,
-    };
+  async getAccountBalance() {
+    throw Errors.Conflict('Co-op Account Balance is not operationally enabled');
   }
 
-  /** Used when connecting/verifying a bank account (section 12) — confirms the account number is real before we start expecting payments on it. */
+  /**
+   * MessageCode 0 = valid; -1 = invalid account.
+   * Unknown/missing codes fail closed (provider unavailable), not INVALID_REQUEST.
+   */
   async validateAccount(bankAccount) {
     const token = await this.authenticate();
     const accountNumber = encryptionUtil.decrypt(bankAccount.accountNumberEncrypted);
 
-    const requestBody = AccountValidationRequest.parse({ MessageReference: generateMessageReference(), AccountNumber: accountNumber });
-    const data = await coopPost({ baseUrl: this.baseUrl, path: ENDPOINTS.ACCOUNT_VALIDATION, token, body: requestBody });
-    return { valid: true, raw: data };
+    const requestBody = AccountValidationRequest.parse({
+      MessageReference: generateMessageReference(),
+      AccountNumber: accountNumber,
+    });
+
+    const data = await coopPost({
+      baseUrl: this.baseUrl,
+      path: COOP_RESOURCE_PATHS.ACCOUNT_VALIDATION,
+      token,
+      body: requestBody,
+      allowNonSuccessMessageCode: true,
+    });
+
+    const code = getCoopMessageCode(data);
+    if (code === '0') {
+      return { valid: true, messageCode: code };
+    }
+    if (code === '-1') {
+      return { valid: false, messageCode: code };
+    }
+
+    logger.warn(
+      { messageCode: code, connectionId: this.connectionId },
+      'Co-op Account Validation returned unexpected MessageCode'
+    );
+    throw Errors.BankProviderUnavailable(
+      'Co-op Account Validation returned an unexpected response'
+    );
   }
 
-  /**
-   * IMPORTANT CORRECTION from the earlier version: the supplied Co-op
-   * docs do NOT document a REST call for "register my webhook URL with
-   * Co-op". SendTransactionINS describes what CO-OP SENDS TO US, not
-   * something we POST to register. Subscribing an account to INS
-   * notifications and configuring the callback URL appears to be a
-   * developer-portal / account-manager step on Co-op's side, not an API
-   * call this codebase can make. This method is intentionally a no-op
-   * that says so, rather than fabricating a fake registration endpoint.
-   */
-  async registerTransactionNotification(_bankAccount) {
+  async registerTransactionNotification() {
     logger.warn(
-      'registerTransactionNotification() is a no-op: the supplied Co-op Connect docs show no REST endpoint for registering an INS callback URL. ' +
-        'Confirm with Co-op (openbankingcustomersupport@co-opbank.co.ke) whether this is configured via their developer portal or requires a manual account-manager request.'
+      'registerTransactionNotification() is a no-op: Co-op Connect docs show no REST registration endpoint'
     );
     return { registered: false, reason: 'not_documented_as_an_api_call' };
   }
 
   normalizeTransaction(raw) {
-    return mapCoopWebhookNotification(raw);
+    const safe = { ...raw };
+    if (Object.prototype.hasOwnProperty.call(safe, 'Basic')) {
+      safe.Basic = '[redacted]';
+    }
+    return mapCoopWebhookNotification(safe);
   }
 
-  /**
-   * SendTransactionINS's own schema lists "Basic" as both a header
-   * parameter ("Basic Auth Endpoint Credential") AND a body field ("Basic
-   * Auth Credential") — the doc doesn't disambiguate which one Co-op
-   * actually sends in practice, so this checks both against
-   * COOP_INS_BASIC_SECRET and accepts either.
-   */
   verifyWebhookSignature(req) {
     if (!this.insBasicSecret) {
       logger.warn('COOP_INS_BASIC_SECRET is not configured — rejecting all Co-op webhook calls');
