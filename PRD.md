@@ -248,3 +248,17 @@ No frontend source in this backend repository. G4 defines backend HTTP contracts
 - Lab mode does not bypass credential authentication, account validation, tenant ownership, callback authentication, quarantine or shared transaction ingestion.
 - The inbound Co-op INS Basic credential remains platform/application-level under the currently documented provider evidence. Do not represent it as a per-connection credential.
 - Sandbox verification remains outstanding. Passing local tests is not evidence of a successful provider sandbox session or production approval.
+## Co-op Connect 2.0.0 implementation requirements — 2026-11-20
+
+The Co-op adapter is the first provider implementation of the existing G4 bank-connection model. Its normal customer credential boundary is the Co-op Consumer Key (CK) and Consumer Secret (SK), stored through the existing connection-scoped encrypted secrets path. These are not Tycoon Client IDs. Do not introduce a second credential store or accept a tenant-supplied owner identity.
+
+The target behaviour is specified in `docs/provider-contracts/COOP_CONNECT_IMPLEMENTATION_TRACEABILITY.md`. That matrix is mandatory for implementation and test traceability. In particular:
+- Strictly validate CK/SK; use the documented CK/SK-only `client_credentials` flow for normal onboarding. Keep grants/scopes resource-specific and trusted-configured. Do not guess scope, token TTL or production hosts.
+- Correct resource paths and host boundaries; implement Account Validation's explicit valid/invalid semantics; preserve the account-number format contradiction as unresolved per-resource evidence.
+- Normalize FullStatement through one canonical mapper for manual and scheduled ingestion. AccountTransactions polling, Balance and production webhook remain unavailable until their separate evidence/readiness gates pass.
+- Enforce strategy-specific entitlements and the full provider readiness/lab policy. A poll entitlement cannot authorize FullStatement.
+- Treat BankConnection as the parent authorization boundary for every BankAccount operation. Revalidate active parent ownership/provider and credential generation after provider calls and before ingestion; callback ingestion must do the same.
+- Preserve staged credential rotation, compare-and-set promotion, secret owner/version checks, sync leases/fences, idempotent transaction ingestion and G3 reconciliation/posting rules.
+- Map provider errors to stable safe categories and redact raw response/callback secrets from logs, quarantine, audit and DTOs.
+
+The implementation order is backend contract/auth, backend canonical statement and lifecycle guards, backend test gate, explicit API contract checkpoint, frontend, then cross-repository regression. No source compilation, unit test or local mock constitutes Co-op sandbox or production verification.

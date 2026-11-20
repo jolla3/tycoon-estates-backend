@@ -130,3 +130,12 @@ Documentation lock ≠ implementation complete. Each phase needs exit evidence. 
 - COOP FullStatement sync accepts `statement` entitlement; the unverified AccountTransactions polling path remains disabled. Entitlements are checked again during the run.
 - Inbound INS Basic remains platform/application-level according to current contract evidence, not per-connection.
 - Local regression, HTTP integration and Mongo concurrency evidence is recorded in the final implementation review. None of it substitutes for provider sandbox verification.
+## 10. Co-op Connect 2.0.0 implementation gate
+
+The normal Co-op onboarding boundary is CK/SK only, stored via the existing connection-scoped encrypted secret path. Tycoon `BankConnection.clientId` remains the owner ID. Use the documented CK/SK-only `client_credentials` flow for ordinary onboarding; resource-specific grant/scope and token URL are trusted configuration and remain subject to sandbox confirmation.
+
+FullStatement must use its documented endpoint and canonical mapper for both scheduled and manual ingestion. AccountTransactions polling, Balance and production webhook remain disabled pending evidence. FullStatement sync/import require `statement === true`; polling, if later verified, requires `poll === true`.
+
+Every account operation requires a current active parent BankConnection owned by the same Client/provider. Recheck parent and credential version after provider calls before ingestion. Apply readiness/lab policy equally to manual and scheduled imports. Keep callback Basic separate and redact it before log/quarantine persistence.
+
+Preserve secret owner/version checks, staged CAS reauthorization, sync lease/fence, idempotency and G3 ledger boundaries. The full cross-layer source matrix, design challenge and test gates are in `docs/provider-contracts/COOP_CONNECT_IMPLEMENTATION_TRACEABILITY.md`. This is a plan, not an implementation or sandbox-readiness claim.
