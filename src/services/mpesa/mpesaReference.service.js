@@ -7,12 +7,40 @@ import { MpesaMerchantProfile } from '../../models/MpesaMerchantProfile.js';
 import { MpesaTransaction } from '../../models/MpesaTransaction.js';
 import { Tenancy } from '../../models/Tenancy.js';
 import { auditRequired } from '../audit.service.js';
+import { inspectMpesaIndexes } from '../../utils/mpesaIndexReadiness.js';
 import { isActiveMapping } from './mpesaMerchantMapping.service.js';
 import { MERCHANT_TYPE, ALLOCATION_STATE } from './daraja.constants.js';
 import { normalizeCollectionReference, generateCollectionReference } from '../../utils/mpesaCollectionReference.js';
-import { Errors } from '../../utils/errors.js';
+import { Errors, AppError } from '../../utils/errors.js';
 
 const MAX_GENERATION_ATTEMPTS = 6;
+
+/** Fail closed unless the migration-controlled unique indexes are present with the exact shape. */
+export async function assertReferenceIndexesReady() {
+  const report = await inspectMpesaIndexes();
+  if (!report?.gates?.collectionReferences) {
+    throw new AppError(
+      'MPESA_REFERENCE_INDEXES_NOT_READY',
+      'Collection-reference unique indexes are not provisioned; run the G5.4 migration before issuing references',
+      503,
+    );
+  }
+}
+
+/**
+ * Classify a Mongo duplicate-key error by the index that fired.
+ * Returns 'active_tenancy' | 'reference' | 'unknown' | null (not a duplicate-key error).
+ */
+export function duplicateKeyIndex(err) {
+  if (!err || (err.code !== 11000 && err.code !== 11001)) return null;
+  const text = `${err.message || ''} ${err.errmsg || ''}`;
+  if (text.includes('uniq_mpesa_ref_active_tenancy')) return 'active_tenancy';
+  if (text.includes('uniq_mpesa_ref_merchant_reference')) return 'reference';
+  const kp = err.keyPattern || err.keyValue || null;
+  if (kp && 'tenancyId' in kp) return 'active_tenancy';
+  if (kp && 'reference' in kp) return 'reference';
+  return 'unknown';
+}
 
 /**
  * Resolve a provider BillRefNumber for one PayBill merchant profile.
@@ -102,48 +130,65 @@ export const mpesaReferenceService = {
     return { items: rows.map((r) => mpesaReferenceService.toView(r)), total, page, limit };
   },
 
-  /** Issue (or return the existing ACTIVE) reference for one real tenancy on one PayBill. */
+  /**
+   * Issue (or return the existing ACTIVE) reference for one real tenancy on one PayBill.
+   *
+   * The two unique indexes are the ONLY concurrency authority:
+   *   uniq_mpesa_ref_active_tenancy       (merchantProfileId, tenancyId) where ACTIVE
+   *   uniq_mpesa_ref_merchant_reference   (merchantProfileId, reference)
+   * Issuance fails closed (503) unless inspectMpesaIndexes() reports both present with the exact
+   * shape. There is no exists()/findOne pre-check that a race could defeat: we insert, and a
+   * duplicate-key error is interpreted by WHICH index fired. Each attempt is its own transaction
+   * because a duplicate-key error aborts the surrounding transaction.
+   */
   async issue({ clientId, merchantProfileId, tenancyId, actor, reqMeta = {} }) {
-    const session = await mongoose.startSession();
-    let doc; let created = false;
-    try {
-      await session.withTransaction(async () => {
-        const profile = await MpesaMerchantProfile.findOne({ _id: merchantProfileId, clientId }).session(session);
-        if (!profile) throw Errors.NotFound('Merchant profile not found');
-        if (profile.merchantType !== MERCHANT_TYPE.PAYBILL) throw Errors.InvalidRequest('References are issued only for PAYBILL merchants');
-        const tenancy = await Tenancy.findOne({ _id: tenancyId, clientId }).session(session);
-        if (!tenancy) throw Errors.NotFound('Tenancy not found');
-        if (tenancy.status !== 'ACTIVE') throw Errors.InvalidRequest('References are issued only for an ACTIVE tenancy');
-        const mapped = await isActiveMapping({ merchantProfileId: profile._id, clientId, estateId: tenancy.estateId, session });
-        if (!mapped) throw Errors.InvalidRequest('Merchant is not actively mapped to the tenancy estate');
+    await assertReferenceIndexesReady();
+    for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt += 1) {
+      const candidate = generateCollectionReference();
+      const session = await mongoose.startSession();
+      try {
+        let row = null;
+        await session.withTransaction(async () => {
+          row = null;
+          const profile = await MpesaMerchantProfile.findOne({ _id: merchantProfileId, clientId }).session(session);
+          if (!profile) throw Errors.NotFound('Merchant profile not found');
+          if (profile.merchantType !== MERCHANT_TYPE.PAYBILL) throw Errors.InvalidRequest('References are issued only for PAYBILL merchants');
+          const tenancy = await Tenancy.findOne({ _id: tenancyId, clientId }).session(session);
+          if (!tenancy) throw Errors.NotFound('Tenancy not found');
+          if (tenancy.status !== 'ACTIVE') throw Errors.InvalidRequest('References are issued only for an ACTIVE tenancy');
+          const mapped = await isActiveMapping({ merchantProfileId: profile._id, clientId, estateId: tenancy.estateId, session });
+          if (!mapped) throw Errors.InvalidRequest('Merchant is not actively mapped to the tenancy estate');
 
-        const existing = await MpesaCollectionReference.findOne({ merchantProfileId, tenancyId, status: 'ACTIVE' }).session(session);
-        if (existing) { doc = existing; return; }
-
-        for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt += 1) {
-          const candidate = generateCollectionReference();
-          const clash = await MpesaCollectionReference.exists({ merchantProfileId, reference: candidate }).session(session);
-          if (clash) continue;
-          const [row] = await MpesaCollectionReference.create([{
+          const [created] = await MpesaCollectionReference.create([{
             merchantProfileId, clientId, estateId: tenancy.estateId, tenantId: tenancy.tenantId,
             tenancyId: tenancy._id, reference: candidate, status: 'ACTIVE', createdByUserId: actor?._id || null,
           }], { session });
-          doc = row; created = true;
+          row = created;
           await auditRequired({
             clientId, estateId: tenancy.estateId, userId: actor?._id,
-            action: 'MPESA_COLLECTION_REFERENCE_ISSUED', resource: 'MpesaCollectionReference', resourceId: String(row._id),
+            action: 'MPESA_COLLECTION_REFERENCE_ISSUED', resource: 'MpesaCollectionReference', resourceId: String(created._id),
             description: 'Issued a PayBill collection reference',
             metadata: { merchantProfileId: String(merchantProfileId), tenancyId: String(tenancyId), tenantId: String(tenancy.tenantId) },
             ipAddress: reqMeta.ip, userAgent: reqMeta.userAgent,
           }, { session });
-          return;
+        });
+        return { reference: row, created: true };
+      } catch (err) {
+        const which = duplicateKeyIndex(err);
+        if (which === 'active_tenancy') {
+          // Another request already issued the single ACTIVE reference for this tenancy: return it.
+          const existing = await MpesaCollectionReference.findOne({ merchantProfileId, tenancyId, clientId, status: 'ACTIVE' });
+          if (existing) return { reference: existing, created: false };
+          throw Errors.Conflict('Reference issuance conflict; retry');
         }
-        throw Errors.Conflict('Could not generate a unique reference; retry');
-      });
-    } finally {
-      await session.endSession();
+        if (which === 'reference') continue; // candidate collided: draw a new one
+        if (which === 'unknown') throw Errors.Conflict('Reference issuance conflict; retry');
+        throw err;
+      } finally {
+        await session.endSession();
+      }
     }
-    return { reference: doc, created };
+    throw Errors.Conflict('Could not generate a unique reference; retry');
   },
 
   /** Retire; never reassign. A retired reference keeps its original tenant/tenancy forever. */

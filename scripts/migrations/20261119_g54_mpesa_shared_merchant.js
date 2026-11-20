@@ -3,8 +3,9 @@
  *
  *   1. READ-ONLY preflight inventory (always runs):
  *        - shortcode owners that collide across clients (never auto-merged)
- *        - profiles with a legacy estateId but no mapping row
- *        - mapping rows whose estate/client disagree with the profile (never auto-fixed)
+ *        - Profile.clientId === Mapping.clientId === Estate.clientId (missing estates, cross-client
+ *          estates, missing profiles, duplicate mapping/reference keys) — any violation blocks --execute
+ *        - profiles with a legacy estateId but no mapping row (backfilled only when ALL checks pass)
  *        - canonical receipts per profile (identity is preserved, never rewritten)
  *   2. With --execute (allowlisted disposable/target DB only):
  *        - backfill one ACTIVE LEGACY_MIGRATION mapping per legacy profile.estateId (idempotent)
@@ -54,13 +55,86 @@ export function indexPresent(indexes, spec) {
     && JSON.stringify(i.partialFilterExpression || null) === JSON.stringify(spec.options.partialFilterExpression || null));
 }
 
-/** Pure: decide what a run would do from inventory facts. */
-export function buildPlan({ collisions, unmappedLegacyProfiles, indexesBySpec, execute }) {
-  const blocked = collisions.length > 0;
+/**
+ * Pure integrity analysis. Verifies, without guessing or repairing:
+ *   MpesaMerchantProfile.clientId === MpesaMerchantProfileEstate.clientId === Estate.clientId
+ * Inputs are plain arrays so the rules are unit-testable without a database.
+ * Every violation carries a stable code and the offending ids for the operator.
+ */
+export function analyzeIntegrity({
+  profiles = [], mappings = [], estates = [], collisions = [],
+  mappingDuplicates = [], referenceDuplicates = [], activeTenancyDuplicates = [], references = [],
+} = {}) {
+  const profileById = new Map(profiles.map((p) => [String(p._id), p]));
+  const estateById = new Map(estates.map((e) => [String(e._id), e]));
+  const violations = [];
+  const add = (code, detail) => violations.push({ code, ...detail });
+
+  for (const c of collisions) {
+    add('shortcode_collision', {
+      provider: c._id?.provider, businessShortCode: c._id?.businessShortCode,
+      profiles: c.n, clients: (c.clients || []).length,
+    });
+  }
+  for (const d of mappingDuplicates) {
+    add('duplicate_mapping_key', { merchantProfileId: String(d._id?.merchantProfileId), estateId: String(d._id?.estateId), count: d.n });
+  }
+  for (const d of referenceDuplicates) {
+    add('duplicate_reference_key', { merchantProfileId: String(d._id?.merchantProfileId), reference: d._id?.reference, count: d.n });
+  }
+  for (const d of activeTenancyDuplicates) {
+    add('duplicate_active_tenancy_reference', { merchantProfileId: String(d._id?.merchantProfileId), tenancyId: String(d._id?.tenancyId), count: d.n });
+  }
+
+  const checkEstate = (estateId, expectedClientId, ctx) => {
+    const e = estateById.get(String(estateId));
+    if (!e) { add('estate_missing', { ...ctx, estateId: String(estateId) }); return false; }
+    if (String(e.clientId) !== String(expectedClientId)) {
+      add('estate_client_mismatch', { ...ctx, estateId: String(estateId), estateClientId: String(e.clientId), expectedClientId: String(expectedClientId) });
+      return false;
+    }
+    return true;
+  };
+
+  for (const m of mappings) {
+    const ctx = { mappingId: String(m._id), merchantProfileId: String(m.merchantProfileId) };
+    const p = profileById.get(String(m.merchantProfileId));
+    if (!p) { add('mapping_profile_missing', ctx); continue; }
+    if (String(p.clientId) !== String(m.clientId)) {
+      add('mapping_client_mismatch', { ...ctx, mappingClientId: String(m.clientId), profileClientId: String(p.clientId) });
+    }
+    checkEstate(m.estateId, p.clientId, ctx);
+  }
+
+  const mappingKeys = new Set(mappings.map((m) => `${m.merchantProfileId}:${m.estateId}`));
+  const backfill = [];
+  for (const p of profiles) {
+    if (!p.estateId) continue;
+    const ctx = { merchantProfileId: String(p._id), legacy: true };
+    const valid = checkEstate(p.estateId, p.clientId, ctx);
+    if (valid && !mappingKeys.has(`${p._id}:${p.estateId}`)) backfill.push(p);
+  }
+
+  for (const r of references) {
+    const p = profileById.get(String(r.merchantProfileId));
+    const ctx = { referenceId: String(r._id), merchantProfileId: String(r.merchantProfileId) };
+    if (!p) { add('reference_profile_missing', ctx); continue; }
+    if (String(p.clientId) !== String(r.clientId)) add('reference_client_mismatch', ctx);
+    else checkEstate(r.estateId, p.clientId, ctx);
+  }
+
+  return { violations, backfill, blocked: violations.length > 0 };
+}
+
+/** Pure: decide what a run would do from the analysis. Any violation blocks everything. */
+export function buildPlan({ analysis, indexesBySpec, execute }) {
+  const blocked = analysis.blocked;
+  const codes = [...new Set(analysis.violations.map((v) => v.code))].sort();
   return {
     blocked,
-    blockReason: blocked ? 'shortcode_collisions_require_manual_resolution' : null,
-    backfillMappings: blocked ? 0 : unmappedLegacyProfiles.length,
+    blockReason: blocked ? 'integrity_violations_require_manual_resolution' : null,
+    violationCodes: codes,
+    backfillMappings: blocked ? 0 : analysis.backfill.length,
     indexes: INDEX_SPECS.map((spec) => ({
       name: spec.name,
       state: indexesBySpec[spec.name]
@@ -70,28 +144,55 @@ export function buildPlan({ collisions, unmappedLegacyProfiles, indexesBySpec, e
   };
 }
 
+const CAP = 5000;
+
 async function inventory(db) {
   const profiles = db.collection('mpesamerchantprofiles');
-  const mappings = db.collection('mpesamerchantprofileestates');
+  const mappingsCol = db.collection('mpesamerchantprofileestates');
+  const refsCol = db.collection('mpesacollectionreferences');
+
   const collisions = await profiles.aggregate([
-    { $group: { _id: { provider: '$provider', businessShortCode: '$businessShortCode' }, n: { $sum: 1 }, clients: { $addToSet: '$clientId' }, profileIds: { $push: '$_id' } } },
-    { $match: { n: { $gt: 1 } } },
-    { $limit: 100 },
+    { $group: { _id: { provider: '$provider', businessShortCode: '$businessShortCode' }, n: { $sum: 1 }, clients: { $addToSet: '$clientId' } } },
+    { $match: { n: { $gt: 1 } } }, { $limit: 100 },
+  ]).toArray();
+  const mappingDuplicates = await mappingsCol.aggregate([
+    { $group: { _id: { merchantProfileId: '$merchantProfileId', estateId: '$estateId' }, n: { $sum: 1 } } },
+    { $match: { n: { $gt: 1 } } }, { $limit: 100 },
+  ]).toArray();
+  const referenceDuplicates = await refsCol.aggregate([
+    { $group: { _id: { merchantProfileId: '$merchantProfileId', reference: '$reference' }, n: { $sum: 1 } } },
+    { $match: { n: { $gt: 1 } } }, { $limit: 100 },
+  ]).toArray();
+  const activeTenancyDuplicates = await refsCol.aggregate([
+    { $match: { status: 'ACTIVE' } },
+    { $group: { _id: { merchantProfileId: '$merchantProfileId', tenancyId: '$tenancyId' }, n: { $sum: 1 } } },
+    { $match: { n: { $gt: 1 } } }, { $limit: 100 },
   ]).toArray();
 
-  const legacy = await profiles.find({ estateId: { $ne: null } }, { projection: { _id: 1, clientId: 1, estateId: 1 } }).toArray();
-  const existing = await mappings.find({}, { projection: { merchantProfileId: 1, estateId: 1, clientId: 1 } }).toArray();
-  const have = new Set(existing.map((m) => `${m.merchantProfileId}:${m.estateId}`));
-  const unmappedLegacyProfiles = legacy.filter((p) => !have.has(`${p._id}:${p.estateId}`));
+  const profileRows = await profiles.find({}, { projection: { clientId: 1, estateId: 1 } }).toArray();
+  const mappings = await mappingsCol.find({}, { projection: { merchantProfileId: 1, estateId: 1, clientId: 1 } }).toArray();
+  const references = await refsCol.find({}, { projection: { merchantProfileId: 1, estateId: 1, clientId: 1 } }).toArray();
 
-  const profileClient = new Map((await profiles.find({}, { projection: { clientId: 1 } }).toArray()).map((p) => [String(p._id), String(p.clientId)]));
-  const mappingClientMismatch = existing.filter((m) => profileClient.get(String(m.merchantProfileId)) !== String(m.clientId)).length;
+  const estateIds = new Map();
+  for (const p of profileRows) if (p.estateId) estateIds.set(String(p.estateId), p.estateId);
+  for (const m of mappings) estateIds.set(String(m.estateId), m.estateId);
+  for (const r of references) estateIds.set(String(r.estateId), r.estateId);
+  const ids = [...estateIds.values()];
+  const estates = [];
+  const estatesCol = db.collection('estates');
+  for (let i = 0; i < ids.length; i += CAP) {
+    estates.push(...await estatesCol.find({ _id: { $in: ids.slice(i, i + CAP) } }, { projection: { clientId: 1 } }).toArray());
+  }
 
   const receiptCounts = await db.collection('mpesatransactions').aggregate([
     { $group: { _id: '$merchantProfileId', receipts: { $sum: 1 } } },
   ]).toArray();
 
-  return { collisions, legacyProfileCount: legacy.length, unmappedLegacyProfiles, mappingClientMismatch, receiptProfiles: receiptCounts.length };
+  const analysis = analyzeIntegrity({
+    profiles: profileRows, mappings, estates, collisions, mappingDuplicates,
+    referenceDuplicates, activeTenancyDuplicates, references,
+  });
+  return { analysis, legacyProfileCount: profileRows.filter((p) => p.estateId).length, receiptProfiles: receiptCounts.length };
 }
 
 async function main() {
@@ -108,21 +209,21 @@ async function main() {
     const present = await db.collection(spec.collection).indexes().catch(() => []);
     indexesBySpec[spec.name] = indexPresent(present, spec);
   }
-  const plan = buildPlan({ collisions: inv.collisions, unmappedLegacyProfiles: inv.unmappedLegacyProfiles, indexesBySpec, execute: EXECUTE });
+  const plan = buildPlan({ analysis: inv.analysis, indexesBySpec, execute: EXECUTE });
   console.log(JSON.stringify({
     inventory: {
-      shortcodeCollisions: inv.collisions.length,
-      collisionSamples: inv.collisions.slice(0, 20).map((c) => ({ provider: c._id.provider, businessShortCode: c._id.businessShortCode, profiles: c.n, clients: c.clients.length })),
       legacyProfilesWithEstate: inv.legacyProfileCount,
-      legacyProfilesWithoutMapping: inv.unmappedLegacyProfiles.length,
-      mappingRowsWithClientMismatch: inv.mappingClientMismatch,
+      backfillCandidates: inv.analysis.backfill.length,
+      integrityViolations: inv.analysis.violations.length,
+      violations: inv.analysis.violations.slice(0, 100),
       profilesWithReceipts: inv.receiptProfiles,
     },
     plan,
   }, null, 2));
 
-  if (plan.blocked || inv.mappingClientMismatch > 0) {
-    console.error(JSON.stringify({ error: plan.blockReason || 'mapping_client_mismatch_requires_manual_resolution' }));
+  if (plan.blocked) {
+    // Never repair by guessing: any invalid relationship blocks --execute entirely.
+    console.error(JSON.stringify({ error: plan.blockReason, codes: plan.violationCodes }));
     process.exitCode = 2;
     await mongoose.disconnect();
     return;
@@ -135,7 +236,7 @@ async function main() {
       if (!indexesBySpec[spec.name]) await db.collection(spec.collection).createIndex(spec.key, { name: spec.name, ...spec.options });
     }
     let inserted = 0;
-    for (const p of inv.unmappedLegacyProfiles) {
+    for (const p of inv.analysis.backfill) {
       const r = await mappings.updateOne(
         { merchantProfileId: p._id, estateId: p.estateId },
         { $setOnInsert: { clientId: p.clientId, status: 'ACTIVE', source: 'LEGACY_MIGRATION', createdByUserId: null, deactivatedAt: null, deactivatedByUserId: null, createdAt: new Date(), updatedAt: new Date() } },

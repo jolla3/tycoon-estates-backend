@@ -1,7 +1,7 @@
 import { describe, test, expect } from '@jest/globals';
 import { receiptScopeClause } from '../../../src/services/mpesaTransaction.service.js';
 import { toMpesaTransactionDTO } from '../../../src/utils/mpesaTransactionDto.js';
-import { buildPlan, indexPresent, INDEX_SPECS } from '../../../scripts/migrations/20261119_g54_mpesa_shared_merchant.js';
+import { buildPlan, analyzeIntegrity, indexPresent, INDEX_SPECS } from '../../../scripts/migrations/20261119_g54_mpesa_shared_merchant.js';
 import { assertSafeTarget } from '../../../scripts/migrations/20261119_g54_mpesa_shared_merchant.js';
 
 describe('receipt scope', () => {
@@ -31,16 +31,21 @@ describe('receipt scope', () => {
 describe('G5.4 migration planning', () => {
   const none = Object.fromEntries(INDEX_SPECS.map((s) => [s.name, false]));
   test('collisions block backfill and index creation (never auto-merge)', () => {
-    const plan = buildPlan({ collisions: [{ _id: {} }], unmappedLegacyProfiles: [{}], indexesBySpec: none, execute: true });
+    const analysis = analyzeIntegrity({ collisions: [{ _id: { provider: 'DARAJA', businessShortCode: '1' }, n: 2, clients: ['a', 'b'] }] });
+    const plan = buildPlan({ analysis, indexesBySpec: none, execute: true });
     expect(plan.blocked).toBe(true);
     expect(plan.backfillMappings).toBe(0);
     expect(plan.indexes.every((i) => i.state === 'blocked')).toBe(true);
   });
   test('dry run only reports; execute reports will_create; present indexes are idempotent', () => {
-    const dry = buildPlan({ collisions: [], unmappedLegacyProfiles: [{}, {}], indexesBySpec: none, execute: false });
+    const analysis = analyzeIntegrity({
+      profiles: [{ _id: 'p1', clientId: 'c', estateId: 'e1' }, { _id: 'p2', clientId: 'c', estateId: 'e2' }],
+      estates: [{ _id: 'e1', clientId: 'c' }, { _id: 'e2', clientId: 'c' }],
+    });
+    const dry = buildPlan({ analysis, indexesBySpec: none, execute: false });
     expect(dry.indexes.every((i) => i.state === 'dry_run_would_create')).toBe(true);
     expect(dry.backfillMappings).toBe(2);
-    const done = buildPlan({ collisions: [], unmappedLegacyProfiles: [], indexesBySpec: Object.fromEntries(INDEX_SPECS.map((s) => [s.name, true])), execute: true });
+    const done = buildPlan({ analysis: analyzeIntegrity({}), indexesBySpec: Object.fromEntries(INDEX_SPECS.map((s) => [s.name, true])), execute: true });
     expect(done.indexes.every((i) => i.state === 'already_present')).toBe(true);
   });
   test('indexPresent requires the partial filter for the active-tenancy index', () => {
