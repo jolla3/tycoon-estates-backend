@@ -412,7 +412,7 @@ The guide shows 11-digit Account Validation test-account examples while the exis
 
 Do not flatten every non-zero MessageCode into a generic provider outage. At minimum distinguish invalid parameter, invalid account, account authorization failure, missing/invalid token, wrong token type, resource subscription failure, insufficient scope, rate throttling, hard limits, temporarily blocked APIs, timeouts and transient backend unavailability. The authoritative codes/examples and required handling are enumerated in the alignment document.
 
-Account Validation's invalid-account response is a business rejection, not a provider outage. The bank-service caller must require an explicit `valid === true` result before setting an account connected/validated. The provider adapter must classify MessageCode `-1` as invalid account and preserve the fail-closed behavior for all other failures.
+Account Validation's invalid-account response is a business rejection, not a provider outage. The bank-service caller must require an explicit `valid === true` result before setting an account connected/validated. The provider adapter must classify MessageCode `-1` as invalid account and preserve the fail-closed behavior for all other failures. The current inner catch in `bank.service.connectAccount()` wraps every validation exception as `Errors.InvalidRequest`; correct it so only the explicit invalid-account result becomes a client input error. Token, scope, account authorization, rate-limit, timeout and upstream service errors must retain their typed categories. All classes of failure must prevent account persistence.
 
 ### 17.5 Statement normalization
 

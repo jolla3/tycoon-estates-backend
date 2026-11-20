@@ -304,17 +304,18 @@ The guide gives multiple test account numbers returning 0 and says any other acc
 - `validateAccount()` returns `{ valid: true, raw: data }` for any response accepted by `coopPost()`.
 - `bankService.connectAccount()` awaits `adapter.validateAccount()` but does not explicitly assert that the returned object contains `valid === true`.
 
-The fail-closed write ordering in `bank.service.js` is correct, but the response type and error classification are too weak.
+The fail-closed write ordering in `bank.service.js` is correct, but the response type and error classification are too weak. There is a second, caller-side defect: the inner validation catch currently wraps **every** validation exception in `Errors.InvalidRequest`. That incorrectly turns token failures, insufficient scopes, timeouts and upstream outages into a customer-input error. Only Co-op MessageCode `-1` is an invalid-account rejection. Authentication, account-authorization, scope, subscription, transport and provider errors must retain their typed upstream categories while still preventing any account write.
 
 ### Required change
 
 - Give Account Validation a specific result contract. MessageCode 0 returns `{ valid: true }`; MessageCode -1 returns a typed invalid-account result/error, not a generic upstream outage.
 - Any malformed response, missing MessageCode, unrecognized code, HTTP failure, invalid token, missing subscription or account authorization failure must not activate/update the account.
 - `connectAccount()` must explicitly require `result.valid === true`; false, undefined or malformed output is rejected before persistence.
+- Change the inner catch in `bank.service.connectAccount()` so it preserves typed `AppError` categories. Map only the explicit invalid-account result (`-1`) to the account-input validation response. Do not turn 401/403/408/429/5xx provider failures into `INVALID_REQUEST`. All such failures still leave the existing/new BankAccount unchanged.
 - Do not populate accountName from a claimed bank response. The Account Validation sample has no AccountName. The name currently entered by the customer is customer-provided and must not be labelled bank-verified.
 - Keep the existing account validation fail-closed and compare-and-set reconnect logic.
 
-Tests: MessageCode 0, -1, missing MessageCode, unknown code, HTTP failure, token error, account authorization `-8`, and adapter returning `{ valid:false }` or no valid flag.
+Tests: MessageCode 0, -1, missing MessageCode, unknown code, HTTP failure, token error, account authorization `-8`, and adapter returning `{ valid:false }` or no valid flag. Assert that only `-1` maps to invalid-account input; provider/auth/network errors preserve their status/category and never mutate the account.
 
 ## 8. Account number format contradiction
 
@@ -538,7 +539,7 @@ Required:
 | C2-010 | P0 | Backend `src/services/banking/providers/coop/coop.client.js` | Preserve typed HTTP/MessageCode errors; redact response body from logs |
 | C2-011 | P0 | Backend `src/services/banking/providers/coop/coop.mapper.js` | Use documented FullStatement mapper; add separate AccountTransactions mapper only after ID semantics; redact INS Basic |
 | C2-012 | P0 | Backend `src/services/banking/providers/coop/coop.syncStrategy.js` | Remove scheduled-only remapping workaround once provider returns canonical items; keep polling disabled |
-| C2-013 | P0 | Backend `src/services/bank.service.js` | Require explicit `valid === true` before account persistence |
+| C2-013 | P0 | Backend `src/services/bank.service.js` | Require explicit `valid === true` before account persistence; map only the explicit invalid-account response to client input error and preserve typed provider/auth/transport failures |
 | C2-014 | P0 | Backend `src/routes/webhook.routes.js`, callback quarantine/ingestion | Ensure Basic secret never reaches persisted/quarantined/logged raw body |
 | C2-015 | P1 | Auth token coordinator and `src/services/connection.service.js` | Reuse tokens by connection/version/grant/scope; invalidate on reauthorization |
 | C2-016 | P1 | Backend `src/services/banking/bank.factory.js`, readiness and entitlement mapping | Do not assign unverified Balance/webhook capabilities |
@@ -546,6 +547,7 @@ Required:
 | C2-018 | P1 | Tests under `tests/unit` and `tests/integration` | Add all test cases in section 18, including tenant isolation and G3 regression |
 | C2-019 | P1 | Provider docs / deployment config | Audit/remove stale `COOP_CLIENT_*` / username/password / generic scope env names only after complete reference search |
 | C2-020 | P1 | Co-op API configuration | Document resource-specific grant type, scope and URL configuration; never use defaults without evidence |
+| C2-021 | P0 | Backend `src/services/bank.service.js` | Preserve typed provider errors from Account Validation; do not convert token, scope, timeout, throttling or upstream failures into `INVALID_REQUEST` |
 
 ## 18. Required test matrix and completion criteria
 

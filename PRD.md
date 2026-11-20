@@ -273,6 +273,7 @@ The detailed, file-by-file, evidence-backed change specification is maintained i
 | G4-COOP-AUTH-004 | Scopes are not guessed or copied from the generic `apim:subscribe apim:api_key` example. Resolve exact resource scopes from Co-op OAuth2 Security/resource authorization documentation before enabling scope-restricted calls. |
 | G4-COOP-API-001 | Configure token URL and API resource URLs independently. Use exact documented versioned resource paths; do not concatenate guessed endpoint names. |
 | G4-COOP-VAL-001 | Account Validation handles MessageCode `0` as valid and `-1` as invalid-account rejection. Other authorization, scope, throttling and provider failures retain distinct classifications. |
+| G4-COOP-VAL-002 | The account-linking service maps only the explicit invalid-account result to an input error; it MUST preserve typed OAuth, authorization, timeout, throttling and upstream provider failures rather than converting all validation errors to `INVALID_REQUEST`. |
 | G4-COOP-STM-001 | FullStatement uses its documented transaction mapper for both manual import and scheduled synchronization. |
 | G4-COOP-POLL-001 | AccountTransactions polling remains disabled until the stable transaction identity and endpoint-specific response contract are verified. |
 | G4-COOP-SEC-001 | The inbound INS Basic callback credential is kept distinct from outbound CK/SK and must never be persisted in transaction rawPayload or quarantine content. |
