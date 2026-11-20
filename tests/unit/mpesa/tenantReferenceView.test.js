@@ -41,13 +41,13 @@ beforeEach(() => {
 
 describe('tenant reference view: exact tenancy identity, retired distinguished', () => {
   test('returns one entry per tenancy with its own active/retired references; no default tenancy', async () => {
-    refFind.mockReturnValue(lean([{ _id: id(), tenancyId: T_ACTIVE, merchantProfileId: P1, reference: 'T1234567890', status: 'ACTIVE', createdAt: new Date() }]));
+    refFind.mockReturnValue(lean([{ _id: id(), tenancyId: T_ACTIVE, merchantProfileId: P1, reference: 'T123456789', status: 'ACTIVE', createdAt: new Date() }]));
     refAgg.mockResolvedValue([{ _id: { t: T_CLOSED, m: P1 }, count: 7, recent: [{ _id: id(), reference: 'TABCDEFGH1', status: 'RETIRED', retiredAt: new Date(), retiredReason: 'TENANCY_CLOSED' }] }]);
     const out = await svc.view({ clientId: CLIENT, estateFilter: null, tenantId: TENANT });
     expect(out.tenancies.map((t) => t.tenancyId)).toEqual([String(T_ACTIVE), String(T_CLOSED)]);
     expect(out).not.toHaveProperty('defaultTenancyId');
     const [a, c] = out.tenancies;
-    expect(a.merchants[0].active).toMatchObject({ reference: 'T1234567890', display: 'T1234-5678-0' });
+    expect(a.merchants[0].active).toMatchObject({ reference: 'T123456789', display: 'T1234-5678-9' });
     expect(a.merchants[0].canIssue).toBe(false);
     expect(a.merchants[0].retired).toEqual([]);
     expect(c.merchants[0].active).toBeNull();
@@ -91,14 +91,14 @@ describe('issue for one explicit tenancy', () => {
   });
   test('issues for exactly that tenancy and returns only that reference', async () => {
     tenancyFindOne.mockReturnValue({ _id: T_ACTIVE, tenantId: TENANT, estateId: E1 });
-    issueRef.mockResolvedValue({ created: true, reference: { _id: id(), tenantId: TENANT, tenancyId: T_ACTIVE, reference: 'T1234567890', status: 'ACTIVE', createdAt: new Date() } });
+    issueRef.mockResolvedValue({ created: true, reference: { _id: id(), tenantId: TENANT, tenancyId: T_ACTIVE, reference: 'T123456789', status: 'ACTIVE', createdAt: new Date() } });
     const out = await svc.issue({ clientId: CLIENT, estateFilter: null, tenantId: TENANT, tenancyId: T_ACTIVE, merchantProfileId: P1, actor: { _id: 'u' } });
     expect(issueRef.mock.calls[0][0]).toMatchObject({ tenancyId: T_ACTIVE, merchantProfileId: P1, clientId: CLIENT });
-    expect(out.reference.display).toBe('T1234-5678-0');
+    expect(out.reference.display).toBe('T1234-5678-9');
   });
   test('defence in depth: a reference that belongs to another tenancy is never returned', async () => {
     tenancyFindOne.mockReturnValue({ _id: T_ACTIVE, tenantId: TENANT, estateId: E1 });
-    issueRef.mockResolvedValue({ created: false, reference: { _id: id(), tenantId: id(), tenancyId: T_ACTIVE, reference: 'T1234567890' } });
+    issueRef.mockResolvedValue({ created: false, reference: { _id: id(), tenantId: id(), tenancyId: T_ACTIVE, reference: 'T123456789' } });
     await expect(svc.issue({ clientId: CLIENT, estateFilter: null, tenantId: TENANT, tenancyId: T_ACTIVE, merchantProfileId: P1, actor: { _id: 'u' } })).rejects.toMatchObject({ status: 409 });
   });
 });
