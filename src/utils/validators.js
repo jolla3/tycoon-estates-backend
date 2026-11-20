@@ -120,14 +120,22 @@ export const schemas = {
     allowEstateReassignment: z.boolean().optional(),
   }),
 
+  // Co-op Connect 2.0.0: normal customer flow is CK/SK only (client_credentials).
+  // Strict schema — reject legacy username/password/scope and unknown keys.
   createBankConnection: z.object({
     provider: z.enum(['COOP', 'KCB', 'EQUITY', 'NCBA']),
     displayName: z.string().max(120).optional(),
-    credentialMaterial: z.record(z.any()),
+    credentialMaterial: z.object({
+      consumerKey: z.string().min(1).max(256),
+      consumerSecret: z.string().min(1).max(512),
+    }).strict(),
   }),
 
   reauthorizeBankConnection: z.object({
-    credentialMaterial: z.record(z.any()),
+    credentialMaterial: z.object({
+      consumerKey: z.string().min(1).max(256),
+      consumerSecret: z.string().min(1).max(512),
+    }).strict(),
   }),
 
   sendSms: z
