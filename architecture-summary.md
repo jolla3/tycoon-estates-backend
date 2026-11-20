@@ -127,7 +127,10 @@ Documentation lock ≠ implementation complete. Each phase needs exit evidence. 
 - COOP adapter code is implemented, but overall provider `operationalReady` remains false. KCB/EQUITY/NCBA remain disabled. No provider is currently production-operational.
 - `COOP_BANK_LAB_MODE=1` permits COOP connection creation, account linking and FullStatement sync only outside production. It does not alter readiness.
 - `COOP_WEBHOOK_LAB_OVERRIDE=1` permits controlled webhook lab exposure only outside production. Production overrides are rejected.
-- COOP FullStatement sync accepts `statement` entitlement; the unverified AccountTransactions polling path remains disabled. Entitlements are checked again during the run.
+- **As-built mismatch to fix:** the COOP strategy selected by `/bank/accounts/:id/sync` is FullStatement date-window retrieval, but `hasBankSyncEntitlement()` currently accepts `poll === true || statement === true`. A poll-only account can therefore authorize the wrong provider resource. Required: FullStatement uses `statement === true`; AccountTransactions polling, when later verified, uses `poll === true` only.
+- Manual `bank.service.importStatement()` checks statement entitlement and active connection at request start, but does not currently repeat the parent-connection check after the provider response or apply the same explicit provider readiness/lab gate used by sync. Correct this before enabling manual import outside the controlled lab.
+- Parent `BankConnection.status` is separate from `BankAccount.connectionStatus`. Disconnect currently changes only the parent record; child account status/entitlements remain stale. Effective account operations and public DTOs must account for current parent status.
+- The webhook currently checks account linkage/entitlement but not the referenced parent connection's active status. Add the parent check before ingestion whenever the callback route is exposed (lab or later operational mode).
 - Inbound INS Basic remains platform/application-level according to current contract evidence, not per-connection.
 - Local regression, HTTP integration and Mongo concurrency evidence is recorded in the final implementation review. None of it substitutes for provider sandbox verification.
 
@@ -144,3 +147,13 @@ Full evidence and file-by-file requirements: [`docs/provider-contracts/COOP_CONN
 - AccountTransactions polling stays disabled until the transaction identifier is proved stable and its item mapping is verified. MiniStatement's supplied sample has balances and no transaction list. Balance endpoint path is still unverified.
 - Never persist inbound INS `Basic` credential in rawPayload/quarantine/logs. It is distinct from outbound CK/SK.
 - Keep Co-op `operationalReady=false` until token/resource scopes, endpoint contracts, sandbox behavior and callback gates have evidence. Detailed acceptance tests and blocked questions are in the linked audit.
+
+## 10. Co-op effective connection state and resource-specific authorization
+
+BankAccount.connectionStatus is not a mirror of BankConnection.status. Keep both meanings separate and derive an effective capability from the account's validated link, its account entitlement, the current parent connection status, the provider readiness gate and the environment's permitted lab policy.
+
+Do not treat `poll` and `statement` as synonyms. The currently selected COOP sync strategy fetches FullStatement, so its operation gate is `statement === true`. The AccountTransactions polling capability remains false until its item identity/ordering contract is verified; when eventually enabled, it must be gated independently by `poll === true`.
+
+A disconnected parent connection must make sync, manual statement import and webhook ingestion unavailable even while child account flags remain connected/true. Manual statement import must re-check parent state after the provider call before committing the returned page. The frontend must receive or derive the effective parent state, but the backend remains authoritative.
+
+A create response can be HTTP 201 with connection status failed. This records a created resource whose initial authentication failed; it is not a successful provider authorization. Keep this distinction visible in API docs and UI acceptance tests.

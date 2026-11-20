@@ -354,9 +354,15 @@ The webhook has its separate `COOP_WEBHOOK_LAB_OVERRIDE=1` flag. That override i
 
 ### Synchronization entitlement semantics
 
-COOP's supported sync strategy is the FullStatement date-window strategy. The account `statement` entitlement authorizes that strategy; `poll` is not required when `statement` is true. The AccountTransactions list-polling path remains disabled because its item schema is not verified.
+**As-built mismatch requiring correction:** COOP's selected strategy is the FullStatement date-window strategy, but `bankSync.service.js` currently defines `hasBankSyncEntitlement()` as `poll === true || statement === true`. That generic OR allows a poll-only entitlement to authorize FullStatement. The implementation does revalidate the account and parent connection during sync, but its capability predicate is not resource-specific.
 
-The orchestration layer checks entitlement before acquiring the sync lease and revalidates it during the run. A statement entitlement must not be interpreted as authorization for an unverified list-polling strategy.
+Required authorization rule:
+- FullStatement date-window sync requires `statement === true`.
+- Manual date-range statement import also requires `statement === true`.
+- AccountTransactions list polling, only after stable transaction identity and response ordering are verified, requires `poll === true`.
+- A capability for one Co-op resource must never authorize another resource.
+
+The orchestration layer checks entitlement before acquiring the sync lease and revalidates it during the run. Preserve those checks while making them strategy-specific. The AccountTransactions polling path remains disabled until its schema/identity contract is verified.
 
 ### Callback credential scope
 
@@ -435,3 +441,37 @@ The current webhook normalization stores the full raw body, including its option
 ### 17.8 Capability and readiness rules
 
 A registered method is not an enabled capability. The current registry marks Balance as implemented and account-link entitlements are derived from registry booleans even while balance/webhook readiness is unverified. Do not activate unverified Balance or callback entitlements. AccountTransactions polling remains disabled; Balance remains disabled pending its resource contract; MiniStatement is not a transaction feed based on the supplied sample. Preserve the overall Co-op `operationalReady=false` gate until sandbox tests and provider authorization evidence exist.
+
+## 18. Effective connection state, direct statement import and callback authorization
+
+### 18.1 Parent connection lifecycle
+
+BankConnection.status and BankAccount.connectionStatus are independent state machines. The account field records the account's own link/validation state; it must not be overloaded to represent whether its parent OAuth connection is active.
+
+As built, connectionService.disconnect() updates only BankConnection.status. Linked BankAccounts retain connectionStatus connected and their previous entitlement flags. Add an explicit effective state for each account, either as a safe derived DTO field such as parentConnectionStatus or through another deterministic projection. A child account with a missing, disconnected, failed or reauthorization-required parent is not operational regardless of stale child flags.
+
+### 18.2 Every operation must verify its parent
+
+- Sync already checks the current parent connection before each page and before accepting the page. Preserve this behavior and its fencing tests.
+- Manual statement import currently checks the parent connection before the provider request, but it does not repeat the check before ingestNormalizedTransactionBatch(). Re-read the parent and verify same client, provider and active status after the provider response and immediately before ingestion. Apply the provider readiness/lab gate here too; a stale statement entitlement must not bypass it.
+- The inbound webhook currently finds a BankAccount by provider/account hash and checks webhookIngest, but does not verify BankAccount.connectionId against an active BankConnection owned by the same client. Add this check before normalization/ingestion. A callback after disconnect must be rejected or quarantined without creating a transaction.
+- On parent disconnect, the effective status must become unavailable immediately. A cascade to child records is optional; if chosen, avoid partial non-atomic state and preserve the account's own link/validation meaning.
+
+### 18.3 Resource-specific operation capability
+
+The present COOP sync strategy is FullStatement window retrieval. Require statement === true for that strategy; do not allow poll === true to substitute. Reserve poll for a future AccountTransactions strategy. Manual statement import also requires statement === true plus provider readiness/lab authorization. Balance and webhook account entitlements remain false for production until their own resource/callback contracts and readiness gates are verified.
+
+### 18.4 Create and reauthorization result semantics
+
+connectionController.create() always returns HTTP 201 when connectionService.create() returns. That service deliberately returns a persisted status=failed connection after initial authentication failure. API clients must inspect the returned status; 201 alone is not an authorization success. Reauthorization preserves the prior credential version on failed staged authentication, but the current service replaces the original cause with a generic BankAuthFailed. Preserve a sanitized stable error code/category for the frontend while never exposing credentials, tokens or raw response bodies.
+
+### 18.5 Acceptance tests
+
+- A poll-only account cannot start or complete FullStatement sync.
+- A statement-entitled account can use FullStatement only when the parent connection is active and the environment readiness/lab gate allows it.
+- Manual statement import rejects when readiness is false outside the explicit lab policy.
+- Disconnect during a manual statement request prevents the response from being ingested.
+- Webhook after disconnect, missing parent, wrong client, wrong provider or inactive parent does not ingest.
+- Effective BankAccount DTOs distinguish account link state from parent connection status.
+- HTTP 201 + connection status failed is rendered as resource-created/authentication-failed, not authorized.
+- Reauthorization failure preserves the prior credentials/version and returns a safe typed failure.

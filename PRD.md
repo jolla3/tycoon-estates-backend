@@ -284,3 +284,31 @@ The detailed, file-by-file, evidence-backed change specification is maintained i
 The Co-op Connect 2.0.0 guide confirms DCR grant registration for `client_credentials`, `password`, and `refresh_token`, and separately demonstrates the CK/SK-only `client_credentials` token request. It does **not** prove that every resource accepts the same grant or the same scope. Error `900905` explicitly warns that a resource can reject the wrong access-token type.
 
 Do not mark this work complete until the implementation and tests in the detailed alignment document pass. Local tests do not replace Co-op sandbox verification. Overall Co-op `operationalReady` remains false until the provider gates are closed with evidence.
+
+## 15. Cross-layer Banking lifecycle and operation-gate corrections — 2026-11-20
+
+The Co-op adapter audit must cover the entire BankConnection → BankAccount → sync/import/webhook lifecycle, not just OAuth request construction and provider endpoint mapping.
+
+### 15.1 Strategy-specific operation entitlement
+
+The current Co-op sync strategy selected by POST /bank/accounts/:id/sync is FullStatement date-window retrieval. It is not AccountTransactions polling. Current bankSync.service.js uses hasBankSyncEntitlement(), which accepts poll === true OR statement === true. A poll-only entitlement can therefore authorize a FullStatement call. This is a source-level mismatch with the intended capability model.
+
+Required: FullStatement sync and manual statement import require statement === true; AccountTransactions polling, only after its resource schema and stable transaction ID are verified, requires poll === true. Do not use a generic OR gate. Apply provider readiness/lab policy to both scheduled/manual sync and direct manual statement import; the current bank.service.importStatement() checks the account flag and active connection but does not re-check provider operational readiness.
+
+### 15.2 Parent connection is authoritative for every account operation
+
+BankAccount.connectionStatus describes the account link, not the BankConnection authentication state. connectionService.disconnect() currently changes only the parent connection status and leaves child BankAccount connectionStatus/entitlements unchanged. Preserve these separate meanings, but derive or expose effective account capability using the current parent connection status.
+
+All account operations must verify that the referenced parent connection belongs to the same Tycoon client, has provider COOP and is active. The webhook route currently queries the BankAccount by account hash and checks webhookIngest, but does not load and validate the parent BankConnection. Manual statement import checks the parent only before the provider request and must re-check before ingestion. Sync already revalidates connection state at page boundaries; preserve that fence.
+
+Do not rely on a child account's stale connected/entitlement flags after a parent disconnect. The frontend needs a safe parent status or equivalent effective-capability DTO so it can disable actions, but browser state is not the security boundary.
+
+### 15.3 Create response versus provider authorization
+
+POST /bank/connections returns HTTP 201 with a BankConnection DTO even when initial token authentication failed; connectionService.create() persists status failed and lastAuthError, then returns the resource. HTTP 201 means the resource was created, not that Co-op authorization succeeded. The frontend must inspect status and report the failed authorization explicitly.
+
+Reauthorization has a different outcome: failed staged authentication preserves the previous credential reference/version but currently flattens the provider failure into a generic BankAuthFailed. Keep a safe stable error category/code so the UI can distinguish invalid credentials, wrong token type, scope, throttling and provider outage without returning secrets or raw provider responses.
+
+### 15.4 Required regression evidence
+
+Add tests for statement-vs-poll authorization, false/unknown entitlement, direct statement readiness checks, disconnect before and during statement retrieval, webhook callbacks after disconnect, mismatched/missing parent connection, create returning status failed with HTTP 201, reauthorization preserving the prior version and typed safe error mapping. Local tests still do not establish Co-op sandbox readiness.

@@ -548,6 +548,11 @@ Required:
 | C2-019 | P1 | Provider docs / deployment config | Audit/remove stale `COOP_CLIENT_*` / username/password / generic scope env names only after complete reference search |
 | C2-020 | P1 | Co-op API configuration | Document resource-specific grant type, scope and URL configuration; never use defaults without evidence |
 | C2-021 | P0 | Backend `src/services/bank.service.js` | Preserve typed provider errors from Account Validation; do not convert token, scope, timeout, throttling or upstream failures into `INVALID_REQUEST` |
+| C2-022 | P0 | Backend `src/services/banking/bankSync.service.js` | Replace generic poll-OR-statement entitlement gate with strategy-specific authorization; FullStatement requires statement, AccountTransactions requires poll |
+| C2-023 | P0 | Backend `src/services/connection.service.js`, `src/services/bank.service.js`, `src/routes/webhook.routes.js` | Enforce current active parent BankConnection for every account operation; prevent webhook ingestion after parent disconnect |
+| C2-024 | P0 | Backend `src/services/bank.service.js` | Re-check parent connection after FullStatement response and before manual statement ingestion; apply provider readiness/lab gate to direct statement import |
+| C2-025 | P1 | Backend bank DTO/controller and Frontend BankingSetupPanel | Expose/derive effective parent-connection state separately from account link state; disable UI operations on missing/inactive parent |
+| C2-026 | P1 | Backend `src/services/connection.service.js`, API error mapper, frontend connection panel | Preserve create status=failed semantics for HTTP 201 and expose safe typed reauthorization failure categories |
 
 ## 18. Required test matrix and completion criteria
 
@@ -643,3 +648,73 @@ Support contact supplied by Co-op: `openbankingcustomersupport@co-opbank.co.ke`.
 ---
 
 **Final state of this branch:** a detailed, source-linked implementation specification is recorded in the docs. Application fixes are still outstanding and must be implemented and tested in a subsequent code-change branch or follow-on commit.
+
+## 22. Cross-layer operation authorization and connection lifecycle corrections
+
+These findings were verified against the implementation branch at the source revisions recorded in the audit. They extend the OAuth/resource-contract findings above and are mandatory before the frontend/backend pair can be called aligned.
+
+### 22.1 Strategy-specific entitlement: current code is too permissive
+
+Current source path:
+- POST /bank/accounts/:id/sync calls bankService.sync(), then bankSyncService.synchronizeBankAccount().
+- strategyForProvider('COOP') selects createCoopSyncStrategy(), whose mode is full_statement_window.
+- CoopSyncStrategy.fetchPage() calls adapter.getFullStatement(). This is not AccountTransactions polling.
+- hasBankSyncEntitlement() currently returns poll === true OR statement === true.
+- Therefore poll-only account entitlement can pass the generic gate and authorize a FullStatement request. This contradicts the intended separation between poll and statement capabilities.
+
+Required correction:
+- FullStatement date-window sync requires statement === true.
+- Manual date-range statement import requires statement === true.
+- AccountTransactions polling, only after stable transaction identity and endpoint behavior are verified, requires poll === true.
+- Replace the generic OR predicate with strategy/resource-specific authorization. Never use poll as a fallback for FullStatement or statement as a fallback for AccountTransactions.
+- Ensure sync result/checkpoint metadata identifies FullStatement date-window sync, not AccountTransactions polling.
+- Preserve the existing sync lease/fence and account/connection revalidation; change only the capability semantics and their tests.
+
+### 22.2 Manual statement import does not enforce the complete provider gate
+
+bank.service.importStatement() currently checks account connectionStatus, statement entitlement and active parent connection before calling getFullStatement(). It does not apply the provider operationalReady/non-production lab gate used by bankSync.service.js, and it does not re-read the parent connection after the provider request before calling storeAndReconcile().
+
+Required correction: use the same effective provider-readiness/lab decision as scheduled/manual sync, then revalidate the current account association and parent BankConnection after the provider response and immediately before ingestion. A disconnect or reauthorization/association change during the provider request must prevent stale results from being accepted.
+
+### 22.3 Parent disconnect leaves child account flags stale; webhook does not check parent
+
+Current source facts:
+- connectionService.disconnect() changes BankConnection.status to disconnected but does not change linked BankAccount.connectionStatus or entitlements.
+- bankService.importStatement() and bankSync.service.js check parent connection status for ordinary request paths. Sync also rechecks at page boundaries.
+- webhook.routes.js queries a connected BankAccount by account-number hash and checks its webhookIngest entitlement, but does not load BankAccount.connectionId and verify that the parent BankConnection exists, belongs to the same client/provider and is active.
+- The callback route has a separate overall readiness/lab exposure gate. Within any environment where that route is exposed, stale child flags can still authorize a callback after parent disconnect because the parent is not checked.
+
+Required correction:
+1. Keep BankAccount.connectionStatus distinct from BankConnection.status.
+2. Derive/expose effective account state with the current parent status; missing parent data is unavailable.
+3. Every sync/import/webhook operation must verify the parent BankConnection belongs to the same Tycoon client, is COOP and is active.
+4. Webhook callbacks after parent disconnect must be rejected or safely quarantined before transaction ingestion.
+5. Manual statement import must re-check parent state after provider retrieval and before ingestion.
+6. A disconnect must immediately make effective account operations unavailable. A child-record cascade is optional, but must not create partial or misleading state.
+
+### 22.4 Connection create and reauthorization outcomes
+
+connectionController.create() returns HTTP 201 when connectionService.create() returns. connectionService.create() catches an initial OAuth failure, persists BankConnection.status = failed and authMeta.lastAuthError, then returns the public DTO. This is resource creation with failed provider authentication, not a successful connection authorization. The frontend must inspect the DTO status and display a failed-auth state.
+
+Reauthorization authenticates staged credentials and only promotes them after success, preserving the previous credential version on failure. Its current catch converts all causes to a generic BankAuthFailed. Preserve a safe typed category/code so invalid key, wrong token type, scope, rate limit and upstream outage remain distinguishable without exposing raw provider messages or secrets.
+
+### 22.5 Effective capability derivation
+
+Do not derive an operational account permission from a static registry boolean alone. The current registry marks statementImport, balance and webhook true, while the readiness profile says statement is not sandbox verified and balance/webhook are not contract/sandbox verified. Keep implementation presence, contract verification, account entitlement, environment-specific lab allowance and production operational readiness separate.
+
+At minimum:
+- FullStatement statement entitlement may be allowed only under the explicit verified contract and current provider readiness/lab rules.
+- Balance and webhook entitlements remain unavailable in production until their resource/callback contracts and operational readiness are verified.
+- The manual statement endpoint enforces the same readiness/lab policy as scheduled sync.
+- A frontend DTO can report configured capability, but must not label it operational when the provider readiness gate is false.
+
+### 22.6 Required tests
+
+- Poll=true / statement=false cannot authorize FullStatement sync.
+- Statement=true / poll=false can authorize FullStatement only under active parent connection and permitted readiness/lab state.
+- Manual statement import rejects outside the readiness/lab policy and rejects if parent disconnects during the provider request.
+- Callback after parent disconnect or with missing/mismatched parent connection is not ingested.
+- Child account stale connectionStatus and entitlement flags cannot bypass the parent check.
+- HTTP 201 with status=failed is not reported as provider authorization success.
+- Failed reauthorization retains old credential version and returns a safe typed error.
+- Frontend effective-parent-state gate is tested against active, failed, disconnected and missing parents.
