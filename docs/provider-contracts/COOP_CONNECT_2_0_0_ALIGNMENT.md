@@ -87,7 +87,7 @@ The DCR response contains a `clientId` and `clientSecret`. These are the Consume
 
 The registration administrator's username/password are credentials for DCR in the sample. They are not automatically the credentials a Tycoon landlord should enter when connecting a bank account. The customer has already been asked for the generated keys. Do not add DCR registration to the customer connection flow and do not ask customers for the DCR administrator credentials.
 
-`saasApp: true` is present in the DCR example. It does not, by itself, establish the precise onboarding/authorization process for every customer's underlying bank account.
+`saasApp: true` is present in the DCR example. It does not, by itself, establish the precise onboarding/authorization process for every customer's underlying bank account. The guide's separate portal HOWTO also refers to Consumer Key / Consumer Secret generated through the Developer Portal. Do not request DCR administrator credentials from a Tycoon landlord. It remains unverified whether one SaaS registration may authorize multiple underlying customer accounts, whether each account holder must separately consent, and how Co-op associates those accounts with the application.
 
 ### 3.2 Co-op documents more than one grant
 
@@ -105,7 +105,9 @@ The error list documents both application and user access-token types. Error `90
 
 ### 3.3 Canonical client-credentials request
 
-The PHP HOWTO provides the explicit request:
+The PHP HOWTO uses POST with Basic CK:SK and the string body `grant_type=client_credentials`. Its snippet does not explicitly set a `Content-Type` header. The Java HOWTO instead shows GET without the explicit grant body. This is an inconsistency in the supplied guide.
+
+**Tycoon implementation target (not yet sandbox-verified):**
 
 ```http
 POST https://developer.co-opbank.co.ke:8243/token
@@ -115,7 +117,7 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=client_credentials
 ```
 
-The Java HOWTO instead shows GET without the explicit grant body. This is an inconsistency in the supplied guide. The implementation should use the explicit POST/form example because it carries the actual grant parameter, then verify it against Co-op sandbox.
+POST is selected because it is the example that explicitly carries the grant parameter. Do not silently fall back to GET. Verify method, content type, body, token type, required scope and token lifecycle with Co-op sandbox. The password-grant sample's `expires_in: 3600` and `refresh_token` do not prove client-credentials expiry or refresh behavior.
 
 The docs' sample `-k` and `CURLOPT_SSL_VERIFYPEER=false` disable TLS verification. These are not acceptable production implementation settings. Keep normal TLS certificate and hostname verification enabled.
 
@@ -553,11 +555,16 @@ Required:
 | C2-024 | P0 | Backend `src/services/bank.service.js` | Re-check parent connection after FullStatement response and before manual statement ingestion; apply provider readiness/lab gate to direct statement import |
 | C2-025 | P1 | Backend bank DTO/controller and Frontend BankingSetupPanel | Expose/derive effective parent-connection state separately from account link state; disable UI operations on missing/inactive parent |
 | C2-026 | P1 | Backend `src/services/connection.service.js`, API error mapper, frontend connection panel | Preserve create status=failed semantics for HTTP 201 and expose safe typed reauthorization failure categories |
+| C2-027 | P1 | Provider onboarding documentation / connection workflow | Distinguish DCR application-credential provisioning from per-customer bank-account authorization; do not infer multi-customer authorization from `saasApp: true`; obtain Co-op confirmation before production onboarding |
+| C2-028 | P1 | Co-op token transport / integration tests / provider documentation | Record the PHP POST versus Java GET conflict; implement POST with the explicit grant body as the provisional target, do not add a silent GET fallback, and close the method/header/token-lifecycle gate with sandbox evidence |
+| C2-029 | P1 | Co-op AccountTransactions adapter, capability registry and tests | Treat the documented AccountTransactions path as enquiry only; do not build a funds-transfer operation from the “Pesalink funds transfer” caption; keep polling disabled until a stable unique transaction identity and response contract are verified |
 
 ## 18. Required test matrix and completion criteria
 
 ### Authentication and ownership
-- Client-credentials POST has Basic base64 of CK:SK and exactly the expected form-urlencoded grant.
+- Client-credentials POST has Basic base64 of CK:SK and the explicit form-style grant body; the token method/header choice is marked provisional until Co-op sandbox verification.
+- DCR administrator credentials are never requested from a Tycoon landlord. The implementation does not assume `saasApp: true` authorizes every underlying Tycoon customer's bank account.
+- The Java GET sample does not cause an automatic GET fallback when the selected POST target fails.
 - CK/SK are the only required customer fields for normal create and reauthorize.
 - No username/password sent by the normal connection workflow.
 - Password grant is never silently selected as a fallback.
@@ -581,7 +588,7 @@ Required:
 - Token and API URL configuration can differ.
 - TLS verification remains enabled.
 - Account Validation MessageCode 0 and -1 have separate outcomes.
-- Account authorization `-8`, invalid token `-7/-7`, wrong token type `900905`, missing scope `900910`, missing subscription `900908`, throttle `900800`, hard throttle `900801`, timeout `-4` and invalid payload `-2` are not collapsed.
+- Account authorization `-8`, invalid token `-7`, wrong token type `900905`, missing scope `900910`, missing subscription `900908`, throttle `900800`, hard throttle `900801`, timeout `-4` and invalid payload `-2` are not collapsed.
 - Account number formats are tested per endpoint after confirmation.
 - Account Validation cannot activate an account if result is false, absent or malformed.
 
@@ -635,6 +642,7 @@ Support contact supplied by Co-op: `openbankingcustomersupport@co-opbank.co.ke`.
 
 ## 21. Explicit non-goals and preservation rules
 
+- Do not implement outgoing Co-op/PesaLink funds transfer from the AccountTransactions enquiry example; no funds-transfer contract is supplied there.
 - Do not replace the Tycoon bank-connection or encrypted credential ownership architecture.
 - Do not make Tycoon `clientId` a Co-op OAuth identifier.
 - Do not introduce global customer CK/SK environment fallback.
@@ -718,3 +726,41 @@ At minimum:
 - HTTP 201 with status=failed is not reported as provider authorization success.
 - Failed reauthorization retains old credential version and returns a safe typed error.
 - Frontend effective-parent-state gate is tested against active, failed, disconnected and missing parents.
+
+## 23. Reconciliation of the supplied Co-op Connect 2.0.0 guide — 2026-11-20
+
+This section records source ambiguities that must not be converted into implementation assumptions. The corresponding source ledger is in `docs/provider-contracts/CONTRACT_EVIDENCE.md`.
+
+### 23.1 DCR issuance is not per-customer account authorization
+
+The guide's DCR flow authenticates with registration-administrator Basic credentials, returns OAuth `clientId` / `clientSecret`, and then uses that pair for OAuth token acquisition. The separate portal HOWTO refers to Consumer Key / Consumer Secret generated through the portal. These credentials are Co-op application credentials, not Tycoon ownership identifiers.
+
+The guide's `saasApp: true` flag does not answer whether one SaaS application registration may access accounts belonging to multiple underlying customers, what account-holder authorization/consent is required, or how Co-op binds those accounts to the SaaS application. C2-027 remains open until Co-op confirms the supported account-authorization and onboarding model. Do not ask Tycoon landlords for DCR administrator credentials.
+
+### 23.2 Token method and lifecycle remain a verification gate
+
+The PHP HOWTO uses POST with a string `grant_type=client_credentials` body. The Java HOWTO uses GET and omits the grant body. The PHP snippet does not explicitly set `Content-Type`. The implementation target is POST with a form-urlencoded body because it is the clearest example containing the grant parameter. This target is not evidence of successful sandbox authentication; no automatic GET fallback is allowed.
+
+The guide's `expires_in: 3600` and `refresh_token` are shown in the password-grant sample. They do not define client-credentials token expiry or refresh behavior. Resource-specific grant/token type and scopes remain blocked until the relevant OAuth2 Security/resource authorization evidence is obtained and sandbox-verified. C2-028 tracks the method conflict and verification.
+
+### 23.3 AccountTransactions is an enquiry resource, not a transfer contract
+
+The guide labels its AccountTransactions code example “Pesalink funds transfer request”, but the actual path is `POST /Enquiry/AccountTransactions/1.0.0/Account`; its request asks for an account number and number of transactions, and its response contains account details, totals and transaction-enquiry rows. The supplied section does not specify a transfer instruction, beneficiary, debit authorization, transfer status, or funds-movement response. Treat the caption as inconsistent prose, not an API contract. Outgoing Co-op/PesaLink transfers are outside G4.
+
+The sample's transaction item contains `TransactionReference` but no `TransactionId`. No uniqueness or stability scope is documented for `TransactionReference`. It must not become an idempotency identity by assumption. The sample omits transaction currency. MiniStatement's top-level `Currency: KES` is account-summary data and does not establish transaction-item currency. AccountTransactions polling remains disabled until provider-confirmed identity, ordering and response behavior are available. C2-029 tracks this boundary.
+
+The sample represents `NoOfTransactions` as a string and mentions a configurable maximum with 500 as an example. That is not a complete formal schema; verify the accepted JSON type and configured limit before enabling a mapper.
+
+### 23.4 Account-number and test-account examples are not universal validators
+
+The Account Validation test list includes 11-digit values; other enquiry examples use 14-character values; the FullStatement OpenAPI separately declares a 14-character constraint with a conflicting example. Preserve account numbers as strings and obtain accepted formats separately for each resource. Do not change the shared validator to 11 or 14 based on a single example.
+
+The sample account/status tables are test vectors, not production account-state guarantees and not a complete response taxonomy. Use the response code table for typed provider errors, and verify resource-specific behavior in sandbox.
+
+### 23.5 Error-code boundary
+
+The guide's `-8` description varies with the surrounding example: it refers to account/debit-account authorization failure and includes missing/invalid or non-owned accounts. Treat `-8` as a distinct account/resource authorization failure, not as a generic invalid OAuth token. Confirm the exact resource-specific `-8` behavior before relying on it for any resource-specific state transition.
+
+### 23.6 Transport security
+
+The guide's sample commands disable TLS verification. Those switches are not part of the integration contract. Keep certificate and hostname verification enabled in all application environments; sandbox certificate configuration must be fixed rather than disabling verification.

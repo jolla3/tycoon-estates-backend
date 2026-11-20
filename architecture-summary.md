@@ -15,7 +15,7 @@ G4 builds a **provider-neutral, multi-client** bank integration foundation:
 
 - `BankConnection` owns connection identity, credential **references**, auth lifecycle, and connection health.
 - `BankAccount` owns physical account identity, client/estate association, and current connection link.
-- Co-op is the first operational adapter only.
+- Co-op is the only implemented G4 adapter; its overall `operationalReady` remains `false` pending provider verification.
 - Polling and webhooks share one normalized ingestion path into **existing G3** reconciliation and `accountingPosting`.
 
 **NON-GOAL:** G5 Daraja/M-PESA. **NON-GOAL:** second Ledger/Payment engine. **NON-GOAL:** implementing KCB/EQUITY/NCBA in G4.
@@ -93,7 +93,7 @@ G4 builds a **provider-neutral, multi-client** bank integration foundation:
 
 - Read PRD, architecture, this summary, and SOURCE_CROSSWALK before coding.
 - Recheck GitHub HEAD; record SHA.
-- Change application code only inside `g4/` until a merge strategy is approved.
+- The verified repository source tree is `src/`; this branch has no `g4/` directory. Change only the existing, requirement-scoped `src/` paths and their tests. Do not create a parallel `g4/` tree. Any future source-root migration requires an explicit approved migration and synchronized documentation.
 - No model/index/endpoint/dependency without a requirement ID.
 - No parallel finance engine.
 - Versioned migrations with dry-run/preflight only.
@@ -147,6 +147,9 @@ Full evidence and file-by-file requirements: [`docs/provider-contracts/COOP_CONN
 - AccountTransactions polling stays disabled until the transaction identifier is proved stable and its item mapping is verified. MiniStatement's supplied sample has balances and no transaction list. Balance endpoint path is still unverified.
 - Never persist inbound INS `Basic` credential in rawPayload/quarantine/logs. It is distinct from outbound CK/SK.
 - Keep Co-op `operationalReady=false` until token/resource scopes, endpoint contracts, sandbox behavior and callback gates have evidence. Detailed acceptance tests and blocked questions are in the linked audit.
+- The guide's PHP POST and Java GET client-credentials examples conflict; POST with the explicit grant body is the implementation target, not sandbox proof. Do not infer client-credentials TTL/refresh from the password-grant sample.
+- DCR application-key issuance and Tycoon customer account authorization are separate. `saasApp: true` does not prove multi-customer account access; obtain Co-op confirmation.
+- AccountTransactions is an `/Enquiry/` operation. Its “Pesalink funds transfer” caption is misleading; no transfer contract is established. Its sample has `TransactionReference` but no `TransactionId` or uniqueness guarantee, so polling stays disabled. MiniStatement's KES value is account-summary currency, not transaction-item currency.
 
 ## 10. Co-op effective connection state and resource-specific authorization
 

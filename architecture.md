@@ -388,35 +388,45 @@ The Tycoon ownership field, its ObjectId type, authorization boundary, AES-GCM a
 
 ### 17.2 Authentication target
 
-The Co-op Connect 2.0.0 guide documents DCR grant types `client_credentials password refresh_token` and a separate CK/SK-only application-token example. The normal Tycoon connection workflow therefore targets:
+The Co-op Connect 2.0.0 guide documents two ways of obtaining application credentials: a DCR example authenticated with registration-administrator credentials and returning an OAuth `clientId` / `clientSecret` pair, and a portal HOWTO that refers to generated Consumer Key / Consumer Secret (CK/SK). In the DCR sequence, the returned pair is then used for OAuth token acquisition. These are Co-op application credentials, never the Tycoon `BankConnection.clientId`.
+
+DCR is application setup, not ordinary Tycoon bank-account linking. The guide's `saasApp: true` flag does not establish whether one SaaS registration may access accounts belonging to multiple underlying customers, whether each Tycoon customer requires separate registration/consent, or how Co-op binds those accounts to each account holder. Do not ask a landlord for DCR administrator credentials and do not infer multi-customer account authorization from the SaaS flag. Obtain Co-op confirmation before production onboarding.
+
+The normal Tycoon connection workflow targets:
 
 - Consumer Key + Consumer Secret as the only required customer-supplied outbound credential pair.
 - HTTP Basic credentials formed from CK:SK.
-- A form-urlencoded POST to the separately configured token URL with `grant_type=client_credentials`.
+- A POST to the separately configured token URL with a form-style `grant_type=client_credentials` body.
 - No username/password fields in the normal connection form or mandatory provider credential schema.
 - No implicit password-grant fallback.
 
-The password grant is documented by Co-op; it is not inherently invalid. It is simply a distinct grant, and the supplied material does not establish that the account-enquiry resources used by Tycoon require it. Support it only behind an explicit resource-specific token-type decision backed by Co-op's OAuth2 Security / authorization documentation. Do not ask a landlord for retail internet/mobile banking credentials.
+The password grant is documented by Co-op; it is not inherently invalid. It is a distinct grant, and the supplied material does not establish that the account-enquiry resources used by Tycoon require it. Support it only behind an explicit resource-specific token-type decision backed by Co-op's OAuth2 Security / authorization documentation. Do not ask a landlord for retail internet/mobile banking credentials.
 
-The PHP client-credentials example shows POST plus the explicit form field. The Java example shows GET without the grant body. Treat this as a documentation inconsistency: implement the explicit POST/form example and verify it against sandbox; do not silently switch methods. Do not copy the examples' disabled TLS verification (`-k`, `CURLOPT_SSL_VERIFYPEER=false`) into the application.
+**Token-method evidence conflict:** the PHP HOWTO uses POST and supplies the explicit `grant_type=client_credentials` body. Its snippet does not explicitly set a `Content-Type` header, although the body is form-style. The Java HOWTO shows GET with no explicit grant body. The Tycoon implementation target is POST with a form-urlencoded body because it is the clearest example containing the grant parameter; this is a selected implementation target, not sandbox-verified behaviour. Do not silently fall back to GET. Verify method, headers, body, required scope and accepted token type with Co-op.
 
-Scopes are resource-specific. The generic `apim:subscribe apim:api_key` example is not proof of the account-enquiry scopes. Do not guess, default, or make tenants type an arbitrary scope. Resolve scopes from the actual resource authorization declarations and configure them as reviewed provider/resource configuration. If the client-credentials sample obtains a token without an explicit scope, that alone does not prove the resulting token can invoke every subscribed resource.
+Do not infer client-credentials token TTL or refresh behaviour from the password-grant response containing `expires_in: 3600` and a `refresh_token`. Use validated response metadata; keep unknown lifecycle behaviour gated.
+
+Scopes are resource-specific. The generic `apim:subscribe apim:api_key` example is not proof of account-enquiry scopes. Do not guess, default, or make tenants type an arbitrary scope. Resolve scopes from the actual resource authorization declarations and configure them as reviewed provider/resource configuration. If the client-credentials sample obtains a token without an explicit scope, that alone does not prove the resulting token can invoke every subscribed resource.
 
 ### 17.3 Endpoint and payload rules
 
-Use the exact operation paths in the Co-op 2.0.0 guide and the separate FullStatement OpenAPI. Keep token URL and API URLs separately configurable. The supplied samples use `developer.co-opbank.co.ke:8243`; the FullStatement OpenAPI names a separate sandbox server. Do not assume one host/base path applies to every environment and resource. Production URLs are not established by these sandbox/examples.
+Use the exact operation paths in the Co-op 2.0.0 guide and the separate FullStatement OpenAPI. Keep token URL and API URLs separately configurable. The supplied enquiry samples use `developer.co-opbank.co.ke:8243`; the FullStatement OpenAPI names a separate sandbox server. Do not assume one host/base path applies to every environment and resource. Production URLs are not established by these sandbox/examples.
 
 - Account Validation: `POST /Enquiry/Validation/Account/1.0.0`; MessageCode `0` means valid and `-1` means invalid account number.
-- Account Transactions: `POST /Enquiry/AccountTransactions/1.0.0/Account`; the example includes string `NoOfTransactions`, with a documented configurable maximum of 500. Polling remains disabled until stable transaction identity is verified.
-- Mini Statement: `POST /Enquiry/MiniStatement/Account/1.0.0`; the supplied sample returns account/balance data and does not show a transaction array. Do not infer that it is a transaction feed.
+- Account Transactions: `POST /Enquiry/AccountTransactions/1.0.0/Account`; the request sample sends `NoOfTransactions` as a string and describes a configurable limit with 500 as an example. The response sample includes account details, totals and transaction-enquiry rows.
+- **AccountTransactions is not a documented funds-transfer operation.** The guide's prose labels this snippet “Pesalink funds transfer request”, but the actual route is under `/Enquiry/AccountTransactions/` and the sample response is an account transaction enquiry. No funds-transfer request/response, debit instruction, beneficiary, consent or transfer status contract is established by this example. Do not implement outgoing transfers from this material.
+- The AccountTransactions item sample has `TransactionReference`, not `TransactionId`. The guide does not state that `TransactionReference` is unique or stable at account, provider, or connection scope. It also shows no transaction-item currency. Do not treat the reference as a proven idempotency key; keep polling disabled until identity and ordering guarantees are confirmed.
+- Mini Statement: `POST /Enquiry/MiniStatement/Account/1.0.0`; the supplied sample returns account/balance summary data and does not show a transaction array. Its top-level `Currency: KES` is an account-summary field, not evidence of a transaction-item currency mapping.
 - Full Statement: use the separate FullStatement OpenAPI operation/server and request shape. Use the FullStatement item mapper, not the generic AccountTransactions mapper.
 - Account Balance: the supplied materials do not establish the current code's `/AccountBalance` path. Keep the capability disabled until the exact resource path, request, response and authorization are supplied.
 
-The guide shows 11-digit Account Validation test-account examples while the existing shared schema enforces 14 digits and other examples use 14 digits. Do not loosen or preserve one global format by assumption. Verify allowed account-number formats per operation with Co-op and encode only the verified rules.
+The guide's Account Validation test-account examples include 11-digit numbers, while MiniStatement / AccountTransactions examples and the FullStatement schema include 14-character values. This is a source discrepancy, not a universal account-number rule. Verify accepted formats per operation with Co-op and encode only the verified rules. Keep account numbers as strings and preserve leading zeros.
 
 ### 17.4 Response semantics and error classification
 
-Do not flatten every non-zero MessageCode into a generic provider outage. At minimum distinguish invalid parameter, invalid account, account authorization failure, missing/invalid token, wrong token type, resource subscription failure, insufficient scope, rate throttling, hard limits, temporarily blocked APIs, timeouts and transient backend unavailability. The authoritative codes/examples and required handling are enumerated in the alignment document.
+Do not flatten every non-zero MessageCode into a generic provider outage. At minimum distinguish invalid parameter, invalid account, account authorization failure, missing/invalid token, wrong token type, resource subscription failure, insufficient scope, rate throttling, hard limits, temporarily blocked APIs, timeouts and transient backend unavailability.
+
+The guide's `-8` description varies by the surrounding resource example: it describes account/debit-account authorization failure, including a missing, invalid or account-not-belonging-to-the-API-consumer case. Treat it as an **account/resource authorization** failure, not as proof that the OAuth token itself is invalid. Confirm exact `-8` behaviour for each enabled enquiry resource with Co-op.
 
 Account Validation's invalid-account response is a business rejection, not a provider outage. The bank-service caller must require an explicit `valid === true` result before setting an account connected/validated. The provider adapter must classify MessageCode `-1` as invalid account and preserve the fail-closed behavior for all other failures. The current inner catch in `bank.service.connectAccount()` wraps every validation exception as `Errors.InvalidRequest`; correct it so only the explicit invalid-account result becomes a client input error. Token, scope, account authorization, rate-limit, timeout and upstream service errors must retain their typed categories. All classes of failure must prevent account persistence.
 

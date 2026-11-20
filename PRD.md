@@ -98,6 +98,7 @@ MUST, MUST NOT, SHOULD, MAY, BLOCKED BY VERIFICATION, ACCEPTANCE CRITERIA, INVAR
 
 - Reconnecting the same physical account through another connection **belonging to the same client** MUST reuse the existing BankAccount record and preserve its `_id`.
 - Cross-client transfer is not ordinary reconnect and is **not authorized** by this architecture.
+- Co-op outgoing funds transfer / PesaLink initiation is outside G4. The supplied AccountTransactions example is an enquiry response despite a misleading “Pesalink funds transfer” caption.
 - Disconnecting a connection MUST stop future sync and credential use without deleting historical BankAccount, BankTransaction, Payment, allocation, or Ledger records.
 
 ### 6.3 Credentials (LOCKED)
@@ -242,8 +243,8 @@ No frontend source in this backend repository. G4 defines backend HTTP contracts
 - `implemented` and `operationalReady` are separate states. An adapter existing does not authorize production traffic.
 - COOP has an implemented adapter, but its overall `operationalReady` remains `false`. KCB, EQUITY and NCBA remain disabled shells. No bank provider is currently declared operational.
 - COOP connection creation and account linking may use `COOP_BANK_LAB_MODE=1` only outside production. The default is disabled. The flag does not change the provider readiness profile.
-- COOP FullStatement synchronization requires the account's `statement` entitlement or `poll` entitlement and the registered FullStatement strategy. AccountTransactions list polling remains disabled.
-- Sync entitlement is revalidated during execution. Revocation of both polling and statement entitlements prevents continued synchronization.
+- COOP FullStatement synchronization requires `statement === true` and the registered FullStatement strategy. `poll` does not authorize FullStatement; AccountTransactions list polling remains disabled.
+- FullStatement's `statement` entitlement is revalidated during execution. Revoking `statement`, disconnecting the parent connection, or failing the provider readiness/lab gate prevents FullStatement synchronization; the separate `poll` flag is irrelevant to that strategy.
 - COOP webhook exposure requires webhook capability readiness or `COOP_WEBHOOK_LAB_OVERRIDE=1` outside production. The override never authorizes production exposure.
 - Lab mode does not bypass credential authentication, account validation, tenant ownership, callback authentication, quarantine or shared transaction ingestion.
 - The inbound Co-op INS Basic credential remains platform/application-level under the currently documented provider evidence. Do not represent it as a per-connection credential.
@@ -278,10 +279,13 @@ The detailed, file-by-file, evidence-backed change specification is maintained i
 | G4-COOP-POLL-001 | AccountTransactions polling remains disabled until the stable transaction identity and endpoint-specific response contract are verified. |
 | G4-COOP-SEC-001 | The inbound INS Basic callback credential is kept distinct from outbound CK/SK and must never be persisted in transaction rawPayload or quarantine content. |
 | G4-COOP-READY-001 | A method or registry flag is not proof of operational readiness. Unverified Balance, MiniStatement, polling and callback capabilities remain disabled or explicitly non-operational. |
+| G4-COOP-ONBOARD-001 | DCR/application-credential provisioning is distinct from authorizing each underlying customer bank account. `saasApp: true` does not prove that one registration may access every Tycoon client's accounts; obtain Co-op confirmation before production onboarding. |
+| G4-COOP-AUTH-005 | The guide's PHP and Java client-credentials examples disagree on POST versus GET. Use POST with the explicit `grant_type=client_credentials` form body as the best-supported implementation target, but require sandbox verification and do not silently fall back to GET. |
+| G4-COOP-POLL-002 | AccountTransactions is documented at an `/Enquiry/` route and returns transaction-enquiry data. Its surrounding “Pesalink funds transfer” label is inconsistent and does not define a transfer operation. Do not implement fund transfers from that example; keep polling disabled until transaction identity is verified. |
 
 ### Evidence and acceptance rule
 
-The Co-op Connect 2.0.0 guide confirms DCR grant registration for `client_credentials`, `password`, and `refresh_token`, and separately demonstrates the CK/SK-only `client_credentials` token request. It does **not** prove that every resource accepts the same grant or the same scope. Error `900905` explicitly warns that a resource can reject the wrong access-token type.
+The Co-op Connect 2.0.0 guide confirms DCR registration examples for `client_credentials`, `password`, and `refresh_token`, and separately demonstrates a CK/SK-only `client_credentials` token request. It does **not** prove that every resource accepts the same grant or scope, that one SaaS registration authorizes every Tycoon customer's bank accounts, or that client-credentials token lifetime/refresh matches the password-grant sample. The PHP and Java HOWTO token methods also conflict. Error `900905` explicitly warns that a resource can reject the wrong access-token type. AccountTransactions is an enquiry route; its misleading “Pesalink funds transfer” caption is not a funds-transfer contract.
 
 Do not mark this work complete until the implementation and tests in the detailed alignment document pass. Local tests do not replace Co-op sandbox verification. Overall Co-op `operationalReady` remains false until the provider gates are closed with evidence.
 
