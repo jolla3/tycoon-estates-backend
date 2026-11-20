@@ -27,7 +27,7 @@ For PayBill allocation, treat `BillRefNumber` as an optional provider value. Tyc
 
 **Tycoon collection-reference format (`PROPOSED`, source-implemented in `src/utils/mpesaCollectionReference.js`).** Tycoon issues its own references so that a tenant types a short code on the M-PESA PayBill prompt. Format: `T` + 8 random characters from the Crockford base-32 alphabet (no `I L O U`) + 1 check character = **10 characters**, comfortably inside the documented 20. Inbound values are normalized by trimming, uppercasing, removing spaces and hyphens and mapping `O→0`, `I/L→1`; anything that is then not exactly a well-formed reference stays **unallocated** — it is never fuzzy-matched. The check character only catches typos; it is not a secret and not authentication. `BillRefNumber` is routing evidence, not proof of payment: a receipt still needs its own receipt identity and G5/G3 safeguards.
 
-The target data-model proposal and migration/receipt-visibility rules are in the authoritative correction section at the top of `docs/superadmin/TYCOON_SUPERADMIN_CURRENT_BACKEND_MAP.md` and in the frontend `architecture.md`. They are target architecture only; current code remains Till-only with one estateId.
+The target data-model proposal and migration/receipt-visibility rules are in the authoritative correction section at the top of `docs/superadmin/TYCOON_SUPERADMIN_CURRENT_BACKEND_MAP.md` and in the frontend `architecture.md`. The shared-merchant model is now implemented in source on the review branch (see the implementation-status section of the backend map); it is not production-verified.
 
 
 **Updated:** 2026-11-14

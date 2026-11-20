@@ -57,6 +57,14 @@ Backend review branch: `docs/superadmin-onboarding-and-history`. This is not on 
 
 **Current code boundary (not target product):** one DRAFT BUY_GOODS_TILL profile maps to one estate. Multi-estate mappings, PAYBILL, BillRef routing, shared callback registration evidence and protected Pull-number lifecycle are not implemented. The manual-options latest-50 mismatch remains open. No browser, DB replica-set integration or live provider tests are claimed.
 
+## Implementation status on this review branch (supersedes "Till-only / one estateId" statements above)
+
+Implemented in source (unit-tested; replica-set integration tests are authored but **NOT EXECUTED: required service unavailable in this execution environment**): `MpesaMerchantProfileEstate` mapping and `MpesaCollectionReference` models; PAYBILL + BUY_GOODS_TILL profile creation with `estateIds[]`; global `{provider, businessShortCode}` ownership index and readiness gates (`profileEstateMapping`, `collectionReferences`); `scripts/migrations/20261119_g54_mpesa_shared_merchant.js` (dry-run default, collision preflight, idempotent legacy backfill, explicit index creation; never run against any database by this work); PayBill normalization, exact-reference allocation and the typed `evaluateReferenceEvidence`/`postAllocatedReceipt` path that shares `executeFencedPosting` with the Till SMS path; Till evidence now requires an ACTIVE mapping and a merchant-bound link; shared callback config (`DARAJA_CALLBACK_BASE_URL`), registration evidence, encrypted+masked Pull number, explicit audited C2B/Pull registration and reconcile; fail-closed `handleC2bValidation`; allocation-scoped `/mpesa-transactions`; paginated manual-options; reference retirement on tenancy close.
+
+Still blocked/unverified: callback authentication, receipt-identity gate `canonicalReceiptIdentity` (hard-coded false, so automatic posting stays disabled), Pull eligibility/fixtures, and whether closed-tenancy late payments should auto-post under G3 (they go to review).
+
+Rollback/recovery for the migration: delete only `mpesamerchantprofileestates` rows with `source: 'LEGACY_MIGRATION'` and drop the four new indexes; `profile.estateId` and `uniq_client_business_shortcode` are untouched unless `--drop-legacy-index` is passed explicitly.
+
 ## Adversarial source review result — 2026-11-19 (verified against branch HEAD `e491899`)
 
 The sections above were checked against source. They are accurate; the findings below add facts, they do not change the target.
