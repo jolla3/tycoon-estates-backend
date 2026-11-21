@@ -96,7 +96,7 @@ export const paymentService = {
 
         // Ensure charges exist for the payment's calendar period only as a side effect of
         // existing billing; do not invent a new RentCharge just because money arrived.
-        const payPeriod = period || dateUtil.periodFromDate(payDate) || dateUtil.currentPeriod();
+        const payPeriod = period || dateUtil.periodOf(payDate) || dateUtil.currentPeriod();
         await rentService.ensureChargesForTenancy(clientId, tenancy, house, payPeriod, { session });
         const outstanding = await rentService.outstandingChargesForTenancy(clientId, tenancy._id, { session });
 
