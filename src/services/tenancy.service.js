@@ -76,8 +76,8 @@ async function retireTenancyReferences(clientId, tenancyId, session) {
 
 /**
  * Tenancies that overlap a Nairobi calendar day window [dayStart, dayEnd].
- * Used for date-only payment attribution. If more than one distinct tenant
- * overlaps the day, attribution is ambiguous and callers must reject.
+ * Used for date-only payment attribution. Multiple overlapping rows are always
+ * ambiguous for a date-only submission (including same-tenant overlaps).
  */
 async function coveringNairobiDay(clientId, houseId, dayStart, dayEnd, { session = null } = {}) {
   return Tenancy.find({
@@ -141,7 +141,8 @@ export const tenancyService = {
    *    tenancy matching House.tenantId, tenant in same client+estate.
    * 2) paymentDate (Nairobi day) must resolve to exactly one historical tenancy
    *    covering that calendar day (may be CLOSED / former occupant).
-   * Same-day tenancy transitions that leave multiple overlapping tenants are rejected.
+   * Multiple tenancy rows covering the same day are always rejected, even when
+   * they share the same tenantId. Noon is never used as a tie-breaker.
    *
    * @param {object} nairobiDay - from dateUtil.parseNairobiDateOnly, or a Date (legacy).
    */
@@ -218,30 +219,17 @@ export const tenancyService = {
       };
     }
 
-    const tenantIds = new Set(covering.map((t) => String(t.tenantId)));
-    if (tenantIds.size > 1) {
+    // Date-only payment cannot disambiguate multiple tenancy rows covering the same day,
+    // even when they share the same tenantId. Never use noon as a tie-breaker.
+    if (covering.length > 1) {
       return {
         ok: false,
-        reason: 'More than one tenant occupied this house on the selected payment date. Ownership is ambiguous; a time of day is not collected.',
+        reason: 'More than one tenancy record covers the selected payment date for this house. Ownership is ambiguous; a time of day is not collected.',
         tenancy: null,
       };
     }
 
-    // Prefer the tenancy that actually contains noon of that day; else unique tenant's latest.
-    const noon = nairobiDay?.noon || dayStart;
-    const atNoon = covering.filter((t) => tenancyContains(t, noon));
-    let chosen;
-    if (atNoon.length === 1) {
-      chosen = atNoon[0];
-    } else if (atNoon.length === 0 && covering.length === 1) {
-      chosen = covering[0];
-    } else if (covering.length === 1) {
-      chosen = covering[0];
-    } else {
-      // Same tenant, multiple tenancy rows on the day — still attribute to the one containing noon if possible.
-      chosen = atNoon[0] || covering[0];
-    }
-
+    const chosen = covering[0];
     if (String(chosen.estateId) !== String(house.estateId)) {
       return {
         ok: false,
@@ -470,39 +458,33 @@ export const tenancyService = {
           await current.save({ session });
           await retireTenancyReferences(clientId, current._id, session);
           await House.updateOne(
-            { _id: current.houseId, clientId },
+            { _id: current.houseId, clientId, tenantId: tenant._id },
             { tenantId: null, status: 'vacant' },
             { session }
           );
         }
-        try {
-          const [created] = await Tenancy.create(
-            [{
-              clientId,
-              estateId: newHouse.estateId,
-              houseId: newHouse._id,
-              tenantId: tenant._id,
-              startAt: now,
-              endAt: null,
-              status: 'ACTIVE',
-              openedByUserId: actorUserId,
-            }],
-            { session }
-          );
-          newTenancy = created;
-        } catch (err) {
-          if (err?.code === 11000) throw Errors.Conflict('Target house already has an active tenancy');
-          throw err;
-        }
+        const [created] = await Tenancy.create(
+          [{
+            clientId,
+            estateId: newHouse.estateId,
+            houseId: newHouse._id,
+            tenantId: tenant._id,
+            startAt: now,
+            endAt: null,
+            status: 'ACTIVE',
+            openedByUserId: actorUserId,
+          }],
+          { session }
+        );
+        newTenancy = created;
         newHouse.tenantId = tenant._id;
         newHouse.status = 'occupied';
         await newHouse.save({ session });
-        tenant.houseId = newHouse._id;
-        tenant.estateId = newHouse.estateId;
-        tenant.status = 'active';
-        tenant.moveInDate = now;
-        tenant.moveOutDate = null;
-        await tenant.save({ session });
+        await Tenant.updateOne(
+          { _id: tenant._id, clientId },
+          { houseId: newHouse._id, estateId: newHouse.estateId, status: 'active', moveInDate: now, moveOutDate: null },
+          { session }
+        );
       });
       return newTenancy;
     } finally {
