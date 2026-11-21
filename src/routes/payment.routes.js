@@ -27,6 +27,10 @@ export const manualOptionsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).max(10000).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
   search: z.string().trim().max(80).optional(),
+  // Selectable (period-eligible) tenancies: separate paging/search from the informational history.
+  eligiblePage: z.coerce.number().int().min(1).max(10000).optional(),
+  eligibleLimit: z.coerce.number().int().min(1).max(50).optional(),
+  eligibleSearch: z.string().trim().max(80).optional(),
 }).strict();
 
 router.get('/', authenticate, clientContext, paymentController.list);
