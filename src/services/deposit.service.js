@@ -6,6 +6,8 @@ import { DepositMovement } from '../models/DepositMovement.js';
 import { Ledger } from '../models/Ledger.js';
 import { Tenant } from '../models/Tenant.js';
 import { Tenancy } from '../models/Tenancy.js';
+import { House } from '../models/House.js';
+import { Estate } from '../models/Estate.js';
 import { Errors } from '../utils/errors.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import { audit } from './audit.service.js';
@@ -263,6 +265,25 @@ async function assertTenancyStillEligible(clientId, tenancy, operation, session)
   assertStatusPermitted(fresh, operation);
 }
 
+/** Display labels so a user can choose between tenancies (ids alone are not choosable). */
+async function describeTenancies(clientId, tenancies) {
+  const [houses, estates] = await Promise.all([
+    House.find({ clientId, _id: { $in: tenancies.map((t) => t.houseId) } }).select('houseNumber').lean(),
+    Estate.find({ clientId, _id: { $in: tenancies.map((t) => t.estateId) } }).select('name').lean(),
+  ]);
+  const h = new Map(houses.map((x) => [String(x._id), x.houseNumber]));
+  const e = new Map(estates.map((x) => [String(x._id), x.name]));
+  return tenancies.map((t) => ({
+    tenancyId: t._id,
+    estateId: t.estateId,
+    estateName: e.get(String(t.estateId)) ?? null,
+    houseId: t.houseId,
+    houseNumber: h.get(String(t.houseId)) ?? null,
+    startAt: t.startAt ?? null,
+    status: t.status,
+  }));
+}
+
 export const depositService = {
   /**
    * Tenant-keyed read. Never guesses between tenancies: with exactly one ACTIVE
@@ -284,6 +305,7 @@ export const depositService = {
       return {
         tenant, deposit: null, activeTenancyId: null, balance: null,
         eligibleTenancyCount: actives.length, eligibleTenancyIds, ambiguous: true,
+        eligibleTenancies: await describeTenancies(clientId, actives),
       };
     }
     const active = actives[0] || null;

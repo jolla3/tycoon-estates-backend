@@ -47,6 +47,8 @@ jest.unstable_mockModule('../../src/models/Deposit.js', () => ({
     create: async (docs) => docs.map((d) => { const r = { _id: oid(900 + db.deposits.length), save: async () => {}, ...d }; db.deposits.push(r); return r; }),
   },
 }));
+jest.unstable_mockModule('../../src/models/House.js', () => ({ House: { find: () => chain([]) } }));
+jest.unstable_mockModule('../../src/models/Estate.js', () => ({ Estate: { find: () => chain([]) } }));
 jest.unstable_mockModule('../../src/models/DepositMovement.js', () => ({ DepositMovement: {} }));
 jest.unstable_mockModule('../../src/models/Ledger.js', () => ({ Ledger: {} }));
 jest.unstable_mockModule('../../src/models/AuditLog.js', () => ({ AuditLog: {} }));
@@ -110,6 +112,7 @@ describe('legacy tenantId resolution', () => {
     db.tenancies = [tenancy(31, T1, EST_A), tenancy(32, T1, EST_A)];
     const r = await depositService.getForTenant(CLIENT, T1, null);
     expect(r).toMatchObject({ ambiguous: true, deposit: null, eligibleTenancyCount: 2 });
+    expect(r.eligibleTenancies.map((x) => String(x.tenancyId))).toEqual([oid(31), oid(32)]);
   });
 });
 
