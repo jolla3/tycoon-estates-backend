@@ -24,7 +24,7 @@ function matches(doc, q) {
 function chain(rows) {
   const c = {
     sort: () => c, limit: (n) => { rows = rows.slice(0, n); return c; },
-    session: () => c, lean: () => c,
+    session: () => c, lean: () => c, select: () => c,
     then: (res, rej) => Promise.resolve(rows).then(res, rej),
   };
   return c;
