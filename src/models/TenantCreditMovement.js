@@ -26,6 +26,7 @@ const TenantCreditMovementSchema = new Schema(
     amountCents: { type: Number, required: true },
     // Exact provenance
     mpesaTransactionId: { type: Schema.Types.ObjectId, ref: 'MpesaTransaction', default: null },
+    manualReceiptId: { type: Schema.Types.ObjectId, ref: 'ManualReceipt', default: null },
     paymentId: { type: Schema.Types.ObjectId, ref: 'Payment', default: null },
     tenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null },
     rentChargeId: { type: Schema.Types.ObjectId, ref: 'RentCharge', default: null },
@@ -64,5 +65,6 @@ TenantCreditMovementSchema.index(
 );
 TenantCreditMovementSchema.index({ clientId: 1, estateId: 1, tenantId: 1, createdAt: 1 });
 TenantCreditMovementSchema.index({ mpesaTransactionId: 1 });
+TenantCreditMovementSchema.index({ manualReceiptId: 1 }, { sparse: true });
 
 export const TenantCreditMovement = mongoose.model('TenantCreditMovement', TenantCreditMovementSchema);
