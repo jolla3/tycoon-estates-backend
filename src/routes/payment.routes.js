@@ -19,6 +19,8 @@ export const manualPaymentSchema = z.object({
   amountCents: z.coerce.number().int().positive(),
   paymentDate: z.string().min(1, 'paymentDate is required'),
   tenderMethod: tenderMethods,
+  /** Client-generated once per intended submission; retries must reuse the same key. */
+  idempotencyKey: z.string().trim().min(8).max(128),
   paymentReference: z.string().max(120).optional(),
   // Edge-case / legacy fields — ordinary UI does not send these.
   period: periodString.optional(),
