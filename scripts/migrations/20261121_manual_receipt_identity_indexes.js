@@ -19,6 +19,52 @@ import { inspectManualReceiptIndexes } from '../../src/utils/manualReceiptIndexR
 const IDEMP = MANUAL_RECEIPT_INDEXES.IDEMPOTENCY;
 const REF = MANUAL_RECEIPT_INDEXES.REFERENCE;
 
+// MongoDB unique indexes are collection-scoped. During the transition from
+// legacy MANUAL Payment documents to ManualReceipt, explicitly reject any
+// client/reference pair present in both collections before installing the
+// new receipt indexes.
+async function duplicateReferencesAcrossLegacyAndCanonicalCollections(db) {
+  return db.collection('payments').aggregate([
+    {
+      $match: {
+        origin: 'MANUAL',
+        paymentReference: { $type: 'string', $gt: '' },
+      },
+    },
+    {
+      $project: {
+        clientId: 1,
+        paymentReference: 1,
+        source: { $literal: 'payments' },
+      },
+    },
+    {
+      $unionWith: {
+        coll: 'manualreceipts',
+        pipeline: [
+          { $match: { paymentReference: { $type: 'string', $gt: '' } } },
+          {
+            $project: {
+              clientId: 1,
+              paymentReference: 1,
+              source: { $literal: 'manualreceipts' },
+            },
+          },
+        ],
+      },
+    },
+    {
+      $group: {
+        _id: { clientId: '$clientId', paymentReference: '$paymentReference' },
+        count: { $sum: 1 },
+        sources: { $addToSet: '$source' },
+      },
+    },
+    { $match: { sources: { $all: ['payments', 'manualreceipts'] } } },
+    { $limit: 30 },
+  ], { allowDiskUse: true }).toArray();
+}
+
 export const config = {
   title: 'manual_receipt_identity_indexes',
   creates: [
@@ -55,6 +101,10 @@ export const config = {
         { paymentReference: { $type: 'string', $gt: '' } },
         { c: '$clientId', r: '$paymentReference' }
       ),
+    },
+    {
+      check: 'manual_reference_overlap_with_legacy_payments',
+      samples: await duplicateReferencesAcrossLegacyAndCanonicalCollections(db),
     },
   ],
   verify: async (db) => {

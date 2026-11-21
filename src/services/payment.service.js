@@ -310,8 +310,20 @@ export const paymentService = {
           const refHit = await ManualReceipt.findOne({
             clientId,
             paymentReference: reference,
-          }).session(session).lean();
+          }).session(session).select('_id idempotencyKey').lean();
           if (refHit && refHit.idempotencyKey !== idempotencyKey) {
+            throw Errors.Conflict('This payment reference was already used by another receipt');
+          }
+
+          // ManualReceipt is the canonical store for new receipts, but older
+          // manual receipts remain in Payment. Preserve client-wide reference
+          // uniqueness across both collections during the transition.
+          const legacyPaymentRefHit = await Payment.findOne({
+            clientId,
+            origin: 'MANUAL',
+            paymentReference: reference,
+          }).session(session).select('_id').lean();
+          if (legacyPaymentRefHit) {
             throw Errors.Conflict('This payment reference was already used by another receipt');
           }
         }
