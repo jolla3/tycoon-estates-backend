@@ -1,6 +1,6 @@
 # Co-op Connect APIs 2.0.0 — Implementation Traceability and Preflight Challenge
 
-**Status:** pre-implementation specification. No application code is changed by this document.  
+**Status:** Target implementation specification with current-main source reconciliation appended below. The correction remains outstanding; this documentation commit does not change application code.  
 **Audited implementation baseline:** `jolla3/tycoon-estates-backend` branch `docs/superadmin-onboarding-and-history` at `2f1bad7fd674babf26fd86e51036a4be0ea06ad6`; `jolla3/tycoon-frontend` branch `docs/superadmin-onboarding-and-history` at `bd78e8867f2642d77333d1dfc1f408235e179bbf`.  
 **Audit specification sources:** backend alignment commit `98cc95185b32507f5e3af8349acd824439cee015`; frontend alignment commit `a424179496f17b5ab905763403cdfa2c210bfce6`.  
 **Rule:** source line references below describe the audited baseline and will move after implementation. The source files at the baseline SHAs are the evidence, not these line numbers.

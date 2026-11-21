@@ -4,7 +4,12 @@
 **Frontend baseline:** `main` `a27f20dd3244cdc7370cffa16b70c6cd32a45576`  
 **Scope:** G3 financial ownership. G5 receipt evidence remains governed by `docs/g5/*`; G4 bank-provider integration remains governed by `docs/provider-contracts/*` and the backend G4 documents.
 
-## 1. Boundary and authority
+## 1. Runtime stack, boundary and authority
+
+- **Runtime:** Node.js `>=18`, ES modules and Express 4 API.
+- **Persistence:** MongoDB through Mongoose 8. Multi-document financial operations depend on MongoDB transaction support and migration-controlled indexes.
+- **Supporting infrastructure:** Redis through ioredis is available for coordination/worker concerns; it is not the source of truth for rent, payments, deposits or Ledger balances.
+- **Validation and verification:** Zod request validation; Jest and Supertest are the repository test stack.
 
 G3 owns Tenancy identity, RentCharge obligations, Payments, PaymentAllocations, Ledger movements, Tenant credit and deposits. Bank/M-PESA records are upstream observations; they do not bypass G3 posting. A Tenant is an account identity, not an occupancy identity. Every financial operation must resolve to the precise Tenancy and Estate it affects.
 

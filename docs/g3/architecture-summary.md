@@ -4,6 +4,10 @@
 **Frontend:** `a27f20dd3244cdc7370cffa16b70c6cd32a45576`  
 **Date:** 21 November 2026
 
+## Runtime
+
+Node.js `>=18` (ES modules), Express 4, MongoDB/Mongoose 8, Redis/ioredis for supporting coordination, Zod validation, Jest and Supertest. MongoDB records and transactions remain the financial authority; Redis is not a ledger.
+
 ## Product and ownership
 
 G3 is the financial source of truth for Tenancy, RentCharge, Payment, PaymentAllocation, Ledger, Tenant credit and security deposits. Tenant is a person/account; Tenancy is exact occupancy. Rent and deposits are separate. The product is landlord/house-centric, not a tenant portal.
