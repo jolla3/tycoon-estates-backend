@@ -58,7 +58,6 @@ export async function listObligations({ clientId, estateId, tenantId }, { sessio
 /**
  * Tenant-wide financial snapshot for the record-payment UI.
  * net = credit - outstanding obligations (positive = credit, negative = arrears).
- * Returns null-safe fields; never invents a zero when data is missing.
  */
 export async function tenantAccountSnapshot({ clientId, estateId, tenantId }, { session } = {}) {
   const credit = await creditBalanceCents({ clientId, estateId, tenantId }, { session });
@@ -74,7 +73,6 @@ export async function tenantAccountSnapshot({ clientId, estateId, tenantId }, { 
   return {
     creditCents: credit,
     outstandingCents: outstanding,
-    // Positive = net credit; negative = net arrears. Always a defined integer when tenant is known.
     netCents: credit - outstanding,
   };
 }
@@ -107,12 +105,16 @@ async function projectCharge(chargeId, scope, session) {
  * Never allocates beyond a charge balance; never creates charges.
  *
  * receipt shapes:
- *   MPESA:  { source:'MPESA'|undefined, transactionId, amountCents, receiptNumber?, transactionAt? }
- *   MANUAL: { source:'MANUAL', identityKey, amountCents, tenderMethod, houseId,
- *             paymentReference?, recordedByUserId?, paymentDate? }
+ *   MPESA (default when source omitted):
+ *     { transactionId, amountCents, receiptNumber?, transactionAt? }
+ *   MANUAL:
+ *     { source:'MANUAL', identityKey, amountCents, tenderMethod,
+ *       manualReceiptId?, recordedByUserId?, paymentDate? }
+ *     External paymentReference is NOT copied onto child Payments.
  *
- * Manual identityKey is a stable idempotency key (with or without a user reference).
- * MPESA still requires transactionId; that path is unchanged for callers that omit source.
+ * Full-surplus receipts (no allocation slices):
+ *   - MPESA: only TenantCreditMovement RECEIPT_SURPLUS (no marker Payment).
+ *   - MANUAL: same; canonical identity is the caller's ManualReceipt envelope.
  */
 export async function settleTenantAccount({
   clientId, estateId, tenantId, receipt = null, paymentDate = null, session,
@@ -130,35 +132,6 @@ export async function settleTenantAccount({
     }
     if (source === 'MANUAL' && !receipt.identityKey) {
       throw Errors.InvalidRequest('receipt.identityKey required for manual receipts');
-    }
-  }
-
-  // Idempotent reuse for MANUAL: any prior child Payment with this evidenceReference.
-  if (receipt && source === 'MANUAL') {
-    const existing = await Payment.find({
-      clientId,
-      estateId,
-      tenantId,
-      origin: 'MANUAL',
-      evidenceReference: receipt.identityKey,
-      status: 'CONFIRMED',
-    }).session(session).lean();
-    if (existing.length > 0) {
-      const creditAfter = await creditBalanceCents({ clientId, estateId, tenantId }, { session });
-      const allocated = existing.reduce((s, p) => s + (p.amountCents || 0), 0);
-      return {
-        plan: {
-          creditAppliedCents: 0,
-          receiptAppliedCents: Math.min(allocated, receipt.amountCents),
-          newCreditCents: Math.max(0, receipt.amountCents - allocated),
-        },
-        creditBeforeCents: creditAfter,
-        creditAfterCents: creditAfter,
-        receiptPayments: existing,
-        creditPayments: [],
-        movements: [],
-        reused: true,
-      };
     }
   }
 
@@ -190,8 +163,11 @@ export async function settleTenantAccount({
   const when = paymentDate
     || (receipt && (receipt.paymentDate || receipt.transactionAt))
     || new Date();
-  const created = { receiptPayments: [], creditPayments: [], movements: [] };
+  const created = { receiptPayments: [], creditPayments: [], movements: [], allocations: [] };
   const touchedCharges = new Set();
+  const manualReceiptId = source === 'MANUAL' && receipt.manualReceiptId
+    ? receipt.manualReceiptId
+    : null;
 
   const post = async ({ slices, origin, keyBase }) => {
     const perTenancy = new Map();
@@ -219,6 +195,7 @@ export async function settleTenantAccount({
         tenancyId: tenancy._id,
         origin,
         mpesaReceiptId: isMpesaReceipt ? receipt.transactionId : null,
+        manualReceiptId: (isManualReceipt || origin === 'CREDIT') && manualReceiptId ? manualReceiptId : null,
         creditApplicationKey: origin === 'CREDIT' ? key : null,
         tenderMethod: isManualReceipt ? (receipt.tenderMethod || null) : (isMpesaReceipt ? 'MPESA' : null),
         recordedByUserId: isManualReceipt ? (receipt.recordedByUserId || null) : null,
@@ -226,9 +203,9 @@ export async function settleTenantAccount({
         evidenceReference: isManualReceipt ? receipt.identityKey : null,
         amountCents: amount,
         paymentDate: when,
-        paymentReference: isMpesaReceipt
-          ? (receipt.receiptNumber || null)
-          : (isManualReceipt ? (receipt.paymentReference || null) : null),
+        // MANUAL children must NOT carry the external paymentReference — it lives on ManualReceipt.
+        // Putting the same reference on multiple children collides with uniq_client_manual_payment_reference.
+        paymentReference: isMpesaReceipt ? (receipt.receiptNumber || null) : null,
         period: tSlices[0].charge.period,
         status: 'CONFIRMED',
         allocatedCents: 0,
@@ -254,17 +231,28 @@ export async function settleTenantAccount({
           await bumpAllocationRev(RentCharge, s.charge._id, scope, session);
           touchedCharges.add(idStr(s.charge._id));
         }
-        await PaymentAllocation.create([{
+        const [alloc] = await PaymentAllocation.create([{
           clientId, estateId, paymentId: payment._id, tenancyId: tenancy._id,
           rentChargeId: s.charge._id, amountCents: s.amountCents,
           chargeType: s.charge.chargeType, period: s.charge.period,
         }], { session });
+        created.allocations.push({
+          paymentId: payment._id,
+          tenancyId: tenancy._id,
+          houseId: tenancy.houseId,
+          rentChargeId: s.charge._id,
+          amountCents: s.amountCents,
+          chargeType: s.charge.chargeType,
+          period: s.charge.period,
+          origin,
+        });
         if (origin === 'CREDIT') {
           const [mv] = await TenantCreditMovement.create([{
             clientId, estateId, tenantId,
             movementType: CREDIT_MOVEMENT_TYPE.CREDIT_APPLIED,
             amountCents: -s.amountCents,
             mpesaTransactionId: source === 'MPESA' && receipt ? receipt.transactionId : null,
+            manualReceiptId: manualReceiptId || null,
             paymentId: payment._id, tenancyId: tenancy._id, rentChargeId: s.charge._id,
             idempotencyKey: `${key}:${idStr(s.charge._id)}`,
             creditRevAtWrite: creditRev,
@@ -292,68 +280,13 @@ export async function settleTenantAccount({
       ? `manual:${receipt.identityKey}`
       : `receipt:${idStr(receipt.transactionId)}`;
 
-    // Receipt may produce no allocation slices (full surplus → credit) but must still
-    // be recorded when there is surplus only — handled via TenantCreditMovement below.
-    // When there are slices, create per-tenancy MANUAL/MPESA Payments.
+    // Only create child Payments for actual allocation slices.
+    // Full surplus: no Payment marker (preserves M-PESA behaviour; MANUAL uses ManualReceipt).
     created.receiptPayments = await post({
       slices: plan.receiptSlices,
       origin: receiptOrigin,
       keyBase: receiptKeyBase,
     });
-
-    // Full-surplus path: no charge was touched by the receipt. Persist a zero-allocation
-    // receipt Payment on the occupancy tenancy (caller supplies houseId for MANUAL) so the
-    // receipt remains auditable. Prefer an ACTIVE tenancy of this tenant; else first locked.
-    if (plan.receiptSlices.length === 0 && plan.newCreditCents === receipt.amountCents) {
-      const occupancyHouseId = receipt.houseId || null;
-      let anchor = null;
-      if (occupancyHouseId) {
-        anchor = tenancies.find((t) => String(t.houseId) === String(occupancyHouseId) && t.status === 'ACTIVE')
-          || tenancies.find((t) => String(t.houseId) === String(occupancyHouseId))
-          || null;
-      }
-      if (!anchor) {
-        anchor = tenancies.find((t) => t.status === 'ACTIVE') || tenancies[0] || null;
-      }
-      if (anchor) {
-        const [marker] = await Payment.create([{
-          clientId,
-          estateId,
-          houseId: occupancyHouseId || anchor.houseId,
-          tenantId,
-          tenancyId: anchor._id,
-          origin: receiptOrigin,
-          mpesaReceiptId: source === 'MPESA' ? receipt.transactionId : null,
-          creditApplicationKey: null,
-          tenderMethod: source === 'MANUAL' ? (receipt.tenderMethod || null) : 'MPESA',
-          recordedByUserId: source === 'MANUAL' ? (receipt.recordedByUserId || null) : null,
-          recordedAt: source === 'MANUAL' ? new Date() : null,
-          evidenceReference: source === 'MANUAL' ? receipt.identityKey : null,
-          amountCents: receipt.amountCents,
-          paymentDate: when,
-          paymentReference: source === 'MPESA'
-            ? (receipt.receiptNumber || null)
-            : (receipt.paymentReference || null),
-          period: null,
-          status: 'CONFIRMED',
-          allocatedCents: 0,
-          allocationRev: 0,
-        }], { session });
-        // Ledger PAYMENT for the full receipt on the anchor tenancy (surplus becomes credit;
-        // credit movement is the tenant-level carry-forward, not a second PAYMENT).
-        await ledgerService.postEntry({
-          clientId, estateId, houseId: marker.houseId, tenantId, tenancyId: anchor._id,
-          accountCategory: 'RENT',
-          entryType: 'PAYMENT',
-          amountCents: receipt.amountCents,
-          referenceType: 'Payment',
-          referenceId: marker._id,
-          description: source === 'MANUAL' ? 'Manual receipt (credit only)' : 'MPESA receipt (credit only)',
-          period: null,
-        }, { session });
-        created.receiptPayments.push(marker);
-      }
-    }
 
     if (plan.newCreditCents > 0) {
       const surplusKey = source === 'MANUAL'
@@ -364,6 +297,7 @@ export async function settleTenantAccount({
         movementType: CREDIT_MOVEMENT_TYPE.RECEIPT_SURPLUS,
         amountCents: plan.newCreditCents,
         mpesaTransactionId: source === 'MPESA' ? receipt.transactionId : null,
+        manualReceiptId: manualReceiptId || null,
         paymentId: created.receiptPayments[0]?._id || null,
         idempotencyKey: surplusKey,
         creditRevAtWrite: creditRev,
