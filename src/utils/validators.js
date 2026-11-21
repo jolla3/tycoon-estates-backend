@@ -129,14 +129,14 @@ export const schemas = {
       consumerKey: z.string().min(1).max(256),
       consumerSecret: z.string().min(1).max(512),
     }).strict(),
-  }),
+  }).strict(),
 
   reauthorizeBankConnection: z.object({
     credentialMaterial: z.object({
       consumerKey: z.string().min(1).max(256),
       consumerSecret: z.string().min(1).max(512),
     }).strict(),
-  }),
+  }).strict(),
 
   sendSms: z
     .object({

@@ -73,7 +73,7 @@
 | `src/routes/report.routes.js` | `GET .../bank-transactions` |
 | `src/jobs/bankSync.job.js` | All `connectionStatus: 'connected'` accounts → `bankService.sync` |
 | `src/jobs/scheduler.js` | Schedules jobs (distributed lock pattern for multi-instance) |
-| `src/config/environment.js` | `COOP_BASE_URL`, `COOP_CLIENT_ID`, `COOP_CLIENT_SECRET`, `COOP_USERNAME`, `COOP_PASSWORD`, `COOP_SCOPE`, `COOP_INS_BASIC_SECRET` |
+| `src/config/environment.js` | `COOP_BASE_URL`, `COOP_TOKEN_PATH`, `COOP_TOKEN_GRANT_TYPE`, `COOP_TOKEN_SCOPE`, `COOP_INS_BASIC_SECRET` |
 | `src/utils/encryption.js` | AES-GCM encrypt/decrypt; HMAC `hashForLookup` |
 | `src/utils/idempotency.js` | `withIdempotency(Model, key, keyField, createFn)` — **single-field** lookup |
 | `src/utils/validators.js` | `connectBankAccount.provider` enum `COOP|KCB|EQUITY|NCBA` |

@@ -29,6 +29,14 @@ export const helmetMiddleware = helmet({
   crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
 });
 
+/**
+ * Request headers the authenticated SPA client sends cross-origin.
+ * Idempotency-Key is required by every money-moving mutation; if it is not
+ * allow-listed the browser preflight fails and the mutation never leaves the
+ * client. Origin validation and credentials handling are unchanged.
+ */
+export const CORS_ALLOWED_HEADERS = ['Content-Type', 'X-CSRF-Token', 'Idempotency-Key'];
+
 export const corsMiddleware = cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true);
@@ -37,7 +45,7 @@ export const corsMiddleware = cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'X-CSRF-Token'],
+  allowedHeaders: CORS_ALLOWED_HEADERS,
   // SPA cannot read the csrf-token cookie on a different host; expose it
   // on the response so the client can echo it on mutations when available.
   exposedHeaders: ['X-CSRF-Token'],

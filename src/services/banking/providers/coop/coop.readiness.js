@@ -14,8 +14,8 @@ export function getCoopCapabilityProfile() {
         credentialsConfigurable: true,
         sandboxVerified: false,
         operationalReady: false,
-        blockers: ['oauth_scope_and_token_lifecycle_unverified', 'sandbox_not_verified'],
-        evidenceNote: 'Password grant implemented against portal-shaped /token; scopes/TTL not project-verified',
+        blockers: ['token_grant_path_scope_not_configured_or_verified', 'token_ttl_refresh_unverified', 'sandbox_not_verified'],
+        evidenceNote: 'CK/SK Basic auth; grant type, token path and scope are platform config with no default (unset = fail closed); TTL taken only from the response; not sandbox-verified',
       },
       accountValidation: {
         adapterPresent: true,

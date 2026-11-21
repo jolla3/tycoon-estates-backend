@@ -7,7 +7,7 @@ import { isProduction } from '../config/environment.js';
 // eslint-disable-next-line no-unused-vars
 export function errorHandler(err, req, res, _next) {
   if (err instanceof AppError) {
-    return apiResponse.error(res, err.code, err.message, err.status);
+    return apiResponse.error(res, err.code, err.message, err.status, err.details);
   }
 
   logger.error({ error: err.message, stack: isProduction ? undefined : err.stack, path: req.path }, 'Unhandled error');

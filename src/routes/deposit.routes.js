@@ -6,6 +6,11 @@ import { authorize } from '../middlewares/authorize.js';
 import { clientContext } from '../middlewares/clientContext.js';
 import { validate } from '../middlewares/validate.js';
 
+const exact = {
+  tenancyId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
+  estateId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
+};
+
 const router = Router({ mergeParams: true });
 
 router.get('/:tenantId', authenticate, clientContext, depositController.get);
@@ -14,7 +19,7 @@ router.post(
   authenticate,
   clientContext,
   authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
-  validate(z.object({ requiredCents: z.coerce.number().int().min(0), moveInDate: z.string().optional() })),
+  validate(z.object({ requiredCents: z.coerce.number().int().min(0), moveInDate: z.string().optional(), ...exact })),
   depositController.require
 );
 router.post(
@@ -22,7 +27,7 @@ router.post(
   authenticate,
   clientContext,
   authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
-  validate(z.object({ amountCents: z.coerce.number().int().min(1) })),
+  validate(z.object({ amountCents: z.coerce.number().int().min(1), ...exact })),
   depositController.pay
 );
 router.post(
@@ -35,6 +40,7 @@ router.post(
       amountCents: z.coerce.number().int().min(1),
       reason: z.string().min(1).max(500),
       notes: z.string().max(1000).optional(),
+      ...exact,
     })
   ),
   depositController.deduct
@@ -44,6 +50,7 @@ router.post(
   authenticate,
   clientContext,
   authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
+  validate(z.object({ ...exact }).optional()),
   depositController.settle
 );
 

@@ -152,13 +152,13 @@ environment. `config/environment.js` now throws at startup if these (or
 verified directly (see the two contrasting cases this was tested
 against). Dev-mode fallbacks still work, with a loud console warning.
 
-### 🔴 `COOP_SCOPE` defaulted to `"default"`
+### 🔴 Co-op token contract defaulted to guessed values
 
-Silently sending an OAuth scope Co-op never actually granted could look
-like a working integration right up until the specific call that needed
-a real scope 401s. `COOP_SCOPE` has no default now; `coop.auth.js` throws
-a clear configuration error the moment authentication is actually
-attempted without one.
+Silently sending an OAuth grant/scope Co-op never actually granted could look
+like a working integration right up until the specific call that needed it
+401s. `COOP_TOKEN_PATH`, `COOP_TOKEN_GRANT_TYPE` and `COOP_TOKEN_SCOPE` have no
+defaults; `coop.auth.js` throws a clear configuration error (without any
+network call) the moment authentication is attempted without path and grant.
 
 ### 🟡 Also fixed this pass
 
@@ -251,8 +251,9 @@ assuming it's fine because the unit tests passed.
 
 ## 8. Co-op Bank Integration
 
-Implements against the actual Co-op Connect 2.0.0 documentation: OAuth2
-password grant (`coop.auth.js`), the real endpoint names
+Implements against the actual Co-op Connect 2.0.0 documentation: per-connection
+Consumer Key/Secret (CK/SK) token acquisition (`coop.auth.js`; grant type, token
+path and scope are platform configuration with no default), the real endpoint names
 (`AccountTransactions`, `AccountFullStatement`, `AccountBalance`,
 `AccountValidation`), documented request bodies validated by zod
 (`coop.schemas.js`), and the fully-specified `SendTransactionINS` webhook
@@ -272,10 +273,12 @@ throughout:
 
 ## 10. Credentials Required From You / Co-op / Celcom
 
-- **Co-op**: `COOP_CLIENT_ID`/`COOP_CLIENT_SECRET` (DCR), `COOP_USERNAME`/
-  `COOP_PASSWORD` (password grant), `COOP_SCOPE` (from their developer
-  portal — no default), `COOP_INS_BASIC_SECRET` (whatever credential
-  Co-op configures for your `SendTransactionINS` subscription).
+- **Co-op**: each landlord's Consumer Key/Secret is entered per connection
+  (`POST /bank-connections`, stored encrypted, never in env). Platform config:
+  `COOP_BASE_URL`, `COOP_TOKEN_PATH`, `COOP_TOKEN_GRANT_TYPE`, optional
+  `COOP_TOKEN_SCOPE` (none have defaults; unset path/grant = authentication
+  fails closed with no network call), and `COOP_INS_BASIC_SECRET` (whatever
+  credential Co-op configures for your `SendTransactionINS` subscription).
 - **Celcom**: `CELCOM_PARTNER_ID`, `CELCOM_API_KEY`, `CELCOM_SENDER_ID`.
 - Real, random `COOKIE_SECRET`/`SESSION_SECRET`/`ENCRYPTION_KEY` — these
   now have no fallback in production, by design.

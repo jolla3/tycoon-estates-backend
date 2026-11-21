@@ -152,35 +152,161 @@ async function createMovementAndLedger({
   return { movement, reused: false };
 }
 
-async function resolveActiveTenancy(clientId, tenantId, estateFilter) {
-  const tenant = await Tenant.findOne({
-    _id: tenantId, clientId, ...estateFilterClause(estateFilter),
-  });
-  if (!tenant) throw Errors.TenantNotFound();
-  const tenancy = await Tenancy.findOne({ clientId, tenantId, status: 'ACTIVE' });
-  if (!tenancy) {
+const OBJECT_ID = /^[a-f\d]{24}$/i;
+
+/**
+ * Tenancy statuses that may take part in each deposit operation.
+ * Incoming money and requirement changes need a live (ACTIVE) tenancy.
+ * Operations on money already held (deduct/refund/settle) and reads must also
+ * work after move-out (CLOSED). VOID tenancies are corrections and never
+ * participate. Fail-closed: anything not listed is refused.
+ */
+const OPERATION_STATUSES = {
+  read: ['ACTIVE', 'CLOSED'],
+  require: ['ACTIVE'],
+  pay: ['ACTIVE'],
+  deduct: ['ACTIVE', 'CLOSED'],
+  refund: ['ACTIVE', 'CLOSED'],
+  settle: ['ACTIVE', 'CLOSED'],
+};
+
+function assertObjectId(value, field) {
+  if (!OBJECT_ID.test(String(value ?? ''))) {
+    throw Errors.InvalidRequest(`${field} is not a valid identifier`);
+  }
+}
+
+function assertStatusPermitted(tenancy, operation) {
+  const allowed = OPERATION_STATUSES[operation];
+  if (!allowed || !allowed.includes(tenancy.status)) {
+    throw Errors.TenancyNotEligible(
+      `A ${tenancy.status} tenancy cannot be used for this deposit operation`,
+      { tenancyStatus: tenancy.status, operation }
+    );
+  }
+}
+
+/**
+ * Resolve the EXACT Tenancy a deposit operation applies to. Never picks an
+ * arbitrary row.
+ *
+ *  - tenancyId supplied: the Tenancy must exist under {clientId, estate scope}
+ *    and, when tenantId is also supplied, belong to that Tenant. A mismatch is
+ *    reported as "not found" so another client's or tenant's ids are never
+ *    confirmed to exist.
+ *  - tenancyId omitted (legacy tenant-keyed request): allowed only when the
+ *    Tenant has EXACTLY ONE ACTIVE Tenancy inside the caller's estate scope.
+ *    Zero is an invalid request; more than one is a typed 409 so the client
+ *    must choose explicitly.
+ *
+ * Estate scope comes from req.estateFilter (server-derived from the session),
+ * never from a body field.
+ */
+async function resolveExactTenancy(clientId, { tenantId, tenancyId, estateId }, estateFilter, operation) {
+  if (estateId) assertObjectId(estateId, 'estateId');
+  let tenant = null;
+  if (tenantId) {
+    assertObjectId(tenantId, 'tenantId');
+    // Estate scope is enforced on the Tenancy (the authority for estate); a
+    // Tenant's own estateId only reflects one of possibly several tenancies.
+    tenant = await Tenant.findOne({ _id: tenantId, clientId });
+    if (!tenant) throw Errors.TenantNotFound();
+  }
+
+  if (tenancyId) {
+    assertObjectId(tenancyId, 'tenancyId');
+    const tenancy = await Tenancy.findOne({
+      _id: tenancyId, clientId, ...estateFilterClause(estateFilter),
+    });
+    if (
+      !tenancy
+      || (tenantId && !sameId(tenancy.tenantId, tenantId))
+      || (estateId && !sameId(tenancy.estateId, estateId))
+    ) {
+      throw Errors.NotFound('Tenancy not found');
+    }
+    assertStatusPermitted(tenancy, operation);
+    return { tenant, tenancy };
+  }
+
+  if (!tenantId) throw Errors.InvalidRequest('tenancyId or tenantId required');
+
+  const filter = { clientId, tenantId, status: 'ACTIVE', ...estateFilterClause(estateFilter) };
+  if (estateId) filter.estateId = estateId;
+  const candidates = await Tenancy.find(filter).sort({ _id: 1 }).limit(2);
+  if (candidates.length === 0) {
     throw Errors.InvalidRequest('No ACTIVE tenancy for tenant; supply tenancy-scoped operation');
   }
-  if (estateFilter?.estateId && String(tenancy.estateId) !== String(estateFilter.estateId)) {
-    throw Errors.NotFound('Tenancy not found');
+  if (candidates.length > 1) {
+    throw Errors.DepositTenancyAmbiguous(undefined, {
+      eligibleTenancyCount: await Tenancy.countDocuments(filter),
+    });
   }
-  return { tenant, tenancy };
+  assertStatusPermitted(candidates[0], operation);
+  return { tenant, tenancy: candidates[0] };
+}
+
+/**
+ * Re-verify, inside the write transaction, that the Tenancy resolved earlier
+ * still has the same identity and a permitted status. Closes the window between
+ * resolution and write (e.g. a concurrent move-out).
+ */
+async function assertTenancyStillEligible(clientId, tenancy, operation, session) {
+  const fresh = await Tenancy.findOne({
+    _id: tenancy._id,
+    clientId,
+    tenantId: tenancy.tenantId,
+    estateId: tenancy.estateId,
+    houseId: tenancy.houseId,
+  }).session(session).lean();
+  if (!fresh) throw Errors.NotFound('Tenancy not found');
+  assertStatusPermitted(fresh, operation);
 }
 
 export const depositService = {
+  /**
+   * Tenant-keyed read. Never guesses between tenancies: with exactly one ACTIVE
+   * tenancy in scope it returns that deposit; with several it returns
+   * `deposit: null`, `activeTenancyId: null` and the eligible tenancy ids so the
+   * caller must pick one (then use getForTenancy).
+   */
   async getForTenant(clientId, tenantId, estateFilter = null) {
+    assertObjectId(tenantId, 'tenantId');
     const tenant = await Tenant.findOne({
       _id: tenantId, clientId, ...estateFilterClause(estateFilter),
     }).lean();
     if (!tenant) throw Errors.TenantNotFound();
-    const active = await Tenancy.findOne({ clientId, tenantId, status: 'ACTIVE' }).lean();
+    const actives = await Tenancy.find({
+      clientId, tenantId, status: 'ACTIVE', ...estateFilterClause(estateFilter),
+    }).sort({ _id: 1 }).lean();
+    const eligibleTenancyIds = actives.map((t) => t._id);
+    if (actives.length > 1) {
+      return {
+        tenant, deposit: null, activeTenancyId: null, balance: null,
+        eligibleTenancyCount: actives.length, eligibleTenancyIds, ambiguous: true,
+      };
+    }
+    const active = actives[0] || null;
     let dep = null;
     if (active) dep = await Deposit.findOne({ clientId, tenancyId: active._id }).lean();
-    if (!dep) dep = await Deposit.findOne({ clientId, tenantId, tenancyId: null }).lean();
+    if (!dep && !active) dep = await Deposit.findOne({ clientId, tenantId, tenancyId: null }).lean();
     const bal = active
       ? await ledgerService.balanceForTenancy(clientId, active._id, 'DEPOSIT')
       : null;
-    return { tenant, deposit: dep, activeTenancyId: active?._id || null, balance: bal };
+    return {
+      tenant, deposit: dep, activeTenancyId: active?._id || null, balance: bal,
+      eligibleTenancyCount: actives.length, eligibleTenancyIds, ambiguous: false,
+    };
+  },
+
+  /** Exact read: {tenantId?, tenancyId, estateId?} validated together. */
+  async getExact(clientId, { tenantId, tenancyId, estateId }, estateFilter = null) {
+    const { tenancy } = await resolveExactTenancy(
+      clientId, { tenantId, tenancyId, estateId }, estateFilter, 'read'
+    );
+    const deposit = await Deposit.findOne({ clientId, tenancyId: tenancy._id }).lean();
+    const balance = await ledgerService.balanceForTenancy(clientId, tenancy._id, 'DEPOSIT');
+    return { tenancy, deposit, balance, activeTenancyId: tenancy._id, ambiguous: false };
   },
 
   async getForTenancy(clientId, tenancyId, estateFilter = null) {
@@ -193,24 +319,19 @@ export const depositService = {
     return { tenancy, deposit: dep, balance };
   },
 
-  async ensureRequired(clientId, { tenantId, tenancyId, requiredCents, moveInDate }, actor, estateFilter = null) {
+  async ensureRequired(clientId, { tenantId, tenancyId, estateId, requiredCents, moveInDate }, actor, estateFilter = null) {
     requireReady();
     const amount = requiredCents === 0 || requiredCents === '0'
       ? 0
       : parsePositive(requiredCents, 'requiredCents');
-    let tenancy;
-    if (tenancyId) {
-      tenancy = await Tenancy.findOne({ _id: tenancyId, clientId, ...estateFilterClause(estateFilter) });
-    } else if (tenantId) {
-      ({ tenancy } = await resolveActiveTenancy(clientId, tenantId, estateFilter));
-    } else {
-      throw Errors.InvalidRequest('tenancyId or tenantId required');
-    }
-    if (!tenancy) throw Errors.NotFound('Tenancy not found');
+    const { tenancy } = await resolveExactTenancy(clientId, { tenantId, tenancyId, estateId }, estateFilter, 'require');
     const session = await mongoose.startSession();
     try {
       let dep;
+      let unchanged = false;
+      let lockedDetails = null;
       await session.withTransaction(async () => {
+        await assertTenancyStillEligible(clientId, tenancy, 'require', session);
         dep = await Deposit.findOne({ clientId, tenancyId: tenancy._id }).session(session);
         if (dep) {
           if (dep.paidCents === 0) {
@@ -218,7 +339,24 @@ export const depositService = {
             dep.moveInDate = moveInDate || dep.moveInDate;
             dep.status = recomputeStatus(dep);
             await dep.save({ session });
+            return;
           }
+          // Money already received: the requirement is locked. Same value is a
+          // no-op (retry-safe, no write, no audit); a different value is refused
+          // rather than silently ignored. No adjustment/refund is implied.
+          if (dep.requiredCents === amount) {
+            unchanged = true;
+            return;
+          }
+          lockedDetails = {
+            tenancyId: String(tenancy._id),
+            requiredCents: dep.requiredCents,
+            requestedCents: amount,
+            paidCents: dep.paidCents,
+            heldCents: dep.heldCents,
+            refundedCents: dep.refundedCents,
+            status: dep.status,
+          };
           return;
         }
         const [created] = await Deposit.create([{
@@ -230,6 +368,15 @@ export const depositService = {
         }], { session });
         dep = created;
       });
+      if (lockedDetails) {
+        await audit({
+          clientId, userId: actor?._id, action: 'DEPOSIT_REQUIREMENT_CHANGE_REFUSED',
+          resource: 'Deposit', resourceId: dep._id,
+          metadata: lockedDetails,
+        });
+        throw Errors.DepositRequirementLocked(undefined, lockedDetails);
+      }
+      if (unchanged) return dep;
       await audit({
         clientId, userId: actor?._id, action: 'DEPOSIT_REQUIRED',
         resource: 'Deposit', resourceId: dep._id,
@@ -241,17 +388,13 @@ export const depositService = {
     }
   },
 
-  async recordPayment(clientId, tenantIdOrTenancy, amountCents, actor, estateFilter = null, { idempotencyKey, tenancyId } = {}) {
+  async recordPayment(clientId, tenantIdOrTenancy, amountCents, actor, estateFilter = null, { idempotencyKey, tenancyId, estateId } = {}) {
     requireReady();
     const key = requireIdempotencyKey(idempotencyKey);
     const amount = parsePositive(amountCents);
-    let tenancy;
-    if (tenancyId) {
-      tenancy = await Tenancy.findOne({ _id: tenancyId, clientId, ...estateFilterClause(estateFilter) });
-    } else {
-      ({ tenancy } = await resolveActiveTenancy(clientId, tenantIdOrTenancy, estateFilter));
-    }
-    if (!tenancy) throw Errors.NotFound('Tenancy not found');
+    const { tenancy } = await resolveExactTenancy(
+      clientId, { tenantId: tenantIdOrTenancy, tenancyId, estateId }, estateFilter, 'pay'
+    );
 
     const session = await mongoose.startSession();
     try {
@@ -259,6 +402,7 @@ export const depositService = {
       let movementResult;
       await session.withTransaction(async () => {
         const existing = await findMovementByKey(clientId, key, session);
+        if (!existing) await assertTenancyStillEligible(clientId, tenancy, 'pay', session);
         dep = await Deposit.findOne({ clientId, tenancyId: tenancy._id }).session(session);
 
         if (existing) {
@@ -307,18 +451,14 @@ export const depositService = {
     }
   },
 
-  async addDeduction(clientId, tenantIdOrTenancy, { amountCents, reason, notes }, actor, estateFilter = null, { idempotencyKey, tenancyId } = {}) {
+  async addDeduction(clientId, tenantIdOrTenancy, { amountCents, reason, notes }, actor, estateFilter = null, { idempotencyKey, tenancyId, estateId } = {}) {
     requireReady();
     const key = requireIdempotencyKey(idempotencyKey);
     const amount = parsePositive(amountCents);
     if (!reason?.trim()) throw Errors.InvalidRequest('Deduction reason is required');
-    let tenancy;
-    if (tenancyId) {
-      tenancy = await Tenancy.findOne({ _id: tenancyId, clientId, ...estateFilterClause(estateFilter) });
-    } else {
-      ({ tenancy } = await resolveActiveTenancy(clientId, tenantIdOrTenancy, estateFilter));
-    }
-    if (!tenancy) throw Errors.NotFound('Tenancy not found');
+    const { tenancy } = await resolveExactTenancy(
+      clientId, { tenantId: tenantIdOrTenancy, tenancyId, estateId }, estateFilter, 'deduct'
+    );
 
     const session = await mongoose.startSession();
     try {
@@ -329,6 +469,7 @@ export const depositService = {
         if (!dep) throw Errors.NotFound('Deposit not found');
 
         const existing = await findMovementByKey(clientId, key, session);
+        if (!existing) await assertTenancyStillEligible(clientId, tenancy, 'deduct', session);
         if (existing) {
           await verifyExistingMovement(existing, {
             clientId, estateId: tenancy.estateId, houseId: tenancy.houseId,
@@ -373,17 +514,13 @@ export const depositService = {
     }
   },
 
-  async refund(clientId, tenantIdOrTenancy, amountCents, actor, estateFilter = null, { idempotencyKey, tenancyId } = {}) {
+  async refund(clientId, tenantIdOrTenancy, amountCents, actor, estateFilter = null, { idempotencyKey, tenancyId, estateId } = {}) {
     requireReady();
     const key = requireIdempotencyKey(idempotencyKey);
     const amount = parsePositive(amountCents);
-    let tenancy;
-    if (tenancyId) {
-      tenancy = await Tenancy.findOne({ _id: tenancyId, clientId, ...estateFilterClause(estateFilter) });
-    } else {
-      ({ tenancy } = await resolveActiveTenancy(clientId, tenantIdOrTenancy, estateFilter));
-    }
-    if (!tenancy) throw Errors.NotFound('Tenancy not found');
+    const { tenancy } = await resolveExactTenancy(
+      clientId, { tenantId: tenantIdOrTenancy, tenancyId, estateId }, estateFilter, 'refund'
+    );
 
     const session = await mongoose.startSession();
     try {
@@ -394,6 +531,7 @@ export const depositService = {
         if (!dep) throw Errors.NotFound('Deposit not found');
 
         const existing = await findMovementByKey(clientId, key, session);
+        if (!existing) await assertTenancyStillEligible(clientId, tenancy, 'refund', session);
         if (existing) {
           await verifyExistingMovement(existing, {
             clientId, estateId: tenancy.estateId, houseId: tenancy.houseId,
@@ -433,19 +571,16 @@ export const depositService = {
     }
   },
 
-  async settle(clientId, tenantIdOrTenancy, actor, estateFilter = null, { tenancyId } = {}) {
+  async settle(clientId, tenantIdOrTenancy, actor, estateFilter = null, { tenancyId, estateId } = {}) {
     requireReady();
-    let tenancy;
-    if (tenancyId) {
-      tenancy = await Tenancy.findOne({ _id: tenancyId, clientId, ...estateFilterClause(estateFilter) });
-    } else {
-      ({ tenancy } = await resolveActiveTenancy(clientId, tenantIdOrTenancy, estateFilter));
-    }
-    if (!tenancy) throw Errors.NotFound('Tenancy not found');
+    const { tenancy } = await resolveExactTenancy(
+      clientId, { tenantId: tenantIdOrTenancy, tenancyId, estateId }, estateFilter, 'settle'
+    );
     const session = await mongoose.startSession();
     try {
       let dep;
       await session.withTransaction(async () => {
+        await assertTenancyStillEligible(clientId, tenancy, 'settle', session);
         dep = await Deposit.findOne({ clientId, tenancyId: tenancy._id }).session(session);
         if (!dep) throw Errors.NotFound('Deposit not found');
         dep.settledAt = new Date();
@@ -464,8 +599,8 @@ export const depositService = {
   },
 
   /** Alias used by existing controller */
-  async settleMoveOut(clientId, tenantId, actor, estateFilter = null) {
-    return this.settle(clientId, tenantId, actor, estateFilter);
+  async settleMoveOut(clientId, tenantId, actor, estateFilter = null, opts = {}) {
+    return this.settle(clientId, tenantId, actor, estateFilter, opts);
   },
 
   async transfer(clientId, { fromTenancyId, toTenancyId, amountCents, reason }, actor, estateFilter = null, { idempotencyKey } = {}) {

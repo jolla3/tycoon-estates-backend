@@ -1,11 +1,13 @@
 // src/utils/errors.js — standard application error types + codes (section 28).
 
 export class AppError extends Error {
-  constructor(code, message, status = 400) {
+  constructor(code, message, status = 400, details = undefined) {
     super(message);
     this.name = 'AppError';
     this.code = code;
     this.status = status;
+    // Optional machine-readable context (never secrets); surfaced by errorHandler.
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -29,5 +31,12 @@ export const Errors = {
   InvalidRequest: (msg = 'Invalid request') => new AppError('INVALID_REQUEST', msg, 422),
   RateLimited: (msg = 'Too many requests') => new AppError('RATE_LIMITED', msg, 429),
   Conflict: (msg = 'Conflict') => new AppError('CONFLICT', msg, 409),
+  // Deposit identity / state conflicts. Typed so clients can react without parsing prose.
+  DepositTenancyAmbiguous: (msg = 'Tenant has more than one eligible tenancy; supply tenancyId', details) =>
+    new AppError('DEPOSIT_TENANCY_AMBIGUOUS', msg, 409, details),
+  TenancyNotEligible: (msg = 'Tenancy is not eligible for this deposit operation', details) =>
+    new AppError('TENANCY_NOT_ELIGIBLE', msg, 409, details),
+  DepositRequirementLocked: (msg = 'Deposit requirement cannot be changed after money has been received', details) =>
+    new AppError('DEPOSIT_REQUIREMENT_LOCKED', msg, 409, details),
   NotFound: (msg = 'Not found') => new AppError('NOT_FOUND', msg, 404),
 };
