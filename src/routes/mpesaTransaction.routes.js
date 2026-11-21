@@ -22,6 +22,14 @@ export const mpesaTransactionListSchema = z.object({
   message: 'startDate must be on or before endDate',
 });
 
+export const mpesaTransactionSummarySchema = z.object({
+  estateId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
+  startDate: z.coerce.date(),
+  endDate: z.coerce.date(),
+}).strict().refine((v) => v.startDate <= v.endDate, { message: 'startDate must be on or before endDate' });
+
+// Registered before '/' consumers; '/summary' is a fixed path (no :id route exists here).
+router.get('/summary', authenticate, clientContext, requireProduct('MPESA'), validate(mpesaTransactionSummarySchema, 'query'), mpesaTransactionController.summary);
 router.get('/', authenticate, clientContext, requireProduct('MPESA'), validate(mpesaTransactionListSchema, 'query'), mpesaTransactionController.list);
 
 export default router;
