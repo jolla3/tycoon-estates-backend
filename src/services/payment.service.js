@@ -110,9 +110,9 @@ export const paymentService = {
   },
 
   /** Choices for the manual-payment form (human-readable tenancies for a house + period). */
-  async manualOptions(clientId, estateFilter, { houseId, period, page, limit, search }) {
+  async manualOptions(clientId, estateFilter, { houseId, period, page, limit, search, eligiblePage, eligibleLimit, eligibleSearch }) {
     const house = await House.findOne({ _id: houseId, clientId, ...estateFilterClause(estateFilter) });
     if (!house) throw Errors.HouseNotFound();
-    return tenancyService.manualPaymentOptions(clientId, house, period || dateUtil.currentPeriod(), { page, limit, search });
+    return tenancyService.manualPaymentOptions(clientId, house, period || dateUtil.currentPeriod(), { page, limit, search, eligiblePage, eligibleLimit, eligibleSearch });
   },
 };
