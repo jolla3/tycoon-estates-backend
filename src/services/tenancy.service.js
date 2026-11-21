@@ -10,8 +10,42 @@ import { supportsMongoTransactions } from '../config/database.js';
 import { tenancyIneligibleReason, TENANCY_RESOLUTION } from '../utils/manualPaymentTenancy.js';
 import { eligibleTenancyFilter } from '../utils/tenancyEligibility.js';
 
-const ELIGIBLE_OPTIONS_CAP = 20; // display bound only; resolution uses the database count/limit(2)
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
+
+const escapeRegex = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const clampPage = (v) => Math.min(Math.max(Math.trunc(Number(v)) || 1, 1), 10000);
+const clampLimit = (v, dflt) => Math.min(Math.max(Math.trunc(Number(v)) || dflt, 1), 50);
+
+/**
+ * One database-side page of a house's tenancies, optionally restricted by an extra predicate
+ * (the eligibility filter) and by tenant name. Everything happens in MongoDB: the tenant join is a
+ * $lookup scoped to the client, the name filter runs inside that join, and sort/skip/limit/count
+ * run in one $facet. Only `pageSize` rows ever reach JavaScript. The exact `total` is computed by
+ * the same pipeline, so it can never disagree with the rows.
+ */
+async function tenancyPage({ clientId, house, extra = null, term = '', pageNo, pageSize }) {
+  const clientOid = oid(clientId);
+  const match = { clientId: clientOid, houseId: oid(house._id), estateId: oid(house.estateId), status: { $in: ['ACTIVE', 'CLOSED'] }, ...(extra || {}) };
+  const tenantMatch = { $expr: { $and: [{ $eq: ['$_id', '$$tid'] }, { $eq: ['$clientId', clientOid] }] } };
+  if (term) tenantMatch.name = { $regex: escapeRegex(term), $options: 'i' };
+  const lookup = { $lookup: { from: Tenant.collection.name, let: { tid: '$tenantId' }, pipeline: [{ $match: tenantMatch }, { $project: { name: 1 } }], as: '_tenant' } };
+  const pageStages = [
+    { $sort: { startAt: -1, _id: -1 } },
+    { $skip: (pageNo - 1) * pageSize },
+    { $limit: pageSize },
+  ];
+  // With a name search the join must run before paging (it decides membership); without one it
+  // runs only for the rows of the current page, so the join cost is bounded by the page size.
+  const pipeline = term
+    ? [{ $match: match }, lookup, { $match: { '_tenant.0': { $exists: true } } }, {
+      $facet: { rows: [...pageStages, { $addFields: { tenantName: { $arrayElemAt: ['$_tenant.name', 0] } } }, { $project: { _tenant: 0 } }], total: [{ $count: 'n' }] },
+    }]
+    : [{ $match: match }, {
+      $facet: { rows: [...pageStages, lookup, { $addFields: { tenantName: { $arrayElemAt: ['$_tenant.name', 0] } } }, { $project: { _tenant: 0 } }], total: [{ $count: 'n' }] },
+    }];
+  const [facet] = await Tenancy.aggregate(pipeline);
+  return { rows: facet?.rows || [], total: facet?.total?.[0]?.n || 0 };
+}
 
 /**
  * Resolve NONE / UNIQUE / AMBIGUOUS over the COMPLETE eligible set in the database.
@@ -131,56 +165,37 @@ export const tenancyService = {
    * while the browsable option list is paginated and searchable by tenant name, so older
    * tenancies are always reachable and nothing unbounded is loaded.
    */
-  async manualPaymentOptions(clientId, house, period, { page = 1, limit = 20, search = '' } = {}) {
-    const pageSize = Math.min(Math.max(Number(limit) || 20, 1), 50);
-    const pageNo = Math.max(Number(page) || 1, 1);
+  async manualPaymentOptions(clientId, house, period, {
+    page = 1, limit = 20, search = '', eligiblePage = 1, eligibleLimit = 10, eligibleSearch = '',
+  } = {}) {
     const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
-
-    // 1. Resolution and the "who can take this payment" list come from the SAME exact database
-    //    predicate as resolveForManualPayment, so options and resolver cannot disagree and no
-    //    eligible tenancy is ever dropped by a candidate cap.
     const elig = eligibleTenancyFilter(period);
-    const eligibleFilter = elig ? { ...base, ...elig } : null;
-    const [r, eligibleTotal, eligibleRows] = await Promise.all([
-      resolveEligible(base, period),
-      eligibleFilter ? Tenancy.countDocuments(eligibleFilter) : 0,
-      eligibleFilter
-        ? Tenancy.find(eligibleFilter).sort({ startAt: -1, _id: -1 }).limit(ELIGIBLE_OPTIONS_CAP).lean()
-        : [],
+
+    // Decision: NONE / UNIQUE / AMBIGUOUS. limit(2) is a decision bound, never a candidate cap.
+    const r = await resolveEligible(base, period);
+
+    // SELECTABLE list: only tenancies that satisfy the exact eligibility predicate, searched and
+    // paginated in MongoDB. `total` follows the search; `eligibleTotal` is the unfiltered exact count.
+    const ePage = clampPage(eligiblePage);
+    const eSize = clampLimit(eligibleLimit, 10);
+    const eTerm = String(eligibleSearch || '').trim().slice(0, 80);
+    const [eligibleTotal, eligiblePageResult] = await Promise.all([
+      elig ? Tenancy.countDocuments({ ...base, ...elig }) : 0,
+      elig ? tenancyPage({ clientId, house, extra: elig, term: eTerm, pageNo: ePage, pageSize: eSize }) : { rows: [], total: 0 },
     ]);
 
-    // 2. Browsable page, optionally filtered by tenant name. The name filter is joined in the
-    //    database ($lookup) so no tenant-id list is materialised or truncated in memory.
-    const term = String(search || '').trim().slice(0, 80);
-    const matchBase = { clientId: oid(clientId), houseId: oid(house._id), estateId: oid(house.estateId), status: { $in: ['ACTIVE', 'CLOSED'] } };
-    const pipeline = [{ $match: matchBase }];
-    if (term) {
-      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      pipeline.push(
-        { $lookup: { from: Tenant.collection.name, localField: 'tenantId', foreignField: '_id', as: '_tenant' } },
-        { $match: { _tenant: { $elemMatch: { clientId: oid(clientId), name: { $regex: escaped, $options: 'i' } } } } },
-      );
-    }
-    pipeline.push({
-      $facet: {
-        rows: [{ $sort: { startAt: -1, _id: -1 } }, { $skip: (pageNo - 1) * pageSize }, { $limit: pageSize }, { $project: { _tenant: 0 } }],
-        total: [{ $count: 'n' }],
-      },
-    });
-    const [facet] = await Tenancy.aggregate(pipeline);
-    const pageRows = facet?.rows || [];
-    const total = facet?.total?.[0]?.n || 0;
+    // INFORMATIONAL history (explains a NONE result). Rows carry coversPeriod/reason but this list
+    // is never a selection source; the selectable list above is separate.
+    const hPage = clampPage(page);
+    const hSize = clampLimit(limit, 20);
+    const hTerm = String(search || '').trim().slice(0, 80);
+    const history = await tenancyPage({ clientId, house, term: hTerm, pageNo: hPage, pageSize: hSize });
 
-    const wanted = new Map();
-    for (const t of [...pageRows, ...eligibleRows]) wanted.set(String(t._id), t);
-    const tenants = await Tenant.find({ clientId, _id: { $in: [...wanted.values()].map((t) => t.tenantId) } })
-      .select('name').lean();
-    const nameById = new Map(tenants.map((t) => [String(t._id), t.name]));
     const toOption = (t) => {
       const reason = tenancyIneligibleReason(t, period);
       return {
         tenancyId: String(t._id),
-        tenantName: nameById.get(String(t.tenantId)) || 'Unknown tenant',
+        tenantName: t.tenantName || 'Unknown tenant',
         startAt: t.startAt,
         endAt: t.endAt || null,
         status: t.status,
@@ -193,14 +208,21 @@ export const tenancyService = {
       period,
       resolution: r.status,
       defaultTenancyId: r.status === TENANCY_RESOLUTION.UNIQUE ? String(r.tenancy._id) : null,
-      // Always present regardless of page/search. Bounded for display; eligibleTotal is exact.
-      eligibleOptions: eligibleRows.map(toOption),
       eligibleTotal,
-      options: pageRows.map(toOption),
-      page: pageNo,
-      limit: pageSize,
-      total,
-      hasMore: pageNo * pageSize < total,
+      eligibleSelection: {
+        items: eligiblePageResult.rows.map(toOption),
+        page: ePage,
+        limit: eSize,
+        total: eligiblePageResult.total,
+        hasMore: ePage * eSize < eligiblePageResult.total,
+        search: eTerm,
+      },
+      // Informational history (legacy fields keep their meaning: NOT selectable).
+      options: history.rows.map(toOption),
+      page: hPage,
+      limit: hSize,
+      total: history.total,
+      hasMore: hPage * hSize < history.total,
     };
   },
 
