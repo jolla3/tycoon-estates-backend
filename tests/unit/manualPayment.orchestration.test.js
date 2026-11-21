@@ -23,6 +23,14 @@ const { rentService } = await import('../../src/services/rent.service.js');
 const { accountingPostingService } = await import('../../src/services/accountingPosting.service.js');
 const { House } = await import('../../src/models/House.js');
 const { Tenancy } = await import('../../src/models/Tenancy.js');
+const { isTenancyEligibleForPeriod } = await import('../../src/utils/tenancyEligibility.js');
+
+// The service now sends the exact eligibility predicate to the database. Emulate the database by
+// applying the same single rule to the fixture list for the fixed test period.
+const DB_PERIOD = '2026-06';
+const fakeFind = (list) => (filter = {}) => chain(list.filter((t) =>
+  (!filter.startAt || isTenancyEligibleForPeriod(t, DB_PERIOD))
+  && (!filter.tenantId || String(t.tenantId) === String(filter.tenantId))));
 
 const oid = () => new mongoose.Types.ObjectId();
 const CLIENT = oid(); const ESTATE = oid(); const HOUSE = oid();
@@ -36,7 +44,7 @@ function houseWithTrapTenant() {
   Object.defineProperty(h, 'tenantId', { get() { throw new Error('house.tenantId must not be read'); } });
   return h;
 }
-const chain = (result) => { const c = { session: () => c, lean: () => c, then: (res, rej) => Promise.resolve(result).then(res, rej) }; return c; };
+const chain = (result) => { const c = { session: () => c, lean: () => c, sort: () => c, limit: (n) => { if (Array.isArray(result)) result = result.slice(0, n); return c; }, then: (res, rej) => Promise.resolve(result).then(res, rej) }; return c; };
 const fakeSession = { id: 'S' };
 const ok = () => ({ withTransaction: async (cb) => cb(), endSession: jest.fn(async () => {}) });
 
@@ -52,7 +60,7 @@ const body = { houseId: String(HOUSE), amountCents: 500000, period: '2026-06', p
 
 describe('recordManual routes one validated tenancy through every step', () => {
   test('historic tenancy: same tenancy/tenant/session reach charges, outstanding, posting; current tenant ignored', async () => {
-    jest.spyOn(Tenancy, 'find').mockReturnValue(chain([tenancyOld, tenancyNow]));
+    jest.spyOn(Tenancy, 'find').mockImplementation(fakeFind([tenancyOld, tenancyNow]));
     const charges = [{ _id: oid(), tenancyId: tenancyOld._id }];
     const ensure = jest.spyOn(rentService, 'ensureChargesForTenancy').mockResolvedValue([]);
     const outstanding = jest.spyOn(rentService, 'outstandingChargesForTenancy').mockResolvedValue(charges);
@@ -82,7 +90,7 @@ describe('recordManual routes one validated tenancy through every step', () => {
 
   test('ambiguous resolution: nothing is generated or posted; explicit tenancyId is demanded', async () => {
     const second = { ...tenancyOld, _id: oid(), tenantId: oid() };
-    jest.spyOn(Tenancy, 'find').mockReturnValue(chain([tenancyOld, second]));
+    jest.spyOn(Tenancy, 'find').mockImplementation(fakeFind([tenancyOld, second]));
     const ensure = jest.spyOn(rentService, 'ensureChargesForTenancy');
     const post = jest.spyOn(accountingPostingService, 'postConfirmedPayment');
     await expect(paymentService.recordManual(CLIENT, body)).rejects.toMatchObject({ code: 'CONFLICT', message: expect.stringMatching(/choose which tenancy/) });
@@ -92,7 +100,7 @@ describe('recordManual routes one validated tenancy through every step', () => {
   });
 
   test('no eligible tenancy: rejected, nothing posted', async () => {
-    jest.spyOn(Tenancy, 'find').mockReturnValue(chain([tenancyNow])); // starts 2026-07, period is 2026-06
+    jest.spyOn(Tenancy, 'find').mockImplementation(fakeFind([tenancyNow])); // starts 2026-07, period is 2026-06
     const post = jest.spyOn(accountingPostingService, 'postConfirmedPayment');
     await expect(paymentService.recordManual(CLIENT, body)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
     expect(post).not.toHaveBeenCalled();
@@ -117,7 +125,7 @@ describe('recordManual routes one validated tenancy through every step', () => {
   });
 
   test('tenantId that matches no covering tenancy (but one exists for someone else) is rejected specifically', async () => {
-    jest.spyOn(Tenancy, 'find').mockReturnValue(chain([tenancyOld]));
+    jest.spyOn(Tenancy, 'find').mockImplementation(fakeFind([tenancyOld]));
     await expect(paymentService.recordManual(CLIENT, { ...body, tenantId: String(TENANT_NOW) }))
       .rejects.toMatchObject({ code: 'INVALID_REQUEST', message: expect.stringMatching(/tenantId does not match/) });
   });
@@ -129,7 +137,7 @@ describe('recordManual routes one validated tenancy through every step', () => {
   });
 
   test('a failure while posting propagates, skips the audit and ends the session', async () => {
-    jest.spyOn(Tenancy, 'find').mockReturnValue(chain([tenancyOld]));
+    jest.spyOn(Tenancy, 'find').mockImplementation(fakeFind([tenancyOld]));
     jest.spyOn(rentService, 'ensureChargesForTenancy').mockResolvedValue([]);
     jest.spyOn(rentService, 'outstandingChargesForTenancy').mockResolvedValue([]);
     jest.spyOn(accountingPostingService, 'postConfirmedPayment').mockRejectedValue(new Error('ledger down'));

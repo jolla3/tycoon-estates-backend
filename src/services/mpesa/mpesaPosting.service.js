@@ -17,6 +17,9 @@ import { MpesaTransaction } from '../../models/MpesaTransaction.js';
 import { MpesaSmsSubmission, SUBMISSION_STATE } from '../../models/MpesaSmsSubmission.js';
 import { MpesaSubmissionLink } from '../../models/MpesaSubmissionLink.js';
 import { MpesaMerchantProfile } from '../../models/MpesaMerchantProfile.js';
+import { MpesaCollectionReference } from '../../models/MpesaCollectionReference.js';
+import { Tenancy } from '../../models/Tenancy.js';
+import { isActiveMapping } from './mpesaMerchantMapping.service.js';
 import { AuditLog } from '../../models/AuditLog.js';
 import { settleTenantAccount } from '../tenantCredit.service.js';
 import { queueProtectedSms } from '../g5ProtectedSms.service.js';
@@ -31,6 +34,7 @@ import { Errors } from '../../utils/errors.js';
 
 export const POSTING_LEASE_MS = 60_000;
 export const BUY_GOODS_TYPE = 'CustomerBuyGoodsOnline';
+export const PAYBILL_TYPE = 'CustomerPayBillOnline';
 export const TIMESTAMP_TOLERANCE_MS = 10 * 60 * 1000; // parser minute precision + clock skew; tune only with B04 evidence
 
 export const POSTING_BLOCK = Object.freeze({
@@ -55,7 +59,7 @@ export async function postingGate() {
  * Pure evidence check: does submission evidence agree with the canonical receipt and link scope?
  * Returns { ok, reason }. Never compares payer MSISDN/name to the Tenant.
  */
-export function evaluateEvidence({ submission, link, txn, profile }) {
+export function evaluateEvidence({ submission, link, txn, profile, mappingActive = false }) {
   // A previously accepted submission remains processable after rotation/revocation.
   // Current ACTIVE status is required only for submissions that lack acceptance proof.
   if (!link) return { ok: false, reason: 'LINK_NOT_ACTIVE' };
@@ -69,7 +73,13 @@ export function evaluateEvidence({ submission, link, txn, profile }) {
   }
   if (!profile || profile.operationalState !== 'ACTIVE') return { ok: false, reason: 'MERCHANT_NOT_OPERATIONAL' };
   if (String(profile.clientId) !== String(link.clientId)) return { ok: false, reason: 'MERCHANT_CLIENT_MISMATCH' };
-  if (!profile.estateId || String(profile.estateId) !== String(link.estateId)) return { ok: false, reason: 'MERCHANT_ESTATE_UNMAPPED' };
+  // Till SMS-evidence path only. A PayBill merchant never posts from tenant SMS evidence.
+  if (profile.merchantType !== 'BUY_GOODS_TILL') return { ok: false, reason: 'NOT_TILL_MERCHANT' };
+  // Authorization is an ACTIVE profile<->estate mapping (never the legacy profile.estateId).
+  if (mappingActive !== true) return { ok: false, reason: 'MERCHANT_ESTATE_UNMAPPED' };
+  if (link.merchantProfileId && String(link.merchantProfileId) !== String(profile._id)) {
+    return { ok: false, reason: 'LINK_MERCHANT_MISMATCH' };
+  }
   if (String(txn.merchantProfileId) !== String(profile._id) || String(txn.clientId) !== String(link.clientId)) {
     return { ok: false, reason: 'RECEIPT_SCOPE_MISMATCH' };
   }
@@ -109,7 +119,8 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
   const txn = await MpesaTransaction.findById(submission.mpesaTransactionId);
   if (!txn) throw Errors.NotFound('Receipt not found');
   const profile = await MpesaMerchantProfile.findOne({ _id: txn.merchantProfileId, clientId });
-  const verdict = evaluateEvidence({ submission, link, txn, profile });
+  const mappingActive = await isActiveMapping({ merchantProfileId: profile?._id, clientId, estateId });
+  const verdict = evaluateEvidence({ submission, link, txn, profile, mappingActive });
   if (!verdict.ok) {
     const state = verdict.reason === 'COMPETING_CLAIM' ? SUBMISSION_STATE.CONFLICTING : SUBMISSION_STATE.MANUAL_REVIEW;
     await MpesaSmsSubmission.updateOne(
@@ -119,9 +130,81 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
     throw Errors.Conflict(`Evidence rejected: ${verdict.reason}`);
   }
 
+  return executeFencedPosting({
+    txn, clientId, estateId, tenantId: submission.tenantId, actorUserId, ipAddress,
+    evidence: { type: 'SMS_SUBMISSION', submission },
+  });
+}
+
+/**
+ * Pure evidence check for the PayBill reference path. Routing evidence only: the receipt must
+ * still be provider-verified (MATCHED) and every existing posting safeguard applies.
+ */
+export function evaluateReferenceEvidence({ txn, reference, profile, mappingActive = false, tenancy }) {
+  if (!reference) return { ok: false, reason: 'REFERENCE_NOT_FOUND' };
+  if (reference.status !== 'ACTIVE') return { ok: false, reason: 'REFERENCE_RETIRED' };
+  if (!profile || profile.operationalState !== 'ACTIVE') return { ok: false, reason: 'MERCHANT_NOT_OPERATIONAL' };
+  if (profile.merchantType !== 'PAYBILL') return { ok: false, reason: 'NOT_PAYBILL_MERCHANT' };
+  if (String(reference.merchantProfileId) !== String(profile._id)) return { ok: false, reason: 'REFERENCE_MERCHANT_MISMATCH' };
+  if (String(reference.clientId) !== String(profile.clientId)) return { ok: false, reason: 'MERCHANT_CLIENT_MISMATCH' };
+  if (mappingActive !== true) return { ok: false, reason: 'MERCHANT_ESTATE_UNMAPPED' };
+  if (String(txn.merchantProfileId) !== String(profile._id) || String(txn.clientId) !== String(profile.clientId)) {
+    return { ok: false, reason: 'RECEIPT_SCOPE_MISMATCH' };
+  }
+  if (txn.transactionType !== PAYBILL_TYPE) return { ok: false, reason: 'NOT_PAYBILL' };
+  if (txn.verificationState !== TXN_VERIFICATION_STATE.MATCHED) return { ok: false, reason: 'RECEIPT_NOT_VERIFIED' };
+  if (!Number.isSafeInteger(txn.amountCents) || txn.amountCents <= 0 || txn.acceptedAmountCents !== txn.amountCents) {
+    return { ok: false, reason: 'AMOUNT_MISMATCH' };
+  }
+  if (!tenancy || String(tenancy._id) !== String(reference.tenancyId)
+    || String(tenancy.tenantId) !== String(reference.tenantId)
+    || String(tenancy.estateId) !== String(reference.estateId)
+    || String(tenancy.clientId) !== String(reference.clientId)) {
+    return { ok: false, reason: 'TENANCY_IDENTITY_MISMATCH' };
+  }
+  // Closed/void tenancies are not auto-posted; they go to review (G3 rules decide later).
+  if (tenancy.status !== 'ACTIVE') return { ok: false, reason: 'TENANCY_NOT_ACTIVE' };
+  if (txn.allocationReferenceId && String(txn.allocationReferenceId) !== String(reference._id)) {
+    return { ok: false, reason: 'COMPETING_CLAIM' };
+  }
+  if (txn.attributedTenantId && String(txn.attributedTenantId) !== String(reference.tenantId)) {
+    return { ok: false, reason: 'COMPETING_CLAIM' };
+  }
+  return { ok: true, reason: null };
+}
+
+/** Post one PayBill receipt that was allocated to exactly one reference. Same gates/fencing as Till. */
+export async function postAllocatedReceipt({ transactionId, clientId, actorUserId = null, ipAddress = null }) {
+  const blocked = await postingGate();
+  if (blocked) throw Errors.ServiceUnavailable(`M-PESA posting blocked: ${blocked}`);
+  const txn = await MpesaTransaction.findOne({ _id: transactionId, clientId });
+  if (!txn || !txn.allocationReferenceId) throw Errors.NotFound('Allocated receipt not found');
+  const reference = await MpesaCollectionReference.findOne({ _id: txn.allocationReferenceId, clientId });
+  const profile = await MpesaMerchantProfile.findOne({ _id: txn.merchantProfileId, clientId });
+  const tenancy = reference ? await Tenancy.findOne({ _id: reference.tenancyId, clientId }) : null;
+  const mappingActive = reference
+    ? await isActiveMapping({ merchantProfileId: profile?._id, clientId, estateId: reference.estateId })
+    : false;
+  const verdict = evaluateReferenceEvidence({ txn, reference, profile, mappingActive, tenancy });
+  if (!verdict.ok) {
+    await MpesaTransaction.updateOne(
+      { _id: txn._id, postingState: { $ne: 'POSTED' } },
+      { $set: { claimState: 'REVIEW', allocationReason: verdict.reason } }
+    );
+    throw Errors.Conflict(`Evidence rejected: ${verdict.reason}`);
+  }
+  return executeFencedPosting({
+    txn, clientId, estateId: reference.estateId, tenantId: reference.tenantId, actorUserId, ipAddress,
+    evidence: { type: 'PAYBILL_REFERENCE', reference },
+  });
+}
+
+/** Exported ONLY so replica-set tests can exercise the fence beneath postingGate(); never call from app code. */
+export async function executeFencedPosting({ txn, clientId, estateId, tenantId, actorUserId, ipAddress, evidence }) {
+  const submission = evidence.type === 'SMS_SUBMISSION' ? evidence.submission : null;
   // Already fully posted receipt: never a second Payment.
   if (txn.postingState === 'POSTED') {
-    if (String(txn.attributedTenantId) !== String(submission.tenantId)) throw Errors.Conflict('Receipt already posted to another Tenant');
+    if (String(txn.attributedTenantId) !== String(tenantId)) throw Errors.Conflict('Receipt already posted to another Tenant');
     return { reused: true, paymentIds: txn.paymentIds };
   }
 
@@ -132,7 +215,7 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
     {
       _id: txn._id,
       $and: [
-        { $or: [{ attributedTenantId: null }, { attributedTenantId: submission.tenantId }] },
+        { $or: [{ attributedTenantId: null }, { attributedTenantId: tenantId }] },
         { $or: [
           { postingState: { $in: ['NOT_POSTED', 'FAILED_RETRYABLE'] } },
           { postingState: 'PROCESSING', postingLeaseExpiresAt: { $lte: now } },
@@ -144,7 +227,8 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
         postingState: 'PROCESSING', postingLeaseToken: token,
         postingLeaseExpiresAt: new Date(now.getTime() + POSTING_LEASE_MS),
         attributedClientId: clientId, attributedEstateId: estateId,
-        attributedTenantId: submission.tenantId, attributedSubmissionId: submission._id,
+        attributedTenantId: tenantId,
+        ...(submission ? { attributedSubmissionId: submission._id } : {}),
         claimState: 'CLAIMED',
       },
       $inc: { postingAttempts: 1 },
@@ -158,7 +242,7 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
     let result;
     await session.withTransaction(async () => {
       const settled = await settleTenantAccount({
-        clientId, estateId, tenantId: submission.tenantId,
+        clientId, estateId, tenantId,
         receipt: {
           transactionId: txn._id, receiptNumber: txn.receiptNumber,
           amountCents: txn.amountCents, transactionAt: txn.transactionAt,
@@ -182,24 +266,26 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
       );
       if (fin.matchedCount !== 1) throw Errors.Conflict('Posting lease lost; aborting');
 
-      const sub = await MpesaSmsSubmission.updateOne(
-        { _id: submission._id, clientId, estateId, state: { $ne: SUBMISSION_STATE.POSTED } },
-        { $set: { state: SUBMISSION_STATE.POSTED, stateReason: null } },
-        { session }
-      );
-      if (sub.matchedCount !== 1) throw Errors.Conflict('Submission state changed; aborting');
+      if (submission) {
+        const sub = await MpesaSmsSubmission.updateOne(
+          { _id: submission._id, clientId, estateId, state: { $ne: SUBMISSION_STATE.POSTED } },
+          { $set: { state: SUBMISSION_STATE.POSTED, stateReason: null } },
+          { session }
+        );
+        if (sub.matchedCount !== 1) throw Errors.Conflict('Submission state changed; aborting');
+      }
 
       // One Tenant-level confirmation SMS per canonical receipt (not per child Payment).
-      const tenant = await Tenant.findOne({ _id: submission.tenantId, clientId, estateId }).session(session).select('phone');
+      const tenant = await Tenant.findOne({ _id: tenantId, clientId, estateId }).session(session).select('phone');
       const phone = tenant?.phone && String(tenant.phone).trim();
       if (phone) {
         const amountKes = (Number(txn.amountCents) / 100).toFixed(2);
         const body = `Tycoon Estates: M-PESA receipt ${txn.receiptNumber} of KES ${amountKes} has been applied to your rent account.`;
         await queueProtectedSms({
-          clientId, estateId, tenantId: submission.tenantId,
+          clientId, estateId, tenantId,
           phone, body, type: 'payment_confirmation',
           notificationVersion: 'payment_confirmation:v1',
-          idempotencyKey: `confirm:${String(txn._id)}:${String(submission.tenantId)}`,
+          idempotencyKey: `confirm:${String(txn._id)}:${String(tenantId)}`,
           session,
         });
       } else {
@@ -207,7 +293,7 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
           clientId, estateId, userId: actorUserId || undefined,
           action: 'G5_CONFIRMATION_SMS_BLOCKED', resource: 'MpesaTransaction', resourceId: txn._id,
           description: 'Payment confirmation SMS not queued — tenant phone missing',
-          metadata: { tenantId: String(submission.tenantId), reason: 'tenant_phone_missing' },
+          metadata: { tenantId: String(tenantId), reason: 'tenant_phone_missing' },
           ipAddress,
         }], { session });
       }
@@ -217,7 +303,8 @@ export async function postVerifiedReceipt({ submissionId, clientId, estateId, ac
         action: 'MPESA_RECEIPT_POSTED', resource: 'MpesaTransaction', resourceId: txn._id,
         description: 'Verified M-PESA receipt posted to G3',
         metadata: {
-          tenantId: String(submission.tenantId), submissionId: String(submission._id),
+          tenantId: String(tenantId), evidenceType: evidence.type,
+          ...(submission ? { submissionId: String(submission._id) } : { referenceId: String(evidence.reference._id) }),
           paymentIds: paymentIds.map(String),
           receiptAppliedCents: settled.plan.receiptAppliedCents,
           creditAppliedCents: settled.plan.creditAppliedCents,

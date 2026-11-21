@@ -12,8 +12,8 @@ const router = Router();
 const banking = requireProduct('BANKING');
 
 router.get('/accounts', authenticate, clientContext, banking, bankController.list);
-router.post('/accounts', authenticate, clientContext, banking, authorize('CLIENT_OWNER', 'CLIENT_ADMIN'), validate(schemas.connectBankAccount), bankController.connect);
-router.post('/accounts/:id/sync', authenticate, clientContext, banking, authorize('CLIENT_OWNER', 'CLIENT_ADMIN'), bankController.sync);
-router.get('/accounts/:id/statement', authenticate, clientContext, banking, authorize('CLIENT_OWNER', 'CLIENT_ADMIN'), validate(schemas.dateRange, 'query'), bankController.statement);
+router.post('/accounts', authenticate, clientContext, banking, authorize('CLIENT_OWNER', 'CLIENT_ADMIN', 'SUPER_ADMIN'), validate(schemas.connectBankAccount), bankController.connect);
+router.post('/accounts/:id/sync', authenticate, clientContext, banking, authorize('CLIENT_OWNER', 'CLIENT_ADMIN', 'SUPER_ADMIN'), bankController.sync);
+router.get('/accounts/:id/statement', authenticate, clientContext, banking, authorize('CLIENT_OWNER', 'CLIENT_ADMIN', 'SUPER_ADMIN'), validate(schemas.dateRange, 'query'), bankController.statement);
 
 export default router;

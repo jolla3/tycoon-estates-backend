@@ -22,7 +22,7 @@ router.post(
   authenticate,
   clientContext,
   banking,
-  authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
+  authorize('CLIENT_OWNER', 'CLIENT_ADMIN', 'SUPER_ADMIN'),
   validate(schemas.createBankConnection),
   connectionController.create
 );
@@ -38,7 +38,7 @@ router.post(
   authenticate,
   clientContext,
   banking,
-  authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
+  authorize('CLIENT_OWNER', 'CLIENT_ADMIN', 'SUPER_ADMIN'),
   validate(schemas.reauthorizeBankConnection),
   connectionController.reauthorize
 );
@@ -47,7 +47,7 @@ router.post(
   authenticate,
   clientContext,
   banking,
-  authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
+  authorize('CLIENT_OWNER', 'CLIENT_ADMIN', 'SUPER_ADMIN'),
   connectionController.disconnect
 );
 

@@ -122,6 +122,12 @@ export function isEligibleBuyGoodsTransactionType(transactionType) {
   return normalizeC2bTransactionType(transactionType) === C2B_COMMAND.BUY_GOODS;
 }
 
+/** Buy Goods (Till) and Pay Bill are the two supported collection types. */
+export function isEligibleCollectionTransactionType(transactionType) {
+  const t = normalizeC2bTransactionType(transactionType);
+  return t === C2B_COMMAND.BUY_GOODS || t === C2B_COMMAND.PAYBILL;
+}
+
 export function normalizeC2bConfirmation(body) {
   const payload = body && typeof body === 'object' ? body : {};
   const receiptNumber = payload.TransID != null ? String(payload.TransID).trim() : '';
@@ -140,7 +146,7 @@ export function normalizeC2bConfirmation(body) {
   if (amountCents == null) errors.push('invalid_amount');
   if (!transactionAt) errors.push('invalid_trans_time');
   if (!transactionType) errors.push('missing_transaction_type');
-  else if (!isEligibleBuyGoodsTransactionType(transactionType)) {
+  else if (!isEligibleCollectionTransactionType(transactionType)) {
     errors.push('unsupported_transaction_type');
   }
   return {
@@ -198,7 +204,7 @@ export function normalizePullTransactionRow(
   if (amountCents == null) errors.push('invalid_amount');
   if (!transactionAt) errors.push('invalid_trans_time');
   if (!transactionType) errors.push('missing_transaction_type');
-  else if (!isEligibleBuyGoodsTransactionType(transactionType)) {
+  else if (!isEligibleCollectionTransactionType(transactionType)) {
     errors.push('unsupported_transaction_type');
   }
 

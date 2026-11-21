@@ -54,6 +54,18 @@ const MpesaTransactionSchema = new Schema(
       default: 'NOT_POSTED',
     },
     paymentId: { type: Schema.Types.ObjectId, ref: 'Payment', default: null },
+    // Receipt-level allocation (PayBill reference routing / evidence). UNALLOCATED receipts
+    // are never visible to estate-restricted users and never create a G3 Payment.
+    allocationState: {
+      type: String,
+      enum: ['UNALLOCATED', 'ALLOCATED_BY_REFERENCE', 'ALLOCATED_BY_EVIDENCE'],
+      default: 'UNALLOCATED',
+    },
+    allocationReason: { type: String, default: null },
+    allocationReferenceId: { type: Schema.Types.ObjectId, ref: 'MpesaCollectionReference', default: null },
+    allocatedEstateId: { type: Schema.Types.ObjectId, ref: 'Estate', default: null },
+    allocatedTenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', default: null },
+    allocatedTenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null },
     // G5 attribution: first successful conditional claim wins; never reassigned.
     attributedClientId: { type: Schema.Types.ObjectId, ref: 'Client', default: null },
     attributedEstateId: { type: Schema.Types.ObjectId, ref: 'Estate', default: null },
@@ -90,5 +102,6 @@ MpesaTransactionSchema.index(
 );
 MpesaTransactionSchema.index({ verificationState: 1, transactionAt: -1 });
 MpesaTransactionSchema.index({ clientId: 1, transactionAt: -1 });
+MpesaTransactionSchema.index({ clientId: 1, allocatedEstateId: 1, transactionAt: -1 });
 
 export const MpesaTransaction = mongoose.model('MpesaTransaction', MpesaTransactionSchema);

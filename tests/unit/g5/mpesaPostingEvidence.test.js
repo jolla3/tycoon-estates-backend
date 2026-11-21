@@ -2,8 +2,9 @@ import { evaluateEvidence, BUY_GOODS_TYPE, TIMESTAMP_TOLERANCE_MS, postingGate, 
 
 const oid = (c) => c.repeat(24);
 const base = () => ({
+  mappingActive: true,
   link: { status: 'ACTIVE', clientId: oid('a'), estateId: oid('b') },
-  profile: { _id: oid('c'), clientId: oid('a'), estateId: oid('b'), operationalState: 'ACTIVE' },
+  profile: { _id: oid('c'), clientId: oid('a'), merchantType: 'BUY_GOODS_TILL', operationalState: 'ACTIVE' },
   txn: { merchantProfileId: oid('c'), clientId: oid('a'), transactionType: BUY_GOODS_TYPE, verificationState: 'MATCHED',
     receiptNumber: 'QJK2ABCDEF', amountCents: 1000, acceptedAmountCents: 1000, transactionAt: new Date('2026-10-20T12:15:30Z'), acceptedTransactionAt: new Date('2026-10-20T12:15:30Z'), attributedTenantId: null },
   submission: { tenantId: oid('d'), receiptNumber: 'QJK2ABCDEF', amountCents: 1000, smsTransactionAt: new Date('2026-10-20T12:15:00Z') },
@@ -15,7 +16,9 @@ describe('evaluateEvidence', () => {
   test.each([
     ['LINK_NOT_ACTIVE', (b) => { b.link.status = 'REVOKED'; }],
     ['MERCHANT_NOT_OPERATIONAL', (b) => { b.profile.operationalState = 'NOT_READY'; }],
-    ['MERCHANT_ESTATE_UNMAPPED', (b) => { b.profile.estateId = null; }],
+    ['MERCHANT_ESTATE_UNMAPPED', (b) => { b.mappingActive = false; }],
+    ['NOT_TILL_MERCHANT', (b) => { b.profile.merchantType = 'PAYBILL'; }],
+    ['LINK_MERCHANT_MISMATCH', (b) => { b.link.merchantProfileId = oid('z'); }],
     ['MERCHANT_CLIENT_MISMATCH', (b) => { b.profile.clientId = oid('z'); }],
     ['RECEIPT_SCOPE_MISMATCH', (b) => { b.txn.merchantProfileId = oid('z'); }],
     ['NOT_BUY_GOODS', (b) => { b.txn.transactionType = 'Pay Bill'; }],
@@ -28,6 +31,10 @@ describe('evaluateEvidence', () => {
     ['CURRENCY_MISMATCH', (b) => { b.txn.currency = 'USD'; b.submission.currency = 'KES'; }],
     ['COMPETING_CLAIM', (b) => { b.txn.attributedTenantId = oid('e'); }],
   ])('%s', (reason, mut) => expect(run(mut)).toEqual({ ok: false, reason }));
+  test('legacy profile.estateId alone never authorizes an estate', () => {
+    expect(run((b) => { b.profile.estateId = b.link.estateId; b.mappingActive = false; }))
+      .toEqual({ ok: false, reason: 'MERCHANT_ESTATE_UNMAPPED' });
+  });
   test('same Tenant re-claim is allowed; payer identity is never an input', () => {
     expect(run((b) => { b.txn.attributedTenantId = b.submission.tenantId; }).ok).toBe(true);
     expect(JSON.stringify(base())).not.toMatch(/msisdn|payer/i);

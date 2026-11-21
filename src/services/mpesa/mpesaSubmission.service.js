@@ -34,13 +34,13 @@ export async function matchSubmission(submissionId) {
   const link = await MpesaSubmissionLink.findById(sub.linkId);
   if (!link) return setState(sub, SUBMISSION_STATE.MANUAL_REVIEW, 'LINK_MISSING');
   // Merchant must still be operational for posting; link may already be rotated.
-  const merchant = await resolveOperationalMerchant(sub.clientId, sub.estateId);
+  const merchant = await resolveOperationalMerchant(sub.clientId, sub.estateId, { merchantProfileId: link.merchantProfileId });
   if (!merchant) return setState(sub, SUBMISSION_STATE.UNMATCHED, 'MERCHANT_NOT_OPERATIONAL');
   const txn = await MpesaTransaction.findOne({
     provider: DARAJA_PROVIDER, businessShortCode: merchant.businessShortCode, receiptNumber: sub.receiptNumber,
   });
   if (!txn) return setState(sub, SUBMISSION_STATE.UNMATCHED, 'RECEIPT_NOT_YET_RECEIVED');
-  const verdict = evaluateEvidence({ submission: sub, link, txn, profile: merchant });
+  const verdict = evaluateEvidence({ submission: sub, link, txn, profile: merchant, mappingActive: true });
   if (!verdict.ok) {
     const s = verdict.reason === 'COMPETING_CLAIM' ? SUBMISSION_STATE.CONFLICTING
       : verdict.reason === 'RECEIPT_NOT_VERIFIED' ? SUBMISSION_STATE.UNMATCHED : SUBMISSION_STATE.MANUAL_REVIEW;

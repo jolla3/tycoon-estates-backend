@@ -17,6 +17,7 @@ import { BankConnection } from '../models/BankConnection.js';
 import { BankAccount } from '../models/BankAccount.js';
 import { MpesaMerchantProfile } from '../models/MpesaMerchantProfile.js';
 import { MpesaIngestionEvent } from '../models/MpesaIngestionEvent.js';
+import { PULL_REGISTRATION_ELIGIBILITY } from './mpesa/daraja.constants.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 export const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -90,11 +91,17 @@ export async function bankingSummaryByClient(clientIds) {
   return out;
 }
 
-export function safeMerchantProfile(p, evidence) {
+// Allowlisted merchant view. Never includes the Pull nominated number (only its mask), encrypted
+// material, provider credentials or raw provider bodies.
+export function safeMerchantProfile(p, evidence, mappings) {
+  const reg = (r) => (r ? {
+    environment: r.environment || null, configId: r.configId || null, configVersion: r.configVersion || null,
+    attemptedAt: r.attemptedAt || null, succeededAt: r.succeededAt || null,
+  } : null);
   return {
     id: String(p._id),
     clientId: String(p.clientId),
-    estateId: p.estateId ? String(p.estateId) : null,
+    estateId: p.estateId ? String(p.estateId) : null, // DEPRECATED legacy field; not authoritative
     displayName: p.displayName || null,
     merchantType: p.merchantType,
     businessShortCode: p.businessShortCode,
@@ -103,9 +110,15 @@ export function safeMerchantProfile(p, evidence) {
     pullCapability: p.pullCapability,
     c2bRegistrationState: p.c2bRegistrationState,
     pullRegistrationState: p.pullRegistrationState,
+    c2bRegistration: reg(p.c2bRegistration),
+    pullRegistration: reg(p.pullRegistration),
+    pullNominatedNumber: { captured: Boolean(p.pullNominatedMsisdnMasked), masked: p.pullNominatedMsisdnMasked || null },
     lastPullRegisteredAt: p.lastPullRegisteredAt || null,
+    // Registration is blocked until provider evidence exists for this merchant type (fail closed).
+    pullRegistrationEligible: Boolean(PULL_REGISTRATION_ELIGIBILITY[p.merchantType]?.verified),
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
+    ...(mappings ? { estates: mappings.map((m) => ({ estateId: String(m.estateId), status: m.status })) } : {}),
     ...(evidence !== undefined ? { ingestionEvidence: evidence } : {}),
   };
 }

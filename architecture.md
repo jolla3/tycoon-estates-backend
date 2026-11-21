@@ -365,3 +365,32 @@ The current contract evidence supports a platform/application-level Co-op INS Ba
 ### Verification boundary
 
 Local unit, HTTP integration and Mongo concurrency results are recorded in `docs/G4_FINAL_IMPLEMENTATION_REVIEW.md`. They prove the tested local application behavior, not Co-op sandbox verification, provider certification, production key-management readiness or successful deployment migrations.
+## Co-op Connect 2.0.0 — provider boundary and cross-layer invariants
+
+### Credential and token boundary
+- Tycoon `BankConnection.clientId` identifies the owning Client; Co-op CK/SK identify the OAuth application. They are separate identifiers.
+- Accept strict provider-specific `consumerKey`/`consumerSecret` input. Secret material remains in the existing encrypted connection-scoped path with `credentialsRef`, owner and monotonic `credentialVersion`.
+- Normal onboarding uses Co-op's documented CK/SK-only `client_credentials` token request. Grant type, scope and token endpoint are provider configuration and may vary by resource; never request scope from the customer form or guess a scope.
+- Coordinate tokens beyond the lifetime of a reconstructed adapter instance. Cache key must isolate connection ID, credential version, grant, scope and token endpoint. Concurrent refresh must be single-flight. Rotation must not allow an old in-flight token to overwrite/promote a new version. Do not assume missing expiry or refresh support.
+
+### Resource transport and contract
+- Token URL and resource URLs are independent configuration. FullStatement's versioned sandbox server is not a reason to assume all other resources share that host; production URLs remain unverified.
+- Use the documented versioned Account Validation, AccountTransactions and MiniStatement routes and the separate FullStatement OpenAPI route. Keep Balance disabled until its exact resource contract is proven.
+- Resource-specific account schemas must preserve the supplied conflict between 11-digit Account Validation examples and the 14-character FullStatement schema. No global one-size-fits-all length is justified.
+- Account Validation maps MessageCode 0 to valid and -1 to invalid. Unknown codes and transport/auth errors are not valid account responses.
+- FullStatement adapter returns canonical normalized items from its own mapper. Scheduled and manual imports use the same mapping; do not remap in one caller only. Keep AccountTransactions polling disabled until stable transaction identity and endpoint semantics are confirmed.
+
+### Authorization and state
+- Parent BankConnection is required for every child BankAccount operation. Verify existence, client ownership, provider match and active state at operation time. Child connectionStatus/entitlement fields cannot override an inactive or missing parent.
+- Effective operation permission is the intersection of parent active state, account validation, explicit account entitlement, provider capability contract, environment lab policy and provider readiness. Unknown means denied.
+- FullStatement sync/manual import require statement entitlement. AccountTransactions polling requires poll entitlement only if later enabled. No poll-or-statement fallback.
+- Manual statement import applies the same operational/lab gate as scheduled sync, then rechecks account association, parent state and credential version after provider retrieval immediately before ingestion.
+- Callback ingestion verifies the parent connection and effective webhook capability before normalization/ingestion. INS Basic is application-level inbound configuration, not an outbound per-customer secret. Scrub it before logging or quarantine.
+
+### Lifecycle and G3 preservation
+- A create response may be HTTP 201 while connection status is failed. The API represents resource creation; caller must inspect status.
+- Reauthorization remains staged: write next version, authenticate it, CAS-promote only when the original connection version/state is unchanged; on failure retain the old active version and discard staged secret. Return safe typed categories.
+- Preserve lease/fencing on scheduled sync and add equivalent stale-result prevention to manual import/callback ingestion.
+- Provider mapping does not own rent allocation. Do not bypass G3 tenancy identity, reconciliation, transaction claims, audit or ledger posting rules.
+
+The full requirement register and challenge checklist live in `docs/provider-contracts/COOP_CONNECT_IMPLEMENTATION_TRACEABILITY.md`. That document is the implementation/test traceability source for this change.

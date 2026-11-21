@@ -6,7 +6,7 @@
 // issues and the blocked reason is audited.
 import mongoose from 'mongoose';
 import { MpesaSubmissionLink } from '../../models/MpesaSubmissionLink.js';
-import { MpesaMerchantProfile } from '../../models/MpesaMerchantProfile.js';
+import { resolveTillMerchant } from './mpesaMerchantMapping.service.js';
 import { Tenant } from '../../models/Tenant.js';
 import { audit } from '../audit.service.js';
 import {
@@ -20,10 +20,13 @@ import { Errors } from '../../utils/errors.js';
 import { env } from '../../config/environment.js';
 import { logger } from '../../config/logger.js';
 
-/** Exactly one ACTIVE Till mapped to this Estate, else the link is not operational. */
-export async function resolveOperationalMerchant(clientId, estateId) {
-  const profiles = await MpesaMerchantProfile.find({ clientId, estateId, operationalState: 'ACTIVE' }).limit(2);
-  return profiles.length === 1 ? profiles[0] : null;
+/**
+ * The ACTIVE Till (actively mapped to this estate) a link uses. A link bound to a merchant
+ * profile uses exactly that profile; an unbound link needs exactly one candidate.
+ */
+export async function resolveOperationalMerchant(clientId, estateId, { merchantProfileId = null } = {}) {
+  const { merchant } = await resolveTillMerchant(clientId, estateId, { merchantProfileId });
+  return merchant;
 }
 
 function view(link, merchant) {
@@ -84,13 +87,20 @@ export const mpesaSubmissionLinkService = {
     await assertTenant(clientId, estateId, tenantId);
     const link = await MpesaSubmissionLink.findOne({ clientId, estateId, tenantId });
     if (!link) return null;
-    return view(link, await resolveOperationalMerchant(clientId, estateId));
+    return view(link, await resolveOperationalMerchant(clientId, estateId, { merchantProfileId: link.merchantProfileId }));
   },
 
   /** Create, or rotate an existing link (also re-activates a revoked one). Returns the raw token once. */
-  async issue({ clientId, estateId, tenantId, actor }) {
+  async issue({ clientId, estateId, tenantId, actor, merchantProfileId = null }) {
     const tenant = await assertTenant(clientId, estateId, tenantId);
-    const merchant = await resolveOperationalMerchant(clientId, estateId);
+    const resolution = await resolveTillMerchant(clientId, estateId, { merchantProfileId });
+    if (merchantProfileId && !resolution.merchant) {
+      throw Errors.InvalidRequest('Selected merchant is not an active Till mapped to this estate');
+    }
+    if (resolution.ambiguous) {
+      throw Errors.Conflict('Several Tills are active for this estate; select a merchant profile');
+    }
+    const merchant = resolution.merchant;
     const token = generateBearerToken();
     const tokenDigest = digestToken(token);
 

@@ -1,6 +1,7 @@
 import { mpesaSubmissionLinkService } from '../services/mpesa/mpesaSubmissionLink.service.js';
 import { tenantAccountService, loadScopedTenant } from '../services/tenantAccount.service.js';
 import { mpesaSubmissionReviewService } from '../services/mpesa/mpesaSubmissionReview.service.js';
+import { mpesaTenantReferenceService } from '../services/mpesa/mpesaTenantReference.service.js';
 import { apiResponse } from '../utils/apiResponse.js';
 
 const actorOf = (req) => ({ userId: req.currentUser._id, ip: req.ip, userAgent: req.get('user-agent') });
@@ -18,6 +19,20 @@ export const mpesaCollectionController = {
     return apiResponse.success(res, await mpesaSubmissionLinkService.issue(await scopedTenant(req)), 'Link issued; token is shown once', 201);
   }),
   revokeLink: wrap(async (req, res) => apiResponse.success(res, { link: await mpesaSubmissionLinkService.revoke(await scopedTenant(req)) })),
+  references: wrap(async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return apiResponse.success(res, await mpesaTenantReferenceService.view({
+      clientId: req.clientId, estateFilter: req.estateFilter, tenantId: req.params.tenantId, page: req.query.page, limit: req.query.limit,
+    }));
+  }),
+  issueReference: wrap(async (req, res) => {
+    const out = await mpesaTenantReferenceService.issue({
+      clientId: req.clientId, estateFilter: req.estateFilter, tenantId: req.params.tenantId,
+      tenancyId: req.body.tenancyId, merchantProfileId: req.body.merchantProfileId,
+      actor: { _id: req.currentUser._id }, reqMeta: { ip: req.ip, userAgent: req.get('user-agent') },
+    });
+    return apiResponse.success(res, out, out.created ? 'Reference issued' : 'Reference already issued', out.created ? 201 : 200);
+  }),
   account: wrap(async (req, res) => apiResponse.success(res, await tenantAccountService.view({ clientId: req.clientId, estateFilter: req.estateFilter, tenantId: req.params.tenantId }))),
   payments: wrap(async (req, res) => apiResponse.success(res, { payments: await tenantAccountService.payments({ clientId: req.clientId, estateFilter: req.estateFilter, tenantId: req.params.tenantId, limit: req.query.limit }) })),
   listSubmissions: wrap(async (req, res) => apiResponse.success(res, { submissions: await mpesaSubmissionReviewService.list({ clientId: req.clientId, estateFilter: req.estateFilter, state: req.query.state, limit: req.query.limit }) })),

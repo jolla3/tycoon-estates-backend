@@ -1,5 +1,35 @@
 # G5 — Daraja C2B + Pull Transactions Contract Evidence
 
+## Product-scope correction — 2026-11-19
+
+The provider evidence below was assembled for the earlier G5.3 Buy Goods/Till slice. Its original scope statement is historical and is no longer a product-scope prohibition on PayBill. The product target now includes both `PAYBILL` and `BUY_GOODS_TILL`, with one shortcode merchant profile mapped to multiple same-client estates.
+
+This correction does **not** upgrade any provider evidence classification. In particular:
+
+- The existing owner-supplied C2B evidence records `Pay Bill` as a callback transaction type and identifies `BillRefNumber` as an optional callback field. That establishes a normalization/routing requirement, not a complete PayBill rent-allocation implementation.
+- The reviewed Safaricom C2B documentation describes Register URL as mapping confirmation/validation URLs to a shortcode and says external validation is optional and must be enabled for the shortcode. Tycoon should own shared platform callback URLs and register them against each merchant shortcode; clients do not need separate callback servers.
+- Safaricom's public C2B reference document is available at [Safaricom M-PESA Integration API overview](https://www.safaricom.co.ke/images/Downloads/Tender_Documents/EOI_Safaricom_M-PESA_Integration_V1_002.pdf). The current Daraja API directory is [Safaricom Developers Portal](https://developer.safaricom.co.ke/apis). Re-check the authenticated Daraja portal's current merchant-specific contract before implementation/production registration.
+- The current `handleC2bValidation` implementation accepts every request. This is not evidence that validation is implemented safely. External validation must remain disabled until shortcode activation, reference validation, callback trust, acknowledgement timing and failure behavior are proven.
+- The current source Pull registration contract requires `shortCode`, `nominatedNumber` and `callBackUrl`. The nominated number is a merchant-specific KYC value; the callback URL is Tycoon platform configuration. Protect the nominated number and record the callback-config version/snapshot.
+- Callback authentication has not been established by the evidence collected for this repository. A shortcode in an inbound body is not authentication. Public callback processing and automated G3 posting remain gated until authenticity/abuse controls are evidenced.
+
+For PayBill allocation, treat `BillRefNumber` as an optional provider value. Tycoon must resolve it against an explicit, unique merchant collection-reference mapping to exactly one tenant + estate. Missing, unknown, retired or ambiguous references remain unallocated. Do not attribute every receipt from a shared PayBill to every estate mapped to that merchant. The existing Till workflow retains tenant SMS/link evidence and active merchant-estate mapping checks.
+
+### PayBill `BillRefNumber` and callback evidence (reviewed 2026-11-19)
+
+| Item | Finding | Classification |
+|---|---|---|
+| `BillRefNumber` meaning | "Account number for which the customer is making the payment. Applicable only to Customer PayBill Transactions." | `THIRD-PARTY-MIRROR-OF-DARAJA-DOCS` (a published mirror of the Daraja C2B page; not fetched from the authenticated portal) |
+| Format / length | Callback table: "Alpha-numeric, up to 20 chars". No minimum and no further charset rules are stated; the page's own samples contain spaces ("Sample Transaction"), so the provider does not guarantee a clean charset. | `THIRD-PARTY-MIRROR-OF-DARAJA-DOCS`; re-verify on the authenticated portal |
+| Optional / required | Described as usually null for Till; the page does not say it is mandatory for PayBill. Treat as optional. | `BLOCKED/UNKNOWN` for PayBill mandatoriness |
+| Validation rejection | A merchant can reject with a non-zero `ResultCode` (e.g. `C2B00012 Invalid Account Number`) only when external validation is enabled by Safaricom for the shortcode. | `THIRD-PARTY-MIRROR-OF-DARAJA-DOCS`; not enabled for any Tycoon merchant |
+| Callback authentication | No signature, HMAC, shared secret or auth header is described. Callbacks are plain JSON `POST`s. | `BLOCKED/UNKNOWN` — unchanged |
+
+**Tycoon collection-reference format (`PROPOSED`, source-implemented in `src/utils/mpesaCollectionReference.js`).** Tycoon issues its own references so that a tenant types a short code on the M-PESA PayBill prompt. Format: `T` + 8 random characters from the Crockford base-32 alphabet (no `I L O U`) + 1 check character = **10 characters**, comfortably inside the documented 20. Inbound values are normalized by trimming, uppercasing, removing spaces and hyphens and mapping `O→0`, `I/L→1`; anything that is then not exactly a well-formed reference stays **unallocated** — it is never fuzzy-matched. The check character only catches typos; it is not a secret and not authentication. `BillRefNumber` is routing evidence, not proof of payment: a receipt still needs its own receipt identity and G5/G3 safeguards.
+
+The target data-model proposal and migration/receipt-visibility rules are in the authoritative correction section at the top of `docs/superadmin/TYCOON_SUPERADMIN_CURRENT_BACKEND_MAP.md` and in the frontend `architecture.md`. The shared-merchant model is now implemented in source on the review branch (see the implementation-status section of the backend map); it is not production-verified.
+
+
 **Updated:** 2026-11-14
 **Scope:** Buy Goods / Till C2B confirmation and Pull Transactions only. No STK, B2C, B2B, PayBill redesign, Tenant attribution, or G3 posting.
 
@@ -87,3 +117,19 @@
 - Pull registration eligibility, nominated number, Buy Goods Pull transaction-type fixture, pagination terminal semantics and full 48-hour entitlement remain unverified.
 - The exact canonical receipt identity and its unique index remain gated by B01/B02. G3 posting remains disabled.
 - No callback simulation, Pull registration, Pull query, production API request, migration, or G3 payment posting was performed as part of this correction.
+
+## 7. Canonical receipt identity decision (G5.4 follow-up)
+
+**Decision: NOT established. `gates.canonicalReceiptIdentity` stays hard-coded `false`; automatic posting stays disabled; G3 settlement from M-PESA is NOT complete.** `postingGate()` rejects with `CANONICAL_RECEIPT_IDENTITY_NOT_PROVEN` even when every other index is present (contract test `tests/unit/mpesa/canonicalIdentityGate.test.js`).
+
+The shared-shortcode redesign makes `{provider, businessShortCode, receiptNumber}` the natural candidate key, and the migration-controlled global shortcode owner index removes one prior ambiguity. That is still a *design* inference, not provider evidence. Outstanding evidence, each required before the gate may be derived from a real index:
+
+| # | Evidence required | Why |
+|---|---|---|
+| E1 | Official statement (or controlled production-grade observation) that C2B `TransID` / Pull `transactionId` is unique per shortcode, or globally, and that it is stable across retries | A wrong scope either merges two real payments (loss) or splits one (double credit) |
+| E2 | Proof that the C2B confirmation `TransID` and the Pull `transactionId` for the same payment are the same value | Callback/Pull convergence depends on it |
+| E3 | Behaviour for PayBill vs Buy Goods (same value space? `BusinessShortCode` vs Till/Store) and for Head Office / Store hierarchies (B01) | Determines whether shortcode is the right scope component |
+| E4 | Authenticated callback contract (callback authentication is unknown) | An unauthenticated callback cannot establish identity |
+| E5 | A migration-controlled unique index, its dry-run duplicate inventory on real data, and readiness verified on a replica set | Database constraint is the final authority |
+
+When E1–E5 exist: implement the migration (duplicate preflight blocking `--execute`), add the exact spec to `mpesaIndexReadiness.js`, derive the gate from it, and add conflict handling for duplicate-key on first insert. Do not remove the hard-coded blocker before then. PayBill allocation (reference routing) and Till evidence checks are implemented and tested, but they route/verify payments; they do not settle them while this gate is closed.

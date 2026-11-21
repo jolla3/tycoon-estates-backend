@@ -3,6 +3,7 @@
 // Every query is scoped by clientId first — estateId / estateFilter is an
 // additional filter WITHIN that client, never a substitute for clientId.
 import { House } from '../models/House.js';
+import { Tenancy } from '../models/Tenancy.js';
 import { Estate } from '../models/Estate.js';
 import { HouseType } from '../models/HouseType.js';
 import { Tenant } from '../models/Tenant.js';
@@ -75,6 +76,18 @@ export const houseService = {
     if (query.estateId) filter.estateId = query.estateId;
     if (query.houseTypeId) filter.houseTypeId = query.houseTypeId;
     if (query.search) filter.houseNumber = new RegExp(escapeRegex(query.search), 'i');
+
+    // A vacant house must be active, have no current tenant reference and
+    // have no ACTIVE Tenancy. House.status alone can be stale after old imports.
+    if (query.status === 'vacant') {
+      const activeTenancyHouseIds = await Tenancy.distinct('houseId', {
+        clientId,
+        status: 'ACTIVE',
+      });
+      filter.isActive = { $ne: false };
+      filter.tenantId = null;
+      filter._id = { ...(filter._id || {}), $nin: activeTenancyHouseIds };
+    }
 
     const [items, total] = await Promise.all([
       House.find(filter).sort({ houseNumber: 1 }).skip(skip).limit(limit).lean(),

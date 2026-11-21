@@ -1,5 +1,128 @@
 # Tycoon Estates Superadmin — Current Backend Map
 
+## Authoritative M-PESA architecture correction — 2026-11-19
+
+The review-branch implementation below is only the first DRAFT Till slice. The target product is one merchant profile serving multiple same-client estates, including a shared PayBill used by several estates. The one-estate restriction is an implementation defect to correct, not a permanent product limitation.
+
+### Correct target model
+
+- `MpesaMerchantProfile` represents one actual Safaricom shortcode owned by exactly one Tycoon Client within the configured Daraja environment. Supported merchant types are `PAYBILL` and `BUY_GOODS_TILL`.
+- Replace the single profile `estateId` as the authoritative relation with `MpesaMerchantProfileEstate` (or an equivalent explicit mapping collection). One profile can map to many estates in the same client; an estate can map to multiple merchant profiles where several collection channels are genuinely used.
+- Add a PayBill collection-reference record mapping a normalized `BillRefNumber` to exactly one merchant profile + client + estate + tenant. Enforce unique reference per merchant profile. Retire, do not reassign, references; preserve old mappings for late payments after tenant moves.
+- Callback lookup currently searches by provider + shortcode across clients, but the current unique index is only `(clientId,businessShortCode)`. Those scopes disagree. Use one global shortcode owner per provider/environment and align the migration-controlled unique index with callback lookup. Detect duplicates before migration; do not auto-merge profiles or clients.
+- Canonical `MpesaTransaction` stays merchant-scoped on ingestion. `attributedEstateId` remains unset until exact reference/evidence resolution; never assign every shared-merchant receipt to every mapped estate.
+
+### PayBill/Till processing rules
+
+- PayBill `BillRefNumber` is optional in the Safaricom C2B contract. A missing, unknown, retired or ambiguous Tycoon reference must leave the canonical receipt unallocated; do not guess an estate or create a G3 Payment.
+- Add PayBill transaction-type support end-to-end. The normalizer currently recognizes `CustomerPayBillOnline` but marks it unsupported; G5's evidence gate currently accepts Buy Goods only. Expand only after the reference-routing and receipt-identity rules are tested.
+- Buy Goods Till continues through tenant-specific SMS evidence/link resolution. G5 verifies that the merchant profile has an active mapping to the selected link estate. A shared Till does not remove the tenant evidence requirement.
+- BillRefNumber/reference resolution is routing evidence, not permission to bypass existing provider verification, SMS evidence policy, amount/time checks, claim fencing, G3 settlement, audit, or posting feature gates.
+- Estate-scoped receipt history must not use “profile is mapped to this estate” as the receipt predicate. That would show all receipts on a shared PayBill to all mapped estates. Estate-restricted results must be tied to exact reference routing or verified `attributedEstateId`; unallocated receipts belong in an explicitly authorized client-wide review scope.
+
+### Callback and Pull profile configuration
+
+- C2B confirmation, optional validation and Pull-results endpoints are Tycoon-hosted shared platform endpoints. Register the same configured endpoint set against each shortcode; do not ask clients to host callbacks or supply per-client callback URLs.
+- The profile must record the platform callback configuration ID/version and safe URL snapshots used at registration, alongside separate C2B/Pull registration state, response type, attempt/success timestamps and safe provider response identifiers. Keep registration evidence separate from callback capability and operational state.
+- Pull registration needs the shortcode's nominated Safaricom MSISDN. Store it encrypted/protected or by a secret reference and expose only a masked value. It is merchant-specific KYC data; it is not a platform callback URL and not Tycoon's Daraja Consumer Key/Secret.
+- C2B external validation is optional and requires Safaricom activation. The current `handleC2bValidation` accepts every request and is not production-safe. Implement real merchant/reference validation before enabling it.
+- The current provider evidence does not establish callback cryptographic authentication. Keep public callback exposure/automatic processing blocked until authenticity, replay/abuse controls and acknowledgement behavior are evidenced. A shortcode in a request body is not authentication.
+- Registration accepted != callback verified != Pull verified != operational. Handle uncertain timeouts as uncertain and reconcile before another registration attempt.
+
+### Banking provider direction
+
+Keep Banking on the existing provider-adapter architecture. Co-op is the first implemented provider path. KCB, Equity and NCBA have registry/adapter shells in the current source but are not marked implemented or operational. Complete each provider through the existing interface, provider-specific credential model, capability declarations and verified readiness; do not replace the connection model or describe shells as finished support.
+
+### Required implementation sequence
+
+1. Inventory existing profiles, shortcode collisions across clients, legacy estateId associations, canonical receipts, links and attribution.
+2. Design a staged mapping/reference migration. Backfill legacy estateId to exactly one mapping before removing or ignoring the old field.
+3. Establish global provider-shortcode ownership and the unique index only after conflict inventory; keep autoIndex disabled and readiness fail-closed.
+4. Implement PayBill normalization + collection-reference resolution, preserving unallocated canonical receipts.
+5. Update Till/G5 link and posting logic to validate active profile-estate mappings.
+6. Restrict history queries by receipt-level allocation, not profile-estate membership.
+7. Update Superadmin forms for merchant type and multi-estate mapping; add safe registration evidence and protected Pull-number capture. Keep registration as a separate explicit action.
+8. Add migration, multi-estate, cross-client, reference resolution, callback trust, receipt query-scope and G5 regression tests before any production enablement.
+
+
+## Review-branch implementation status — 2026-11-19 (not merged)
+
+Backend review branch: `docs/superadmin-onboarding-and-history`. This is not on main or deployed.
+
+- House list with `status=vacant` now excludes `isActive:false`, any non-null House.tenantId and any House with an ACTIVE Tenancy under the same client. `tenancyService.open` rechecks active state, vacancy and existing active tenancy inside its Mongo transaction.
+- Existing bank connection and account mutation routes now allow SUPER_ADMIN after authenticate + `clientContext` + `requireProduct('BANKING')` + role authorization. Superadmin must provide explicit clientId in query; clientId is never trusted from body.
+- `POST /platform/clients/:clientId/mpesa-profiles` creates a DRAFT BUY_GOODS_TILL profile for one client-owned estate. It checks active Client and same-client Estate inside the transaction, requires `merchantRegistration` readiness (`uniq_client_business_shortcode`), sets capabilities UNKNOWN and registration states NONE, and records required audit in the transaction. No Daraja secrets are stored.
+- `GET /mpesa-transactions` requires auth, `clientContext` and MPESA entitlement, checks canonical query indexes, and returns a paginated allowlisted M-PESA receipt DTO. Client and estate filters are enforced through clientId, mapped merchant profiles and attributedEstateId.
+- New unit schema/DTO tests were added for Till profile input and receipt query/DTO. They have not been executed.
+
+**Current code boundary (not target product):** one DRAFT BUY_GOODS_TILL profile maps to one estate. Multi-estate mappings, PAYBILL, BillRef routing, shared callback registration evidence and protected Pull-number lifecycle are not implemented. The manual-options latest-50 mismatch remains open. No browser, DB replica-set integration or live provider tests are claimed.
+
+## Implementation status on this review branch (supersedes "Till-only / one estateId" statements above)
+
+Implemented in source (unit-tested; replica-set integration tests are authored but **NOT EXECUTED: required service unavailable in this execution environment**): `MpesaMerchantProfileEstate` mapping and `MpesaCollectionReference` models; PAYBILL + BUY_GOODS_TILL profile creation with `estateIds[]`; global `{provider, businessShortCode}` ownership index and readiness gates (`profileEstateMapping`, `collectionReferences`); `scripts/migrations/20261119_g54_mpesa_shared_merchant.js` (dry-run default, collision preflight, idempotent legacy backfill, explicit index creation; never run against any database by this work); PayBill normalization, exact-reference allocation and the typed `evaluateReferenceEvidence`/`postAllocatedReceipt` path that shares `executeFencedPosting` with the Till SMS path; Till evidence now requires an ACTIVE mapping and a merchant-bound link; shared callback config (`DARAJA_CALLBACK_BASE_URL`), registration evidence, encrypted+masked Pull number, explicit audited C2B/Pull registration and reconcile; fail-closed `handleC2bValidation`; allocation-scoped `/mpesa-transactions`; paginated manual-options; reference retirement on tenancy close.
+
+Still blocked/unverified: callback authentication, receipt-identity gate `canonicalReceiptIdentity` (hard-coded false, so automatic posting stays disabled), Pull eligibility/fixtures, and whether closed-tenancy late payments should auto-post under G3 (they go to review).
+
+Rollback/recovery for the migration: delete only `mpesamerchantprofileestates` rows with `source: 'LEGACY_MIGRATION'` and drop the four new indexes; `profile.estateId` and `uniq_client_business_shortcode` are untouched unless `--drop-legacy-index` is passed explicitly.
+
+## Adversarial source review result — 2026-11-19 (verified against branch HEAD `e491899`)
+
+The sections above were checked against source. They are accurate; the findings below add facts, they do not change the target.
+
+- **Deployment model (verified):** `env.DARAJA_ENVIRONMENT` is a single process-wide value (`sandbox` default) and the OAuth client is built from it; there is no per-profile environment field and one deployment uses one MongoDB. Sandbox and live therefore do not share a database in the supported topology, so the global ownership index is `{provider, businessShortCode}` without an environment key. The profile still records the environment of each registration attempt so a shared-DB deployment would be detected rather than silently mixed.
+- **Scope mismatch (verified):** `resolveMerchantProfilesByShortCode` filters by `provider + businessShortCode` across all clients while the only unique index is `{clientId, businessShortCode}`; two clients can both own a shortcode and every receipt for it quarantines as `ambiguous_merchant`.
+- **Evidence gate (verified):** `evaluateEvidence` requires `profile.estateId === link.estateId` and `txn.transactionType === CustomerBuyGoodsOnline`; `normalizeC2bConfirmation` and `normalizePullTransactionRow` reject `CustomerPayBillOnline` as `unsupported_transaction_type`.
+- **Link merchant selection (verified):** `resolveOperationalMerchant` uses `.limit(2)` and returns null when two merchants are active for an estate, so a second channel silently disables links.
+- **History leak (verified):** `mpesaTransactionService.list` adds `merchantProfileId $in <profiles mapped to the estate>` to the estate scope; every receipt of a shared merchant would show to every mapped estate.
+- **Validation (verified):** `handleC2bValidation` accepts every request. External validation is not enabled for any merchant and must stay off.
+- **Receipt identity gate (verified):** `inspectMpesaIndexes` hard-codes `canonicalReceiptIdentity=false`; automatic posting is blocked by design and remains so.
+- **Correction to the status section above:** the new tests listed there are unit tests that can run without a database; only replica-set integration tests need MongoDB. None of the integration tests were executed in this review environment (no MongoDB/Redis available).
+
+## Design review hardening — 2026-11-19
+
+Before implementation, the plan was challenged for hidden assumptions and unsafe shortcuts:
+
+1. **The one-estate shape is an implementation constraint, not product policy.** Target is one merchant profile mapped to many same-client estates via a separate relation; current profile.estateId and G5 equality checks need a staged migration and posting-rule change.
+2. **Registration uses shared platform callbacks.** C2B confirmation/optional validation and Pull-results endpoints are Tycoon-hosted and registered against each shortcode. Persist their config version/URL snapshot on the profile. Pull's nominated MSISDN is merchant-specific and must be stored protected/encrypted. Profile create must not silently register or mark operational.
+3. **Shortcode identity needs a global ownership gate.** Current callback lookup searches across clients while the unique key is per-client. Inventory collisions, then enforce one client owner per provider/environment shortcode with a migration-controlled index. Do not auto-merge duplicates.
+4. **Transaction history must not combine record types.** M-PESA history reads canonical MpesaTransaction receipts, not SMS submissions and not ledger Payment rows. The DTO must be safe and scope by client plus the selected estate's merchant profiles/attribution.
+5. **Banking access stays entitlement-gated.** Superadmin must use one explicit active clientId through clientContext. The existing BANKING entitlement check remains active. Do not add a global/bypass route or store new credentials. Existing Co-op credentials remain encrypted in BankCredential.
+6. **Tenant availability must be authoritative.** Filter active houses and exclude active tenancies, but also recheck inside the same Mongo transaction that opens the tenancy. A dropdown is not a concurrency or authorization boundary.
+7. **No broad UI redesign.** Fix the platform content shrink/wrap and breakpoint issues at the shell/evidence components. Do not replace the whole Superadmin UI or introduce a new design system.
+
+## Current post-merge implementation amendment — 2026-11-19 (authoritative)
+
+Verified backend main: 25d9969eb4f1c734f360337f0a3d64b83d465a6a. The older baseline/status tables below are historical architecture evidence; this amendment supersedes contradictory current-status statements.
+
+### Banking credential setup
+
+- Existing customer routes are mounted at /bank/connections and /bank/accounts.
+- clientContext supports SUPER_ADMIN only when an explicit clientId is supplied in query or path, and validates that the target Client is active.
+- requireProduct(BANKING) still applies to these customer routes.
+- Connection create/reauthorize/disconnect and account create/sync/statement mutations currently authorize only CLIENT_OWNER and CLIENT_ADMIN. This is the backend permission blocker for Superadmin onboarding.
+- The next change should narrowly add SUPER_ADMIN to those route allowlists after clientContext, retain requireProduct, pass the selected client explicitly, and reuse connectionService/bankService and encrypted BankCredential. No second credential store is required.
+
+### M-PESA merchant profiles
+
+- MpesaMerchantProfile exists and stores clientId, Buy Goods Till shortcode, optional estateId, lifecycle/capability/registration evidence and actor IDs.
+- platformIntegrations.service.js only reads and redacts profile data for the console. There is no HTTP route/controller/service for Superadmin profile creation or management.
+- darajaC2b.service.js and darajaPull.service.js implement registration calls, but they are not exposed as Superadmin profile-management HTTP routes.
+- Tycoon owns the Daraja application Consumer Key/Secret/environment at process level. A client profile stores that client's Till/shortcode, not a duplicate of the platform application's secrets.
+- New profile creation must validate Client and optional Estate ownership; begin at DRAFT with unknown capabilities and no registration evidence. A caller must not set ACTIVE or VERIFIED by request input.
+
+### Canonical M-PESA transaction history
+
+- MpesaTransaction stores canonical provider receipts with provider verification, claim/posting state and attribution fields.
+- There is no client-facing paginated list/read route or safe transaction DTO.
+- The next API should use authenticated clientContext, requireProduct(MPESA), pagination, client scope and estateFilterClause; expose allowlisted receipt fields only. Preserve distinctions among canonical receipts, SMS submissions and G3 Payments.
+- The frontend should render M-PESA receipts as a source within the existing Transactions page, rather than a separate page.
+
+### Post-P0 fixes and verification
+
+- P0 frontend-contract fixes are merged in backend main: HouseType create estateId contract, safe BankTransaction DTO, and explicit manual-payment tenancy resolution.
+- The manual-options query still has a latest-50 limit while the payment resolver searches all eligible tenancies.
+- Nineteen DB-backed integration tests were added but not executed; no live deployment/provider check is claimed.
+
 **Status:** Static map of verified backend state plus the target boundaries to preserve  
 **Date:** 2026-11-14  
 **Repository:** `jolla3/tycoon-estates-backend`  
@@ -327,3 +450,16 @@ Never returned: `credentialsRef`, encrypted account numbers/hashes, tokens, raw 
 - Job outcome telemetry is Redis/in-memory operational data, not financial truth; per-client job counts exist only for `bankSync`.
 - Audit queries on `userId`/`createdAt` rely on new non-unique indexes declared on the model; they are not created by this change at startup.
 - Provider-verified Co-op/Daraja readiness cannot be shown without a live-check mechanism that is out of scope.
+
+## G5.4 follow-up hardening (review round 2)
+
+| Area | Change | Evidence |
+|---|---|---|
+| Migration preflight | `analyzeIntegrity` verifies `Profile.clientId === Mapping.clientId === Estate.clientId`; reports `estate_missing`, `estate_client_mismatch`, `mapping_profile_missing`, `mapping_client_mismatch`, `duplicate_mapping_key`, `duplicate_reference_key`, `duplicate_active_tenancy_reference`, `reference_*_mismatch`, `shortcode_collision`. Any violation blocks `--execute`; nothing is repaired or backfilled. | unit: `migrationPreflight.test.js`; real-data: `g54.hardening` (NOT EXECUTED) |
+| Reference issuance | Requires `collectionReferences` readiness (503 `MPESA_REFERENCE_INDEXES_NOT_READY`). No `exists()` pre-check: unique indexes decide; duplicate-key classified by index (`active_tenancy` returns the winner, `reference` redraws). One transaction per attempt. | unit (mocked): `referenceIssuance.test.js`; races: `g54.hardening` (NOT EXECUTED) |
+| Manual payment | No candidate caps. Eligibility is one exact DB predicate (`eligibleTenancyFilter`, same boundaries as `tenancyPeriodEligibility`); resolution uses `limit(2)` as a decision bound; `eligibleTotal` is a count; tenant search is a `$lookup` + `$facet`. `period` must be `YYYY-MM`. | unit: `manualPaymentBeyondLimits.test.js` (1,000 tenancies, oldest eligible) |
+| Registration | Pull fails closed (`MPESA_PULL_ELIGIBILITY_UNVERIFIED`, 409) until `PULL_REGISTRATION_ELIGIBILITY[type].verified` is set with evidence. Token preflight before any REQUESTED claim; durable `*_REGISTRATION_SENDING` audit before the request; pre-send failure releases the claim and audits `*_NOT_SENT`; timeouts / post-send errors / 5xx are UNCERTAIN; REQUESTED/UNCERTAIN need operator reconcile. Success is registration evidence only. | unit: `registrationLifecycle.test.js` |
+| Receipt identity | Decision: not establishable from provider evidence; gate stays false. Evidence E1–E5 listed in `G5_DARAJA_C2B_PULL_EVIDENCE.md` §7. **G3 settlement from M-PESA is not complete while `postingGate()` rejects.** | `canonicalIdentityGate.test.js` |
+| Tenant references | `GET /api/v1/mpesa-collection/tenants/:tenantId/references?page&limit` (any MPESA role, estate-scoped, `Cache-Control: no-store`) and `POST` `{tenancyId, merchantProfileId}` (owner/admin). Rows are keyed by exact tenancy; retired references listed separately with `retiredCount`; `canIssue` only for an ACTIVE tenancy with no active reference. No SMS delivery added (see below). | unit: `tenantReferenceView.test.js` |
+
+Reference delivery: the existing protected SMS outbox is built for credentialed links and confirmations. Sending routing identifiers through it would add a new message type and dispatch path; this round deliberately provides an operator view with copy instead, and leaves SMS delivery as a separate, flag-gated decision.
