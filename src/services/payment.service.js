@@ -1,7 +1,9 @@
 // src/services/payment.service.js
 import mongoose from 'mongoose';
 import { Payment } from '../models/Payment.js';
+import { PaymentAllocation } from '../models/PaymentAllocation.js';
 import { ManualReceipt } from '../models/ManualReceipt.js';
+import { TenantCreditMovement } from '../models/TenantCreditMovement.js';
 import { House } from '../models/House.js';
 import { Tenant } from '../models/Tenant.js';
 import { dateUtil } from '../utils/date.js';
@@ -35,18 +37,171 @@ function payloadMatchesReceipt(receipt, {
     && String(receipt.paymentReference || '') === String(paymentReference || '');
 }
 
+function receiptSummary(receiptDoc) {
+  return {
+    _id: String(receiptDoc._id),
+    houseId: String(receiptDoc.houseId),
+    tenantId: String(receiptDoc.tenantId),
+    occupancyTenancyId: String(receiptDoc.occupancyTenancyId),
+    paymentDateLocal: receiptDoc.paymentDateLocal,
+    period: receiptDoc.period,
+    tenderMethod: receiptDoc.tenderMethod,
+    amountCents: receiptDoc.amountCents,
+    paymentReference: receiptDoc.paymentReference || null,
+    idempotencyKey: receiptDoc.idempotencyKey,
+    creditAppliedCents: receiptDoc.creditAppliedCents || 0,
+    receiptAppliedCents: receiptDoc.receiptAppliedCents || 0,
+    newCreditCents: receiptDoc.newCreditCents || 0,
+  };
+}
+
+/**
+ * Rebuild settlement details for an existing ManualReceipt without creating records.
+ */
+async function reconstructSettlementFromReceipt(existing, { session = null } = {}) {
+  const paymentIds = existing.paymentIds || [];
+  const creditPaymentIds = existing.creditPaymentIds || [];
+  const movementIds = existing.creditMovementIds || [];
+
+  const [receiptPayments, creditPayments, movements] = await Promise.all([
+    paymentIds.length
+      ? Payment.find({ _id: { $in: paymentIds } }).session(session || null)
+      : Promise.resolve([]),
+    creditPaymentIds.length
+      ? Payment.find({ _id: { $in: creditPaymentIds } }).session(session || null)
+      : Promise.resolve([]),
+    movementIds.length
+      ? TenantCreditMovement.find({ _id: { $in: movementIds } }).session(session || null)
+      : Promise.resolve([]),
+  ]);
+
+  const allPaymentIds = [
+    ...receiptPayments.map((p) => p._id),
+    ...creditPayments.map((p) => p._id),
+  ];
+  const allocDocs = allPaymentIds.length
+    ? await PaymentAllocation.find({ paymentId: { $in: allPaymentIds } }).session(session || null).lean()
+    : [];
+
+  const paymentById = new Map([
+    ...receiptPayments.map((p) => [String(p._id), p]),
+    ...creditPayments.map((p) => [String(p._id), p]),
+  ]);
+
+  const allocations = allocDocs.map((a) => {
+    const pay = paymentById.get(String(a.paymentId));
+    return {
+      paymentId: a.paymentId,
+      tenancyId: a.tenancyId,
+      houseId: pay?.houseId || null,
+      rentChargeId: a.rentChargeId,
+      amountCents: a.amountCents,
+      chargeType: a.chargeType,
+      period: a.period,
+      origin: pay?.origin || null,
+    };
+  });
+
+  return {
+    plan: {
+      creditAppliedCents: existing.creditAppliedCents || 0,
+      receiptAppliedCents: existing.receiptAppliedCents || 0,
+      newCreditCents: existing.newCreditCents || 0,
+    },
+    receiptPayments,
+    creditPayments,
+    allocations,
+    movements,
+    reused: true,
+  };
+}
+
 export const paymentService = {
+  /**
+   * Operator-facing payment history.
+   * - Each ManualReceipt appears once at its gross amount (origin MANUAL).
+   * - MANUAL Payment children linked via manualReceiptId are excluded.
+   * - M-PESA, BANK, CREDIT, and legacy MANUAL rows without manualReceiptId are unchanged.
+   */
   async list(clientId, estateFilter, query) {
     const { page, limit, skip } = paginationParams(query);
-    const filter = { clientId, ...estateFilterClause(estateFilter) };
-    if (query.houseId) filter.houseId = query.houseId;
-    if (query.tenantId) filter.tenantId = query.tenantId;
-    if (query.estateId) filter.estateId = query.estateId;
+    const scope = { clientId, ...estateFilterClause(estateFilter) };
+    if (query.houseId) scope.houseId = new mongoose.Types.ObjectId(String(query.houseId));
+    if (query.tenantId) scope.tenantId = new mongoose.Types.ObjectId(String(query.tenantId));
+    if (query.estateId) scope.estateId = new mongoose.Types.ObjectId(String(query.estateId));
+    // Ensure clientId is ObjectId for aggregation match against stored ObjectIds.
+    if (scope.clientId && !(scope.clientId instanceof mongoose.Types.ObjectId)) {
+      scope.clientId = new mongoose.Types.ObjectId(String(scope.clientId));
+    }
 
-    const [items, total] = await Promise.all([
-      Payment.find(filter).sort({ paymentDate: -1 }).skip(skip).limit(limit).lean(),
-      Payment.countDocuments(filter),
+    // Non-child payment rows: everything except MANUAL allocation children of a ManualReceipt.
+    const paymentMatch = {
+      ...scope,
+      $or: [
+        { origin: { $ne: 'MANUAL' } },
+        { origin: 'MANUAL', manualReceiptId: null },
+        { origin: 'MANUAL', manualReceiptId: { $exists: false } },
+      ],
+    };
+
+    const receiptMatch = { ...scope };
+
+    const [facet] = await Payment.aggregate([
+      { $match: paymentMatch },
+      {
+        $project: {
+          clientId: 1,
+          estateId: 1,
+          houseId: 1,
+          tenantId: 1,
+          tenancyId: 1,
+          origin: 1,
+          amountCents: 1,
+          paymentDate: 1,
+          paymentReference: 1,
+          period: 1,
+          status: 1,
+          tenderMethod: 1,
+          listKind: { $literal: 'payment' },
+        },
+      },
+      {
+        $unionWith: {
+          coll: 'manualreceipts',
+          pipeline: [
+            { $match: receiptMatch },
+            {
+              $project: {
+                clientId: 1,
+                estateId: 1,
+                houseId: 1,
+                tenantId: 1,
+                tenancyId: '$occupancyTenancyId',
+                origin: { $literal: 'MANUAL' },
+                amountCents: 1,
+                paymentDate: 1,
+                paymentReference: 1,
+                period: 1,
+                status: 1,
+                tenderMethod: 1,
+                listKind: { $literal: 'manual_receipt' },
+                manualReceiptId: '$_id',
+              },
+            },
+          ],
+        },
+      },
+      { $sort: { paymentDate: -1, _id: -1 } },
+      {
+        $facet: {
+          items: [{ $skip: skip }, { $limit: limit }],
+          total: [{ $count: 'n' }],
+        },
+      },
     ]);
+
+    const items = facet?.items || [];
+    const total = facet?.total?.[0]?.n || 0;
     return paginatedResponse(items, total, { page, limit });
   },
 
@@ -83,7 +238,6 @@ export const paymentService = {
     const payDate = nairobi.noon;
     const reference = normalizeReference(paymentReference);
 
-    // Optional legacy period must not contradict the payment date's Nairobi period.
     if (period && period !== nairobi.period) {
       throw Errors.InvalidRequest('period does not match the payment date accounting period');
     }
@@ -92,7 +246,6 @@ export const paymentService = {
       throw Errors.ServiceUnavailable('MongoDB transactions required for financial posting');
     }
 
-    // Fail closed when ManualReceipt identity indexes are not ready.
     try {
       await assertManualReceiptIndexesAligned();
     } catch (err) {
@@ -102,7 +255,6 @@ export const paymentService = {
       throw err;
     }
 
-    // Pre-flight house scope (authoritative reload happens inside the transaction).
     const houseProbe = await House.findOne({
       _id: houseId,
       clientId,
@@ -117,11 +269,9 @@ export const paymentService = {
     let covering = null;
     let balanceBefore = null;
     let reused = false;
-    let houseInTx = null;
 
     try {
       await session.withTransaction(async () => {
-        // Idempotent reuse by submission key.
         const existing = await ManualReceipt.findOne({
           clientId,
           idempotencyKey,
@@ -141,33 +291,21 @@ export const paymentService = {
           }
           receiptDoc = existing;
           reused = true;
-          covering = { _id: existing.occupancyTenancyId, tenantId: existing.tenantId, estateId: existing.estateId };
+          covering = {
+            _id: existing.occupancyTenancyId,
+            tenantId: existing.tenantId,
+            estateId: existing.estateId,
+          };
           tenantDoc = await Tenant.findOne({
             _id: existing.tenantId, clientId, estateId: existing.estateId,
           }).session(session).lean();
           balanceBefore = await tenantAccountSnapshot({
             clientId, estateId: existing.estateId, tenantId: existing.tenantId,
           }, { session });
-          settled = {
-            plan: {
-              creditAppliedCents: existing.creditAppliedCents || 0,
-              receiptAppliedCents: existing.receiptAppliedCents || 0,
-              newCreditCents: existing.newCreditCents || 0,
-            },
-            receiptPayments: existing.paymentIds?.length
-              ? await Payment.find({ _id: { $in: existing.paymentIds } }).session(session)
-              : [],
-            creditPayments: existing.creditPaymentIds?.length
-              ? await Payment.find({ _id: { $in: existing.creditPaymentIds } }).session(session)
-              : [],
-            allocations: [],
-            movements: [],
-            reused: true,
-          };
+          settled = await reconstructSettlementFromReceipt(existing, { session });
           return;
         }
 
-        // Reference collision with a different submission key must not silently settle.
         if (reference) {
           const refHit = await ManualReceipt.findOne({
             clientId,
@@ -178,8 +316,7 @@ export const paymentService = {
           }
         }
 
-        // Reload house inside the transaction — never trust the pre-tx object.
-        houseInTx = await House.findOne({
+        const houseInTx = await House.findOne({
           _id: houseId,
           clientId,
           ...estateFilterClause(estateFilter),
@@ -216,7 +353,6 @@ export const paymentService = {
           tenantId: covering.tenantId,
         }, { session });
 
-        // Canonical receipt envelope (identity only — not a ledger posting).
         const [createdReceipt] = await ManualReceipt.create([{
           clientId,
           estateId: covering.estateId,
@@ -258,7 +394,6 @@ export const paymentService = {
           session,
         });
 
-        // Attach settlement figures and child links to the envelope.
         createdReceipt.creditAppliedCents = settled.plan?.creditAppliedCents || 0;
         createdReceipt.receiptAppliedCents = settled.plan?.receiptAppliedCents || 0;
         createdReceipt.newCreditCents = settled.plan?.newCreditCents || 0;
@@ -267,7 +402,6 @@ export const paymentService = {
         createdReceipt.creditMovementIds = (settled.movements || []).map((m) => m._id);
         await createdReceipt.save({ session });
 
-        // Gross identity: receipt amount = applied to charges + new surplus credit.
         const applied = createdReceipt.receiptAppliedCents;
         const surplus = createdReceipt.newCreditCents;
         if (applied + surplus !== amount) {
@@ -275,7 +409,6 @@ export const paymentService = {
         }
       });
     } catch (err) {
-      // Surface duplicate key on ManualReceipt as conflict.
       if (err?.code === 11000) {
         const key = err?.keyPattern || {};
         if (key.idempotencyKey || (err.message && err.message.includes('idempotency'))) {
@@ -328,25 +461,12 @@ export const paymentService = {
     const primaryPayment = settled.receiptPayments?.[0] || null;
 
     return {
-      receipt: {
-        _id: String(receiptDoc._id),
-        houseId: String(receiptDoc.houseId),
-        tenantId: String(receiptDoc.tenantId),
-        occupancyTenancyId: String(receiptDoc.occupancyTenancyId),
-        paymentDateLocal: receiptDoc.paymentDateLocal,
-        period: receiptDoc.period,
-        tenderMethod: receiptDoc.tenderMethod,
-        amountCents: receiptDoc.amountCents,
-        paymentReference: receiptDoc.paymentReference || null,
-        idempotencyKey: receiptDoc.idempotencyKey,
-        creditAppliedCents: receiptDoc.creditAppliedCents,
-        receiptAppliedCents: receiptDoc.receiptAppliedCents,
-        newCreditCents: receiptDoc.newCreditCents,
-      },
+      receipt: receiptSummary(receiptDoc),
       payment: primaryPayment,
       payments: settled.receiptPayments || [],
       creditPayments: settled.creditPayments || [],
       allocations: settled.allocations || [],
+      movements: settled.movements || [],
       reused,
       tenancyId: receiptDoc.occupancyTenancyId,
       tenantId: resolvedTenantId,
