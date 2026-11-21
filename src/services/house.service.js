@@ -91,6 +91,10 @@ export const houseService = {
       filter.isActive = { $ne: false };
       filter.status = 'occupied';
       filter.tenantId = { $ne: null };
+
+      // Build the full eligible set BEFORE pagination so skip/limit and total
+      // reflect only houses with consistent occupancy (exactly one ACTIVE tenancy,
+      // matching House.tenantId, tenant in the same client+estate).
       const activeTenancies = await Tenancy.find({
         clientId,
         status: 'ACTIVE',
@@ -102,11 +106,41 @@ export const houseService = {
         if (!byHouse.has(hid)) byHouse.set(hid, []);
         byHouse.get(hid).push(t);
       }
-      const eligibleIds = [];
+
+      const candidateIds = [];
+      const expectedTenantByHouse = new Map();
       for (const [hid, rows] of byHouse) {
         if (rows.length !== 1) continue;
-        eligibleIds.push(rows[0].houseId);
+        candidateIds.push(rows[0].houseId);
+        expectedTenantByHouse.set(hid, rows[0]);
       }
+      if (candidateIds.length === 0) {
+        return paginatedResponse([], 0, { page, limit });
+      }
+
+      const candidateHouses = await House.find({
+        ...filter,
+        _id: { ...(filter._id || {}), $in: candidateIds },
+      }).select('_id tenantId estateId').lean();
+
+      const tenantIds = [...new Set(candidateHouses.map((h) => h.tenantId).filter(Boolean).map(String))];
+      const tenants = tenantIds.length
+        ? await Tenant.find({ _id: { $in: tenantIds }, clientId }).select('_id estateId').lean()
+        : [];
+      const tenantMap = new Map(tenants.map((t) => [String(t._id), t]));
+
+      const eligibleIds = [];
+      for (const h of candidateHouses) {
+        const row = expectedTenantByHouse.get(String(h._id));
+        if (!row) continue;
+        if (!h.tenantId || String(row.tenantId) !== String(h.tenantId)) continue;
+        const tenant = tenantMap.get(String(h.tenantId));
+        if (!tenant) continue;
+        if (String(tenant.estateId) !== String(h.estateId)) continue;
+        if (String(row.estateId) !== String(h.estateId)) continue;
+        eligibleIds.push(h._id);
+      }
+
       if (eligibleIds.length === 0) {
         return paginatedResponse([], 0, { page, limit });
       }
@@ -117,35 +151,6 @@ export const houseService = {
       House.find(filter).sort({ houseNumber: 1 }).skip(skip).limit(limit).lean(),
       House.countDocuments(filter),
     ]);
-
-    if (query.status === 'occupied' && items.length) {
-      const ids = items.map((h) => h._id);
-      const actives = await Tenancy.find({
-        clientId, houseId: { $in: ids }, status: 'ACTIVE',
-      }).lean();
-      const activeByHouse = new Map();
-      for (const t of actives) {
-        const hid = String(t.houseId);
-        if (!activeByHouse.has(hid)) activeByHouse.set(hid, []);
-        activeByHouse.get(hid).push(t);
-      }
-      const tenantIds = items.map((h) => h.tenantId).filter(Boolean);
-      const tenants = tenantIds.length
-        ? await Tenant.find({ _id: { $in: tenantIds }, clientId }).lean()
-        : [];
-      const tenantMap = new Map(tenants.map((t) => [String(t._id), t]));
-      items = items.filter((h) => {
-        const rows = activeByHouse.get(String(h._id)) || [];
-        if (rows.length !== 1) return false;
-        if (!h.tenantId || String(rows[0].tenantId) !== String(h.tenantId)) return false;
-        const tenant = tenantMap.get(String(h.tenantId));
-        if (!tenant) return false;
-        if (String(tenant.estateId) !== String(h.estateId)) return false;
-        if (String(rows[0].estateId) !== String(h.estateId)) return false;
-        return true;
-      });
-      total = items.length;
-    }
 
     const typeIds = [...new Set(items.map((h) => h.houseTypeId).filter(Boolean).map(String))];
     const types = typeIds.length
