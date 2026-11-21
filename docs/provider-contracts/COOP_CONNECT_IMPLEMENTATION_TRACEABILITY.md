@@ -142,3 +142,21 @@ The current registry conflates some of these. The corrected path must fail close
 - Existing G3 transaction/ledger behaviour remains unchanged and passes regression.
 - No AccountTransactions polling, Balance or production webhook capability is represented as available without its evidence gate.
 - The final report names exact commits, tests and environments. No claim of sandbox or production readiness is made from source inspection or compilation alone.
+
+
+## 7. Current-main source reconciliation — 21 November 2026
+
+**Current backend main:** `0dbf7ef75ed6c1a39e24775aec9a86e08f7d0617`  
+**Current frontend main:** `a27f20dd3244cdc7370cffa16b70c6cd32a45576`
+
+The requirements above remain the target. The merged current source still does not satisfy the normal credential contract end-to-end:
+
+- The frontend onboarding form sends the legacy `{ clientId, clientSecret, username, password, scope? }` shape.
+- Backend strict create/reauthorize validation accepts `{ consumerKey, consumerSecret }` and rejects the legacy keys. This explains the observed 422 at validation.
+- Updating only the frontend will not complete the repair: `bank.factory.js` still passes the legacy credential context, and the Co-op auth adapter still expects username/password/scope and uses the password grant.
+
+The correction must align the frontend DTO, backend validator, credential mapping, provider auth implementation and tests with the G4 PRD/architecture decision: normal onboarding accepts Co-op CK/SK and uses the documented CK/SK-only `client_credentials` flow; grant/scope/resource configuration is trusted provider configuration, not landlord-entered data. `BankConnection.clientId` remains Tycoon's owning Client ID and must never be replaced with the Co-op Consumer Key.
+
+This source correction does **not** clear unresolved resource-specific scope, token lifetime, production host or endpoint evidence. Keep unverified operations and `operationalReady` gated. Do not claim a working Co-op integration merely because the 422 is removed.
+
+Required proof: frontend request-body tests; strict validator accept/reject tests; factory-to-auth credential mapping tests; token request fixture with no customer username/password; token cache isolation by connection/credential version/config; failure and rotation race tests; existing G3 reconciliation regression. Sandbox evidence remains a separate gate.
