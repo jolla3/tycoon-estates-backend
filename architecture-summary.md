@@ -2,7 +2,7 @@
 
 **Status:** Architecture locked for implementation. Documentation is the implementation contract.  
 **Repository:** `jolla3/tycoon-estates-backend`  
-**Verified GitHub `main` HEAD (rechecked):** `e0b49c2f122be7ae3ed14eaba9eecfeacee7ce13` (`v2.0.3`, 2026-11-10 20:14:31 +0300)  
+**Verified GitHub `main` HEAD for this audit:** `25d9969eb4f1c734f360337f0a3d64b83d465a6a` (rechecked 2026-11-20)  
 **Workspace baseline:** Matches HEAD `src/`, `tests/`, `scripts/`, `package.json`, `package-lock.json` (diff clean).  
 **Historical G3 reference:** `1c93f0ed71ca45620ddc238f98fd6391b5a1f054` (`v2.0.1`)  
 **Full requirements:** `PRD.md`  
@@ -15,7 +15,7 @@ G4 builds a **provider-neutral, multi-client** bank integration foundation:
 
 - `BankConnection` owns connection identity, credential **references**, auth lifecycle, and connection health.
 - `BankAccount` owns physical account identity, client/estate association, and current connection link.
-- Co-op is the first operational adapter only.
+- Co-op is the only implemented G4 adapter; its overall `operationalReady` remains `false` pending provider verification.
 - Polling and webhooks share one normalized ingestion path into **existing G3** reconciliation and `accountingPosting`.
 
 **NON-GOAL:** G5 Daraja/M-PESA. **NON-GOAL:** second Ledger/Payment engine. **NON-GOAL:** implementing KCB/EQUITY/NCBA in G4.
@@ -27,7 +27,7 @@ G4 builds a **provider-neutral, multi-client** bank integration foundation:
 3. Never destructive-reset local work to force-match GitHub.
 4. If HEAD advances, stop and report impact before coding on a stale baseline.
 
-## 3. Verified current source snapshot (`e0b49c2`)
+## 3. Historical source snapshot (`e0b49c2`; original pre-G4 baseline)
 
 | Fact | Path |
 |------|------|
@@ -93,7 +93,7 @@ G4 builds a **provider-neutral, multi-client** bank integration foundation:
 
 - Read PRD, architecture, this summary, and SOURCE_CROSSWALK before coding.
 - Recheck GitHub HEAD; record SHA.
-- Change application code only inside `g4/` until a merge strategy is approved.
+- The verified repository source tree is `src/`; this branch has no `g4/` directory. Change only the existing, requirement-scoped `src/` paths and their tests. Do not create a parallel `g4/` tree. Any future source-root migration requires an explicit approved migration and synchronized documentation.
 - No model/index/endpoint/dependency without a requirement ID.
 - No parallel finance engine.
 - Versioned migrations with dry-run/preflight only.
@@ -127,6 +127,36 @@ Documentation lock ≠ implementation complete. Each phase needs exit evidence. 
 - COOP adapter code is implemented, but overall provider `operationalReady` remains false. KCB/EQUITY/NCBA remain disabled. No provider is currently production-operational.
 - `COOP_BANK_LAB_MODE=1` permits COOP connection creation, account linking and FullStatement sync only outside production. It does not alter readiness.
 - `COOP_WEBHOOK_LAB_OVERRIDE=1` permits controlled webhook lab exposure only outside production. Production overrides are rejected.
-- COOP FullStatement sync accepts `statement` entitlement; the unverified AccountTransactions polling path remains disabled. Entitlements are checked again during the run.
+- **As-built mismatch to fix:** the COOP strategy selected by `/bank/accounts/:id/sync` is FullStatement date-window retrieval, but `hasBankSyncEntitlement()` currently accepts `poll === true || statement === true`. A poll-only account can therefore authorize the wrong provider resource. Required: FullStatement uses `statement === true`; AccountTransactions polling, when later verified, uses `poll === true` only.
+- Manual `bank.service.importStatement()` checks statement entitlement and active connection at request start, but does not currently repeat the parent-connection check after the provider response or apply the same explicit provider readiness/lab gate used by sync. Correct this before enabling manual import outside the controlled lab.
+- Parent `BankConnection.status` is separate from `BankAccount.connectionStatus`. Disconnect currently changes only the parent record; child account status/entitlements remain stale. Effective account operations and public DTOs must account for current parent status.
+- The webhook currently checks account linkage/entitlement but not the referenced parent connection's active status. Add the parent check before ingestion whenever the callback route is exposed (lab or later operational mode).
 - Inbound INS Basic remains platform/application-level according to current contract evidence, not per-connection.
 - Local regression, HTTP integration and Mongo concurrency evidence is recorded in the final implementation review. None of it substitutes for provider sandbox verification.
+
+
+## 9. Co-op Connect 2.0.0 correction rules (READ BEFORE BANKING CHANGES)
+
+Full evidence and file-by-file requirements: [`docs/provider-contracts/COOP_CONNECT_2_0_0_ALIGNMENT.md`](docs/provider-contracts/COOP_CONNECT_2_0_0_ALIGNMENT.md).
+
+- **Never confuse IDs:** `BankConnection.clientId` is the Tycoon Client ObjectId from authenticated client context. Co-op OAuth `clientId` is the bank-issued Consumer Key inside encrypted credential material. Preserve Tycoon ownership; rename UI/API credential fields to `consumerKey` / `consumerSecret`.
+- Normal customer onboarding accepts CK/SK only. The Co-op guide documents a CK/SK `client_credentials` token request. Password grant is also documented but is not the default and is not proven necessary for the resources Tycoon calls. Do not require username/password or ask for a retail banking login.
+- Token POST URL and API resource URLs are separate configuration. Use exact documented versioned paths; never invent endpoint suffixes or scopes. The generic `apim:subscribe apim:api_key` sample is not proof of account-enquiry scope.
+- Account Validation: `/Enquiry/Validation/Account/1.0.0`; MessageCode `0` valid, `-1` invalid. Invalid account is not provider outage; only `valid === true` can activate an account.
+- FullStatement must map its documented `CreditAmount` / `DebitAmount` / C-D / `TransactionId` item shape consistently for manual and scheduled imports. Do not weaken G3 validation or idempotency.
+- AccountTransactions polling stays disabled until the transaction identifier is proved stable and its item mapping is verified. MiniStatement's supplied sample has balances and no transaction list. Balance endpoint path is still unverified.
+- Never persist inbound INS `Basic` credential in rawPayload/quarantine/logs. It is distinct from outbound CK/SK.
+- Keep Co-op `operationalReady=false` until token/resource scopes, endpoint contracts, sandbox behavior and callback gates have evidence. Detailed acceptance tests and blocked questions are in the linked audit.
+- The guide's PHP POST and Java GET client-credentials examples conflict; POST with the explicit grant body is the implementation target, not sandbox proof. Do not infer client-credentials TTL/refresh from the password-grant sample.
+- DCR application-key issuance and Tycoon customer account authorization are separate. `saasApp: true` does not prove multi-customer account access; obtain Co-op confirmation.
+- AccountTransactions is an `/Enquiry/` operation. Its “Pesalink funds transfer” caption is misleading; no transfer contract is established. Its sample has `TransactionReference` but no `TransactionId` or uniqueness guarantee, so polling stays disabled. MiniStatement's KES value is account-summary currency, not transaction-item currency.
+
+## 10. Co-op effective connection state and resource-specific authorization
+
+BankAccount.connectionStatus is not a mirror of BankConnection.status. Keep both meanings separate and derive an effective capability from the account's validated link, its account entitlement, the current parent connection status, the provider readiness gate and the environment's permitted lab policy.
+
+Do not treat `poll` and `statement` as synonyms. The currently selected COOP sync strategy fetches FullStatement, so its operation gate is `statement === true`. The AccountTransactions polling capability remains false until its item identity/ordering contract is verified; when eventually enabled, it must be gated independently by `poll === true`.
+
+A disconnected parent connection must make sync, manual statement import and webhook ingestion unavailable even while child account flags remain connected/true. Manual statement import must re-check parent state after the provider call before committing the returned page. The frontend must receive or derive the effective parent state, but the backend remains authoritative.
+
+A create response can be HTTP 201 with connection status failed. This records a created resource whose initial authentication failed; it is not a successful provider authorization. Keep this distinction visible in API docs and UI acceptance tests.

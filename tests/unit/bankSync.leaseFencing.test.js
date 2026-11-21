@@ -9,7 +9,7 @@ const account = {
   connectionStatus: 'connected',
   validationStatus: 'validated',
   connectionId: 'connection-1',
-  entitlements: { poll: true, statement: false, webhookIngest: false },
+  entitlements: { poll: false, statement: true, webhookIngest: false },
   sync: { checkpoint: { type: 'none', value: null } },
 };
 
@@ -26,11 +26,13 @@ const activeConnection = {
 const getAdapterForConnection = jest.fn();
 const createCoopSyncStrategy = jest.fn();
 const strategy = {
+  requiredEntitlement: 'statement',
+  requiredCapability: 'statementImport',
   supportsOperationalSync: jest.fn(),
   begin: jest.fn(),
   fetchPage: jest.fn(),
 };
-const getBankProviderCapabilities = jest.fn();
+const assertProviderCapabilityOperational = jest.fn();
 const acquireSyncLease = jest.fn();
 const extendSyncLease = jest.fn();
 const advanceCheckpoint = jest.fn();
@@ -74,7 +76,7 @@ jest.unstable_mockModule(
 );
 
 jest.unstable_mockModule('../../src/services/banking/bank.factory.js', () => ({
-  getBankProviderCapabilities,
+  assertProviderCapabilityOperational,
 }));
 
 jest.unstable_mockModule('../../src/services/audit.service.js', () => ({
@@ -102,7 +104,7 @@ describe('bank sync lease-loss orchestration', () => {
     strategy.supportsOperationalSync.mockReset();
     strategy.begin.mockReset();
     strategy.fetchPage.mockReset();
-    getBankProviderCapabilities.mockReset();
+    assertProviderCapabilityOperational.mockReset();
     acquireSyncLease.mockReset();
     extendSyncLease.mockReset();
     advanceCheckpoint.mockReset();
@@ -131,7 +133,7 @@ describe('bank sync lease-loss orchestration', () => {
         acceptedThrough: new Date('2026-11-11T00:00:00.000Z'),
       },
     });
-    getBankProviderCapabilities.mockReturnValue({ implemented: true, operationalReady: true });
+    assertProviderCapabilityOperational.mockReturnValue({ implemented: true });
     acquireSyncLease.mockResolvedValue({ fenceGeneration: 5 });
     extendSyncLease.mockResolvedValue(true);
     advanceCheckpoint.mockResolvedValue(true);
@@ -160,6 +162,21 @@ describe('bank sync lease-loss orchestration', () => {
     expect(acquireSyncLease).toHaveBeenCalledTimes(1);
     expect(strategy.fetchPage).toHaveBeenCalledTimes(1);
     expect(ingestNormalizedTransactionBatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('poll-only entitlement cannot start the FullStatement worker', async () => {
+    bankAccountFindOne.mockResolvedValue({
+      ...account,
+      entitlements: { poll: true, statement: false },
+    });
+
+    await expect(
+      synchronizeBankAccount('client-1', 'account-1', { workerId: 'worker-1' })
+    ).rejects.toThrow(/statement/i);
+
+    expect(assertProviderCapabilityOperational).not.toHaveBeenCalled();
+    expect(acquireSyncLease).not.toHaveBeenCalled();
+    expect(strategy.fetchPage).not.toHaveBeenCalled();
   });
 
   test('does not fetch when the connection becomes inactive before a page', async () => {
@@ -307,7 +324,7 @@ describe('bank sync lease-loss orchestration', () => {
     expect(extendSyncLease).toHaveBeenCalledTimes(2);
     expect(ingestNormalizedTransactionBatch).toHaveBeenCalledTimes(1);
     expect(ingestNormalizedTransactionBatch.mock.calls[0][2]).toMatchObject({
-      ingestionChannel: 'poll',
+      ingestionChannel: 'statement',
       connectionId: 'connection-1',
       expectedCredentialVersion: 3,
     });

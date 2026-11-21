@@ -34,11 +34,11 @@ describe('Co-op sync strategy policy', () => {
     expect(new CoopUnverifiedTransactionsPollStrategy().supportsOperationalSync()).toBe(false);
   });
 
-  test('registry marks Co-op list polling non-operational while statement import remains available', () => {
+  test('registry keeps Co-op polling and webhook disabled while statement import remains implemented', () => {
     const caps = getBankProviderCapabilities('COOP');
     expect(caps.polling).toBe(false);
     expect(caps.statementImport).toBe(true);
-    expect(caps.webhook).toBe(true);
+    expect(caps.webhook).toBe(false);
   });
 });
 

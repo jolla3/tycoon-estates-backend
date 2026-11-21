@@ -293,19 +293,13 @@ describeWithMongo('G4 bank connection HTTP integration', () => {
     const csrf = ownerSession.csrfToken;
 
     const credentialMaterialV1 = {
-      clientId: 'g4-http-client-v1',
-      clientSecret: 'g4-http-secret-v1',
-      username: 'g4-http-user-v1',
-      password: 'g4-http-password-v1',
-      scope: 'account.read',
+      consumerKey: 'g4-http-ck-v1',
+      consumerSecret: 'g4-http-sk-v1',
     };
 
     const credentialMaterialV2 = {
-      clientId: 'g4-http-client-v2',
-      clientSecret: 'g4-http-secret-v2',
-      username: 'g4-http-user-v2',
-      password: 'g4-http-password-v2',
-      scope: 'account.read',
+      consumerKey: 'g4-http-ck-v2',
+      consumerSecret: 'g4-http-sk-v2',
     };
 
     const knownSecrets = [

@@ -24,8 +24,8 @@ export const BANK_PROVIDER_REGISTRY = {
     operationalReady: false,
     polling: false,
     statementImport: true,
-    webhook: true,
-    balance: true,
+    webhook: false,
+    balance: false,
     accountValidation: true,
   },
   KCB: {
@@ -138,6 +138,63 @@ export function assertProviderOperational(providerName, {
 }
 
 /**
+ * Assert that one specific provider capability is operational.
+ *
+ * The non-production Co-op lab override is deliberately restricted to
+ * FullStatement import. It cannot enable polling, webhooks or balances.
+ */
+export function assertProviderCapabilityOperational(providerName, capabilityName, {
+  allowLab = false,
+  labMode = process.env.COOP_BANK_LAB_MODE === '1',
+  nodeEnv = process.env.NODE_ENV || 'development',
+} = {}) {
+  const key = String(providerName || '').toUpperCase();
+  const caps = getBankProviderCapabilities(key);
+
+  if (!caps) {
+    throw Errors.BankProviderUnavailable(`Unknown bank provider: ${providerName}`);
+  }
+  if (!caps.implemented) {
+    throw Errors.BankProviderUnavailable(
+      `Unsupported bank provider: ${providerName}. Adapter is not implemented.`
+    );
+  }
+  if (!capabilityName || caps[capabilityName] !== true) {
+    throw Errors.BankCapabilityUnsupported(
+      `Provider ${key} does not implement capability ${capabilityName || 'unknown'}`
+    );
+  }
+
+  const readiness = getProviderReadiness(key);
+  const readinessEntry = (
+    readiness?.[capabilityName]
+    ?? readiness?.capabilities?.[capabilityName]
+  );
+
+  let capabilityReady = caps.operationalReady === true;
+  if (typeof readinessEntry === 'boolean') {
+    capabilityReady = readinessEntry;
+  } else if (typeof readinessEntry?.operationalReady === 'boolean') {
+    capabilityReady = readinessEntry.operationalReady;
+  }
+
+  const permittedCoopStatementLab = (
+    allowLab
+    && key === 'COOP'
+    && capabilityName === 'statementImport'
+    && isNonProductionLabOverrideEnabled(labMode, nodeEnv)
+  );
+
+  if (!capabilityReady && !permittedCoopStatementLab) {
+    throw Errors.BankProviderUnavailable(
+      `Provider ${key} capability ${capabilityName} is not operationally ready`
+    );
+  }
+
+  return caps;
+}
+
+/**
  * Connection-scoped adapter. No provider-name singleton cache of customer tokens.
  */
 export function createBankProviderForConnection(providerName, credentialContext, cacheKey = {}) {
@@ -160,10 +217,8 @@ export function createBankProviderForConnection(providerName, credentialContext,
       // platform configuration, never tenant-controlled credential material.
       // CoopBankProvider resolves COOP_BASE_URL from trusted environment config.
       return new CoopBankProvider({
-        clientId: credentialContext.clientId,
-        clientSecret: credentialContext.clientSecret,
-        username: credentialContext.username,
-        password: credentialContext.password,
+        consumerKey: credentialContext.consumerKey ?? credentialContext.clientId,
+        consumerSecret: credentialContext.consumerSecret ?? credentialContext.clientSecret,
         scope: credentialContext.scope,
         connectionId: cacheKey.connectionId,
         credentialVersion: cacheKey.credentialVersion,

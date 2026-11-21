@@ -18,6 +18,7 @@ import { Errors } from '../utils/errors.js';
 import { logger } from '../config/logger.js';
 import { audit } from './audit.service.js';
 import { sanitizeBankConnection } from '../models/BankConnection.js';
+import { invalidateCoopTokenCache } from './banking/providers/coop/coop.auth.js';
 
 function sanitizeAuthError(err) {
   const msg = err?.message ? String(err.message).slice(0, 200) : 'authentication_failed';
@@ -309,7 +310,10 @@ export const connectionService = {
       throw Errors.Conflict('Bank connection changed during reauthorization; retry with its current state');
     }
 
-    // The new reference is now authoritative. Old-secret cleanup is best-effort.
+    // The new reference is now authoritative. Invalidate prior token generation.
+    invalidateCoopTokenCache(String(connection._id), oldCredentialVersion);
+
+    // Old-secret cleanup is best-effort.
     try {
       await deleteConnectionSecret(oldCredentialsRef, {
         ...credentialOwner,
@@ -347,6 +351,7 @@ export const connectionService = {
       lastAuthError: null,
     };
     await connection.save();
+    invalidateCoopTokenCache(String(connection._id));
     // Secrets retained until explicit purge policy; stop use via status.
     await audit({
       clientId,

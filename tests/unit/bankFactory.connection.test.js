@@ -25,10 +25,10 @@ describe('bank factory connection isolation', () => {
 
   test('two COOP adapters are distinct instances (no provider-name singleton)', () => {
     const a = createBankProviderForConnection('COOP', {
-      clientId: 'a', clientSecret: 'a', username: 'a', password: 'a', scope: 's',
+      consumerKey: 'a', consumerSecret: 'a',
     }, { connectionId: 'conn-a', credentialVersion: 1 });
     const b = createBankProviderForConnection('COOP', {
-      clientId: 'b', clientSecret: 'b', username: 'b', password: 'b', scope: 's',
+      consumerKey: 'b', consumerSecret: 'b',
     }, { connectionId: 'conn-b', credentialVersion: 2 });
     expect(a).not.toBe(b);
     expect(a.connectionId).toBe('conn-a');
@@ -38,6 +38,8 @@ describe('bank factory connection isolation', () => {
   test('capabilities remain explicit on the registry', () => {
     const caps = getBankProviderCapabilities('COOP');
     expect(caps.accountValidation).toBe(true);
+    expect(caps.balance).toBe(false);
+    expect(caps.webhook).toBe(false);
     expect(getBankProviderCapabilities('NCBA').implemented).toBe(false);
   });
 
@@ -50,11 +52,8 @@ describe('bank factory connection isolation', () => {
       {
         baseUrl: untrustedBaseUrl,
         insBasicSecret: untrustedWebhookSecret,
-        clientId: 'tenant-client-id',
-        clientSecret: 'tenant-client-secret',
-        username: 'tenant-username',
-        password: 'tenant-password',
-        scope: 'account.read',
+        consumerKey: 'tenant-ck',
+        consumerSecret: 'tenant-sk',
       },
       {
         connectionId: 'connection-test',
@@ -62,19 +61,11 @@ describe('bank factory connection isolation', () => {
       }
     );
 
-    // Endpoint comes only from trusted process configuration.
     expect(provider.baseUrl).toBe(process.env.COOP_BASE_URL || undefined);
     expect(provider.baseUrl).not.toBe(untrustedBaseUrl);
-
-    // The shared inbound webhook secret is not taken from tenant credentials.
     expect(provider.insBasicSecret).toBeUndefined();
-
-    // Customer-specific OAuth credentials still reach the auth service.
-    expect(provider.auth.clientId).toBe('tenant-client-id');
-    expect(provider.auth.clientSecret).toBe('tenant-client-secret');
-    expect(provider.auth.username).toBe('tenant-username');
-    expect(provider.auth.password).toBe('tenant-password');
-    expect(provider.auth.scope).toBe('account.read');
+    expect(provider.auth.consumerKey).toBe('tenant-ck');
+    expect(provider.auth.consumerSecret).toBe('tenant-sk');
   });
   test('COOP lab access requires the explicit flag and is rejected in production', () => {
     expect(() => assertProviderOperational('COOP', {
