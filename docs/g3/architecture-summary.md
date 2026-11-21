@@ -25,7 +25,7 @@ G3 is the financial source of truth for Tenancy, RentCharge, Payment, PaymentAll
 
 1. Deposit identity is Tenant-ID based and ambiguous; change to exact Tenancy selection with estate validation.
 2. Deposit settlement currently does not refund or move out; remove false UI promise and keep combined lifecycle blocked pending owner policy.
-3. Reject false-success deposit requirement updates after payment.
+3. Reject paid deposit requirement changes with typed `409 Conflict`; do not implement adjustment behavior.
 4. Permit `Idempotency-Key` in CORS without weakening CSRF.
 5. Make ambiguous manual-payment options searchable/paginated beyond the first 20.
 6. Add HouseType editor to workspace and explain prospective impact on existing `HOUSE_TYPE` houses.
@@ -36,6 +36,11 @@ G3 is the financial source of truth for Tenancy, RentCharge, Payment, PaymentAll
 
 Tenant credit auto-apply, rent ledger, payment allocation, reconciliation or M-PESA merchant multi-estate mapping already exist. Verify rather than duplicate them.
 
-## Hold for owner decision
+## Do not implement in this scope
 
-Deposit deduction/refund/move-out atomicity, paid requirement adjustments, payment before requirement, deposit overpayment and proration formula.
+- Partial-month proration; preserve full-month-only billing until the owner approves the formula.
+- Combined deposit deduction/refund/move-out settlement or any UI promise that it refunds money or closes a Tenancy/House.
+- Deposit payment-before-requirement and overpayment behavior; do not choose defaults.
+- Paid deposit requirement adjustments; return `409 Conflict` after payment instead.
+- Production migration execution. Inspect indexes and run read-only preflight only; execution requires clean evidence, a separate plan and explicit owner approval.
+- Co-op production activation, Pull registration/reconciliation or production webhook enablement. CK/SK contract repair does not prove resource-specific scope, token lifecycle, production endpoint access or provider readiness.

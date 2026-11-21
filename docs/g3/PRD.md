@@ -49,9 +49,9 @@ All deposit reads and mutations must identify the exact `{clientId, estateId, te
 
 ### G3-02 — Deposit accounting and truthful lifecycle
 
-Payment, deduction, refund and transfer must create the appropriate DepositMovement and matching deposit-category Ledger movement atomically, with idempotency. A `settled` status must not claim that funds were refunded. A combined move-out/settlement workflow is blocked until the owner approves deduction, refund, rent-arrears and atomic Tenancy/House-close rules. Until then, the UI must not promise refund or move-out.
+For any DepositMovement type that is already supported and explicitly permitted by owner policy, the DepositMovement and matching deposit-category Ledger movement must commit atomically with idempotency. This accounting invariant does not authorize expanding standalone deduction/refund behavior in this change. A `settled` status must not claim that funds were refunded. The combined deduction/refund/move-out workflow is blocked until the owner approves deduction rules, rent-arrears treatment, refund calculation and atomic Tenancy/House-close rules. Until then, the UI must not promise refund or move-out.
 
-A deposit requirement change after a payment must return an explicit conflict or create a separately specified adjustment. It must not return apparent success while leaving the amount unchanged.
+For this implementation, any attempt to change a deposit requirement after a payment has been recorded must return a typed `409 Conflict` and leave the Deposit and Ledger unchanged. Do not implement a paid-requirement adjustment. A future adjustment feature requires a separate owner-approved accounting policy and scope.
 
 ### G3-03 — Complete manual-payment selection
 
@@ -86,7 +86,7 @@ Do not add proration until the owner approves start/end inclusivity, timezone bo
 
 1. Whether move-out refunds all remaining held funds or first applies explicit deductions, and who may approve each action.
 2. Whether deposit refund, settlement, Tenancy closure and House vacancy must be one transaction or separate explicit commands.
-3. Whether a paid deposit requirement can be adjusted and how the adjustment is represented.
+3. No paid-requirement adjustment is permitted in the current scope. Any future adjustment requires an owner-approved accounting rule and explicit representation.
 4. Whether deposit payments are blocked until a requirement exists, and how excess payment is treated.
 5. Whether HouseType carries a default deposit amount or deposits remain Tenancy-specific.
 

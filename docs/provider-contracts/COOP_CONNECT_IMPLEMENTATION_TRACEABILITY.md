@@ -160,3 +160,10 @@ The correction must align the frontend DTO, backend validator, credential mappin
 This source correction does **not** clear unresolved resource-specific scope, token lifetime, production host or endpoint evidence. Keep unverified operations and `operationalReady` gated. Do not claim a working Co-op integration merely because the 422 is removed.
 
 Required proof: frontend request-body tests; strict validator accept/reject tests; factory-to-auth credential mapping tests; token request fixture with no customer username/password; token cache isolation by connection/credential version/config; failure and rotation race tests; existing G3 reconciliation regression. Sandbox evidence remains a separate gate.
+
+
+## Current implementation hold — 21 November 2026
+
+The CK/SK request-contract correction is a credential-shape and authentication implementation task only. It does **not** establish Co-op production readiness.
+
+Keep `operationalReady` false and keep unverified resource capabilities unavailable until the evidence is complete for each resource: accepted grant and token type, exact scope, token expiry/refresh lifecycle, production host and route, subscribed product access, request/response schema, and successful provider-approved verification. Do not enable production Pull registration/reconciliation, production webhook processing or Balance/AccountTransactions capabilities from adapter presence, a successful token request, compilation or mocked tests alone. Sandbox and production approval remain separate gates.

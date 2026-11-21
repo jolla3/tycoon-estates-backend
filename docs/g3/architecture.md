@@ -70,7 +70,7 @@ Current `settle()` stamps `settledAt` and recomputes status. `settleMoveOut()` d
 
 A complete move-out settlement would need an owner-approved transaction covering allowed deductions, refund of held funds, deposit projection, Ledger movement, exact Tenancy closure and House vacancy. Keep this blocked until policy is approved. A status update must not imply cash was returned.
 
-`ensureRequired()` must not return success when a paid Deposit requirement was not changed. Return conflict or use an explicitly defined adjustment operation. Payment-before-requirement and overpayment behavior remains an owner decision.
+`ensureRequired()` must not return success when a paid Deposit requirement was not changed. In this scope, return a typed `409 Conflict` and leave Deposit/Ledger state unchanged; do not add paid-requirement adjustment behavior. Payment-before-requirement and overpayment behavior remain owner decisions.
 
 ### Manual payment candidates
 
@@ -97,7 +97,7 @@ Keep provider receipts separate from G3 Payments. If aggregate M-PESA reporting 
 
 ## 8. Operational safety and verification
 
-- Inspect critical indexes read-only and run migration preflight before any migration execution; never execute a production migration from this feature branch.
+- Inspect critical indexes with read-only `listIndexes`/inventory queries and run the migration's read-only preflight before considering execution. Production execution is not part of this feature branch. It requires clean preflight evidence, a separately reviewed execution plan and explicit owner approval; never infer approval from a successful application test.
 - Unit tests cover tenancy selection, estate isolation, option search predicates, HouseType effective periods and idempotency conflicts.
 - Replica-set integration tests cover deposit movement/Ledger atomicity, refunds, transaction rollback, concurrent retries and same-Estate credit application.
 - HTTP tests cover exact CORS preflight headers, credentials, valid CSRF, invalid Origin and invalid CSRF.
