@@ -74,7 +74,21 @@ async function retireTenancyReferences(clientId, tenancyId, session) {
   );
 }
 
-/** Find all tenancies covering an instant (status ACTIVE|CLOSED, startAt <= at < endAt). */
+/**
+ * Tenancies that overlap a Nairobi calendar day window [dayStart, dayEnd].
+ * Used for date-only payment attribution. If more than one distinct tenant
+ * overlaps the day, attribution is ambiguous and callers must reject.
+ */
+async function coveringNairobiDay(clientId, houseId, dayStart, dayEnd, { session = null } = {}) {
+  return Tenancy.find({
+    clientId,
+    houseId,
+    status: { $in: ['ACTIVE', 'CLOSED'] },
+    startAt: { $lte: dayEnd },
+    $or: [{ endAt: null }, { endAt: { $gt: dayStart } }],
+  }).sort({ startAt: -1, _id: -1 }).session(session || null).lean();
+}
+
 async function coveringAt(clientId, houseId, eventTime, { session = null, tenantId = null } = {}) {
   const at = new Date(eventTime);
   const filter = {
@@ -122,16 +136,20 @@ export const tenancyService = {
   },
 
   /**
-   * Occupancy check for the simplified Record Payment form.
-   * Ordinary destinations are active, currently occupied houses with exactly one
-   * canonical ACTIVE tenancy whose tenantId agrees with House.tenantId.
-   * For a backdated paymentDate, also require a unique historical covering tenancy.
+   * Ordinary manual-payment occupancy.
+   * 1) House must currently be eligible: active, occupied, exactly one ACTIVE
+   *    tenancy matching House.tenantId, tenant in same client+estate.
+   * 2) paymentDate (Nairobi day) must resolve to exactly one historical tenancy
+   *    covering that calendar day (may be CLOSED / former occupant).
+   * Same-day tenancy transitions that leave multiple overlapping tenants are rejected.
+   *
+   * @param {object} nairobiDay - from dateUtil.parseNairobiDateOnly, or a Date (legacy).
    */
-  async resolveOccupancyForManualPayment(clientId, house, paymentDate = new Date()) {
+  async resolveOccupancyForManualPayment(clientId, house, nairobiDay, { session } = {}) {
     if (house.isActive === false) {
       return { ok: false, reason: 'This house is inactive and cannot receive a payment.', tenancy: null };
     }
-    if (house.status === 'vacant' || !house.tenantId) {
+    if (house.status !== 'occupied' || !house.tenantId) {
       return { ok: false, reason: 'This house is vacant. Only occupied houses can receive ordinary payments.', tenancy: null };
     }
 
@@ -140,7 +158,7 @@ export const tenancyService = {
       houseId: house._id,
       estateId: house.estateId,
       status: 'ACTIVE',
-    }).limit(2).lean();
+    }).limit(2).session(session || null).lean();
 
     if (activeRows.length === 0) {
       return {
@@ -166,8 +184,32 @@ export const tenancyService = {
       };
     }
 
-    const at = new Date(paymentDate);
-    const covering = await coveringAt(clientId, house._id, at);
+    const tenant = await Tenant.findOne({
+      _id: active.tenantId,
+      clientId,
+      estateId: house.estateId,
+    }).session(session || null).lean();
+    if (!tenant) {
+      return {
+        ok: false,
+        reason: 'Active tenancy tenant is not in this client and estate.',
+        tenancy: null,
+      };
+    }
+
+    // Nairobi calendar-day coverage for the payment date.
+    let dayStart;
+    let dayEnd;
+    if (nairobiDay && nairobiDay.start && nairobiDay.end) {
+      dayStart = nairobiDay.start;
+      dayEnd = nairobiDay.end;
+    } else {
+      const at = new Date(nairobiDay);
+      dayStart = at;
+      dayEnd = at;
+    }
+
+    const covering = await coveringNairobiDay(clientId, house._id, dayStart, dayEnd, { session });
     if (covering.length === 0) {
       return {
         ok: false,
@@ -175,16 +217,32 @@ export const tenancyService = {
         tenancy: null,
       };
     }
-    if (covering.length > 1) {
+
+    const tenantIds = new Set(covering.map((t) => String(t.tenantId)));
+    if (tenantIds.size > 1) {
       return {
         ok: false,
-        reason: 'More than one tenancy covered this house on the selected payment date. Ownership is ambiguous.',
+        reason: 'More than one tenant occupied this house on the selected payment date. Ownership is ambiguous; a time of day is not collected.',
         tenancy: null,
       };
     }
 
-    const coveringTenancy = covering[0];
-    if (String(coveringTenancy.estateId) !== String(house.estateId)) {
+    // Prefer the tenancy that actually contains noon of that day; else unique tenant's latest.
+    const noon = nairobiDay?.noon || dayStart;
+    const atNoon = covering.filter((t) => tenancyContains(t, noon));
+    let chosen;
+    if (atNoon.length === 1) {
+      chosen = atNoon[0];
+    } else if (atNoon.length === 0 && covering.length === 1) {
+      chosen = covering[0];
+    } else if (covering.length === 1) {
+      chosen = covering[0];
+    } else {
+      // Same tenant, multiple tenancy rows on the day — still attribute to the one containing noon if possible.
+      chosen = atNoon[0] || covering[0];
+    }
+
+    if (String(chosen.estateId) !== String(house.estateId)) {
       return {
         ok: false,
         reason: 'Tenancy estate does not match the house estate.',
@@ -192,14 +250,9 @@ export const tenancyService = {
       };
     }
 
-    return { ok: true, reason: null, tenancy: coveringTenancy };
+    return { ok: true, reason: null, tenancy: chosen, activeTenancy: active };
   },
 
-  /**
-   * Resolve the single Tenancy a manual payment belongs to.
-   * Ordinary path: paymentDate → unique covering tenancy (fails closed).
-   * Explicit tenancyId / period remain for edge-case callers.
-   */
   async resolveForManualPayment(clientId, house, { period = null, paymentDate = null, tenancyId = null, tenantId = null } = {}, { session } = {}) {
     const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
 
@@ -219,61 +272,15 @@ export const tenancyService = {
       return t;
     }
 
-    // Ordinary path: resolve by payment date (preferred).
     if (paymentDate) {
-      if (house.isActive === false) {
-        throw Errors.InvalidRequest('This house is inactive and cannot receive a payment');
-      }
-
-      const activeCount = await Tenancy.countDocuments({
-        clientId,
-        houseId: house._id,
-        estateId: house.estateId,
-        status: 'ACTIVE',
-      }).session(session || null);
-
-      // For a current-date payment on a vacant house, refuse.
-      // Backdated payments may target a CLOSED historical tenancy even if the house is vacant today,
-      // but only when exactly one covering tenancy exists for that date.
-      const at = new Date(paymentDate);
-      const covering = await coveringAt(clientId, house._id, at, { session, tenantId });
-
-      if (covering.length === 0) {
-        if (house.status === 'vacant' || !house.tenantId) {
-          throw Errors.InvalidRequest('This house is vacant and has no tenancy covering the payment date');
-        }
-        throw Errors.InvalidRequest('No unique tenancy covers the payment date for this house');
-      }
-      if (covering.length > 1) {
-        throw Errors.Conflict(
-          'More than one tenancy covered this house on the payment date; ownership is ambiguous'
-        );
-      }
-
-      const t = covering[0];
-      if (String(t.estateId) !== String(house.estateId)) {
-        throw Errors.InvalidRequest('Tenancy estate does not match the house estate');
-      }
-      if (tenantId && String(t.tenantId) !== String(tenantId)) {
+      const r = await this.resolveOccupancyForManualPayment(clientId, house, paymentDate, { session });
+      if (!r.ok) throw Errors.InvalidRequest(r.reason || 'Cannot resolve occupancy for payment date');
+      if (tenantId && String(r.tenancy.tenantId) !== String(tenantId)) {
         throw Errors.InvalidRequest('tenantId does not match the tenancy covering the payment date');
       }
-
-      // When recording for "today" on an occupied house, require a consistent active tenancy.
-      if (t.status === 'ACTIVE') {
-        if (activeCount > 1) {
-          throw Errors.Conflict('Multiple active tenancies exist for this house');
-        }
-        if (house.tenantId && String(house.tenantId) !== String(t.tenantId)) {
-          throw Errors.InvalidRequest(
-            'House occupant and active tenancy tenant do not match'
-          );
-        }
-      }
-
-      return t;
+      return r.tenancy;
     }
 
-    // Legacy period-based path (edge cases).
     if (period) {
       const r = await resolveEligible(base, period, { tenantId, session });
       if (r.status === TENANCY_RESOLUTION.UNIQUE) return r.tenancy;
@@ -294,9 +301,7 @@ export const tenancyService = {
   } = {}) {
     const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
     const elig = eligibleTenancyFilter(period);
-
     const r = await resolveEligible(base, period);
-
     const ePage = clampPage(eligiblePage);
     const eSize = clampLimit(eligibleLimit, 10);
     const eTerm = String(eligibleSearch || '').trim().slice(0, 80);
@@ -304,12 +309,10 @@ export const tenancyService = {
       elig ? Tenancy.countDocuments({ ...base, ...elig }) : 0,
       elig ? tenancyPage({ clientId, house, extra: elig, term: eTerm, pageNo: ePage, pageSize: eSize }) : { rows: [], total: 0 },
     ]);
-
     const hPage = clampPage(page);
     const hSize = clampLimit(limit, 20);
     const hTerm = String(search || '').trim().slice(0, 80);
     const history = await tenancyPage({ clientId, house, term: hTerm, pageNo: hPage, pageSize: hSize });
-
     const toOption = (t) => {
       const reason = tenancyIneligibleReason(t, period);
       return {
