@@ -77,8 +77,6 @@ export const houseService = {
     if (query.houseTypeId) filter.houseTypeId = query.houseTypeId;
     if (query.search) filter.houseNumber = new RegExp(escapeRegex(query.search), 'i');
 
-    // A vacant house must be active, have no current tenant reference and
-    // have no ACTIVE Tenancy. House.status alone can be stale after old imports.
     if (query.status === 'vacant') {
       const activeTenancyHouseIds = await Tenancy.distinct('houseId', {
         clientId,
@@ -89,10 +87,65 @@ export const houseService = {
       filter._id = { ...(filter._id || {}), $nin: activeTenancyHouseIds };
     }
 
-    const [items, total] = await Promise.all([
+    if (query.status === 'occupied') {
+      filter.isActive = { $ne: false };
+      filter.status = 'occupied';
+      filter.tenantId = { $ne: null };
+      const activeTenancies = await Tenancy.find({
+        clientId,
+        status: 'ACTIVE',
+        ...(filter.estateId ? { estateId: filter.estateId } : {}),
+      }).select('houseId tenantId estateId').lean();
+      const byHouse = new Map();
+      for (const t of activeTenancies) {
+        const hid = String(t.houseId);
+        if (!byHouse.has(hid)) byHouse.set(hid, []);
+        byHouse.get(hid).push(t);
+      }
+      const eligibleIds = [];
+      for (const [hid, rows] of byHouse) {
+        if (rows.length !== 1) continue;
+        eligibleIds.push(rows[0].houseId);
+      }
+      if (eligibleIds.length === 0) {
+        return paginatedResponse([], 0, { page, limit });
+      }
+      filter._id = { ...(filter._id || {}), $in: eligibleIds };
+    }
+
+    let [items, total] = await Promise.all([
       House.find(filter).sort({ houseNumber: 1 }).skip(skip).limit(limit).lean(),
       House.countDocuments(filter),
     ]);
+
+    if (query.status === 'occupied' && items.length) {
+      const ids = items.map((h) => h._id);
+      const actives = await Tenancy.find({
+        clientId, houseId: { $in: ids }, status: 'ACTIVE',
+      }).lean();
+      const activeByHouse = new Map();
+      for (const t of actives) {
+        const hid = String(t.houseId);
+        if (!activeByHouse.has(hid)) activeByHouse.set(hid, []);
+        activeByHouse.get(hid).push(t);
+      }
+      const tenantIds = items.map((h) => h.tenantId).filter(Boolean);
+      const tenants = tenantIds.length
+        ? await Tenant.find({ _id: { $in: tenantIds }, clientId }).lean()
+        : [];
+      const tenantMap = new Map(tenants.map((t) => [String(t._id), t]));
+      items = items.filter((h) => {
+        const rows = activeByHouse.get(String(h._id)) || [];
+        if (rows.length !== 1) return false;
+        if (!h.tenantId || String(rows[0].tenantId) !== String(h.tenantId)) return false;
+        const tenant = tenantMap.get(String(h.tenantId));
+        if (!tenant) return false;
+        if (String(tenant.estateId) !== String(h.estateId)) return false;
+        if (String(rows[0].estateId) !== String(h.estateId)) return false;
+        return true;
+      });
+      total = items.length;
+    }
 
     const typeIds = [...new Set(items.map((h) => h.houseTypeId).filter(Boolean).map(String))];
     const types = typeIds.length
@@ -162,10 +215,6 @@ export const houseService = {
   },
 
   async update(clientId, houseId, updates, estateFilter = null) {
-    // Serialize every House mutation with charge generation and explicit
-    // HouseBillingConfig mutations. The shared revision write is intentional:
-    // MongoDB transactions then conflict instead of committing stale billing
-    // source snapshots concurrently.
     const session = await mongoose.startSession();
     let updatedHouse;
     try {
@@ -197,8 +246,6 @@ export const houseService = {
         if (updates.houseTypeId !== undefined) {
           if (updates.houseTypeId === null || updates.houseTypeId === '') {
             allowed.houseTypeId = null;
-            // Clearing an assignment must not silently change an unrelated
-            // explicit source such as HOUSE_CONFIG or MONTHLY_RENT.
             if (currentSource === 'HOUSE_TYPE' && updates.billingSource === undefined) {
               allowed.billingSource = 'UNCONFIGURED';
             }
@@ -319,7 +366,6 @@ export const houseService = {
       .limit(30)
       .lean();
 
-    // Narrow activity to this house where possible
     const houseActivity = activity.filter(
       (a) =>
         String(a.resourceId) === String(house._id) ||
