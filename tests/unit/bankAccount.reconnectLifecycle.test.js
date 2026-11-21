@@ -4,16 +4,20 @@ import { jest } from '@jest/globals';
 const bankAccountFindOne = jest.fn();
 const bankAccountFindOneAndUpdate = jest.fn();
 const bankAccountCreate = jest.fn();
+const bankAccountFindById = jest.fn();
 
 const estateFindOne = jest.fn();
 const bankConnectionFindOne = jest.fn();
 
 const assertProviderOperational = jest.fn();
 const getBankProviderCapabilities = jest.fn();
+const assertProviderCapabilityOperational = jest.fn();
 
 const getAdapterForConnection = jest.fn();
 const authenticate = jest.fn();
 const validateAccount = jest.fn();
+
+const ingestNormalizedTransactionBatch = jest.fn();
 
 const encrypt = jest.fn();
 const hashForLookup = jest.fn();
@@ -33,6 +37,7 @@ class FakeBankAccount {
   }
 
   static findOne = bankAccountFindOne;
+  static findById = bankAccountFindById;
   static findOneAndUpdate = bankAccountFindOneAndUpdate;
   static create = bankAccountCreate;
 }
@@ -51,6 +56,7 @@ jest.unstable_mockModule('../../src/models/BankConnection.js', () => ({
 
 jest.unstable_mockModule('../../src/services/banking/bank.factory.js', () => ({
   assertProviderOperational,
+  assertProviderCapabilityOperational,
   getBankProviderCapabilities,
 }));
 
@@ -66,7 +72,7 @@ jest.unstable_mockModule('../../src/utils/encryption.js', () => ({
 }));
 
 jest.unstable_mockModule('../../src/services/banking/transactionIngestion.service.js', () => ({
-  ingestNormalizedTransactionBatch: jest.fn(),
+  ingestNormalizedTransactionBatch,
 }));
 
 jest.unstable_mockModule('../../src/services/banking/bankSync.service.js', () => ({
@@ -159,16 +165,19 @@ describe('bank account reconnect lifecycle', () => {
     };
 
     bankAccountFindOne.mockReset();
+    bankAccountFindById.mockReset();
     bankAccountFindOneAndUpdate.mockReset();
     bankAccountCreate.mockReset();
     estateFindOne.mockReset();
     bankConnectionFindOne.mockReset();
 
     assertProviderOperational.mockReset();
+    assertProviderCapabilityOperational.mockReset();
     getBankProviderCapabilities.mockReset();
     getAdapterForConnection.mockReset();
     authenticate.mockReset();
     validateAccount.mockReset();
+    ingestNormalizedTransactionBatch.mockReset();
 
     encrypt.mockReset();
     hashForLookup.mockReset();
@@ -178,6 +187,7 @@ describe('bank account reconnect lifecycle', () => {
     loggerError.mockReset();
 
     bankAccountFindOne.mockResolvedValue(existing);
+    bankAccountFindById.mockResolvedValue(existing);
     bankAccountFindOneAndUpdate.mockResolvedValue(makePersistedAccount());
     bankAccountCreate.mockResolvedValue(makePersistedAccount({
       _id: 'new-account-id',
@@ -189,6 +199,8 @@ describe('bank account reconnect lifecycle', () => {
     bankConnectionFindOne.mockResolvedValue(connection);
 
     assertProviderOperational.mockReturnValue(undefined);
+    assertProviderCapabilityOperational.mockReturnValue(undefined);
+    ingestNormalizedTransactionBatch.mockResolvedValue({ stored: 1, processed: 1 });
     getBankProviderCapabilities.mockReturnValue({
       polling: true,
       statementImport: true,
@@ -421,4 +433,165 @@ describe('bank account reconnect lifecycle', () => {
     expect(bankAccountFindOneAndUpdate).not.toHaveBeenCalled();
     expect(audit).not.toHaveBeenCalled();
   });
+
+  describe('manual FullStatement import authorization', () => {
+    const startDate = '2026-11-01';
+    const endDate = '2026-11-21';
+    const normalizedTransactions = [
+      {
+        providerTransactionId: 'coop-statement-transaction-001',
+        amount: 1250,
+        currency: 'KES',
+      },
+    ];
+
+    let activeStatementConnection;
+    let getFullStatement;
+
+    beforeEach(() => {
+      // The shared lifecycle fixture uses connection-new for reconnect tests.
+      // Manual import must instead use the connection actually linked to the account.
+      activeStatementConnection = {
+        ...connection,
+        _id: existing.connectionId,
+      };
+
+      bankConnectionFindOne.mockResolvedValue(activeStatementConnection);
+
+      getFullStatement = jest.fn().mockResolvedValue(normalizedTransactions);
+      getAdapterForConnection.mockResolvedValue({ getFullStatement });
+    });
+
+    test('rejects poll-only accounts before contacting the provider', async () => {
+      const pollOnlyAccount = makeExistingAccount({
+        entitlements: {
+          poll: true,
+          statement: false,
+          balance: false,
+          webhookIngest: false,
+        },
+      });
+      bankAccountFindOne.mockResolvedValueOnce(pollOnlyAccount);
+
+      await expect(
+        bankService.importStatement(
+          'client-1',
+          'existing-account-1',
+          startDate,
+          endDate
+        )
+      ).rejects.toThrow(/not entitled to statement import/i);
+
+      expect(assertProviderCapabilityOperational).not.toHaveBeenCalled();
+      expect(bankConnectionFindOne).not.toHaveBeenCalled();
+      expect(getAdapterForConnection).not.toHaveBeenCalled();
+      expect(getFullStatement).not.toHaveBeenCalled();
+      expect(ingestNormalizedTransactionBatch).not.toHaveBeenCalled();
+    });
+
+    test('rejects when statement-import capability readiness fails before provider access', async () => {
+      assertProviderCapabilityOperational.mockImplementationOnce(() => {
+        throw new Error('statement import readiness blocked');
+      });
+
+      await expect(
+        bankService.importStatement(
+          'client-1',
+          'existing-account-1',
+          startDate,
+          endDate
+        )
+      ).rejects.toThrow(/statement import readiness blocked/i);
+
+      expect(assertProviderCapabilityOperational).toHaveBeenCalledWith(
+        'COOP',
+        'statementImport',
+        expect.objectContaining({ allowLab: true })
+      );
+      expect(bankConnectionFindOne).not.toHaveBeenCalled();
+      expect(getAdapterForConnection).not.toHaveBeenCalled();
+      expect(ingestNormalizedTransactionBatch).not.toHaveBeenCalled();
+    });
+
+    test('retrieves an authorized statement and sends it through shared ingestion', async () => {
+      const result = await bankService.importStatement(
+        'client-1',
+        'existing-account-1',
+        startDate,
+        endDate
+      );
+
+      expect(assertProviderCapabilityOperational).toHaveBeenCalledWith(
+        'COOP',
+        'statementImport',
+        expect.objectContaining({ allowLab: true })
+      );
+      expect(bankConnectionFindOne).toHaveBeenCalledTimes(2);
+      expect(getAdapterForConnection).toHaveBeenCalledWith(activeStatementConnection);
+      expect(getFullStatement).toHaveBeenCalledWith(
+        existing,
+        startDate,
+        endDate
+      );
+
+      expect(bankAccountFindById).toHaveBeenCalledTimes(2);
+      expect(ingestNormalizedTransactionBatch).toHaveBeenCalledTimes(1);
+      expect(ingestNormalizedTransactionBatch).toHaveBeenCalledWith(
+        existing,
+        normalizedTransactions,
+        expect.objectContaining({
+          process: true,
+          ingestionChannel: 'statement',
+          connectionId: existing.connectionId,
+          expectedCredentialVersion: activeStatementConnection.credentialVersion,
+        })
+      );
+      expect(result).toEqual({ stored: 1, reconciled: 1 });
+    });
+
+    test('discards the provider response when account authorization changes during retrieval', async () => {
+      const reassignedAccount = makeExistingAccount({
+        connectionId: 'connection-reassigned-during-request',
+      });
+      bankAccountFindById.mockResolvedValueOnce(reassignedAccount);
+
+      await expect(
+        bankService.importStatement(
+          'client-1',
+          'existing-account-1',
+          startDate,
+          endDate
+        )
+      ).rejects.toThrow(/authorization changed during statement retrieval/i);
+
+      expect(getFullStatement).toHaveBeenCalledTimes(1);
+      expect(bankAccountFindById).toHaveBeenCalledTimes(1);
+      expect(bankConnectionFindOne).toHaveBeenCalledTimes(1);
+      expect(ingestNormalizedTransactionBatch).not.toHaveBeenCalled();
+    });
+
+    test('discards the provider response when parent connection credentials rotate during retrieval', async () => {
+      bankConnectionFindOne
+        .mockResolvedValueOnce(activeStatementConnection)
+        .mockResolvedValueOnce({
+          ...activeStatementConnection,
+          credentialVersion: activeStatementConnection.credentialVersion + 1,
+        });
+
+      await expect(
+        bankService.importStatement(
+          'client-1',
+          'existing-account-1',
+          startDate,
+          endDate
+        )
+      ).rejects.toThrow(/authorization changed during statement retrieval/i);
+
+      expect(getFullStatement).toHaveBeenCalledTimes(1);
+      expect(bankAccountFindById).toHaveBeenCalledTimes(1);
+      expect(bankConnectionFindOne).toHaveBeenCalledTimes(2);
+      expect(ingestNormalizedTransactionBatch).not.toHaveBeenCalled();
+    });
+  });
+
 });

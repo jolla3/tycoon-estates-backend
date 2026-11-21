@@ -107,8 +107,8 @@ describe('BankConnection lifecycle and credential rotation', () => {
     allocateCredentialsRef.mockReturnValue('staged-secret-ref');
     putConnectionSecret.mockResolvedValue('staged-secret-ref');
     getConnectionSecret.mockResolvedValue({
-      clientId: 'new-client',
-      clientSecret: 'new-secret',
+      consumerKey: 'new-client',
+      consumerSecret: 'new-secret',
     });
     deleteConnectionSecret.mockResolvedValue(undefined);
 
@@ -122,13 +122,13 @@ describe('BankConnection lifecycle and credential rotation', () => {
     const result = await connectionService.reauthorize(
       'client-1',
       'connection-1',
-      { clientId: 'new-client', clientSecret: 'new-secret' },
+      { consumerKey: 'new-client', consumerSecret: 'new-secret' },
       'user-1'
     );
 
     expect(putConnectionSecret).toHaveBeenCalledWith(
       'staged-secret-ref',
-      { clientId: 'new-client', clientSecret: 'new-secret' },
+      { consumerKey: 'new-client', consumerSecret: 'new-secret' },
       { clientId: 'client-1', provider: 'COOP', credentialVersion: 4 }
     );
 
@@ -139,7 +139,7 @@ describe('BankConnection lifecycle and credential rotation', () => {
 
     expect(createBankProviderForConnection).toHaveBeenCalledWith(
       'COOP',
-      { clientId: 'new-client', clientSecret: 'new-secret' },
+      { consumerKey: 'new-client', consumerSecret: 'new-secret' },
       { connectionId: 'connection-1', credentialVersion: 4 }
     );
 
@@ -182,7 +182,7 @@ describe('BankConnection lifecycle and credential rotation', () => {
       connectionService.reauthorize(
         'client-1',
         'connection-1',
-        { clientId: 'bad-client', clientSecret: 'bad-secret' },
+        { consumerKey: 'bad-client', consumerSecret: 'bad-secret' },
         'user-1'
       )
     ).rejects.toThrow(/existing credentials were retained/i);
@@ -207,7 +207,7 @@ describe('BankConnection lifecycle and credential rotation', () => {
       connectionService.reauthorize(
         'client-1',
         'connection-1',
-        { clientId: 'new-client', clientSecret: 'new-secret' },
+        { consumerKey: 'new-client', consumerSecret: 'new-secret' },
         'user-1'
       )
     ).rejects.toThrow(/changed during reauthorization/i);
@@ -229,7 +229,7 @@ describe('BankConnection lifecycle and credential rotation', () => {
       connectionService.reauthorize(
         'client-1',
         'connection-1',
-        { clientId: 'new-client', clientSecret: 'new-secret' },
+        { consumerKey: 'new-client', consumerSecret: 'new-secret' },
         'user-1'
       )
     ).rejects.toThrow(/outcome is uncertain/i);
@@ -280,7 +280,7 @@ describe('BankConnection lifecycle and credential rotation', () => {
 
     expect(createBankProviderForConnection).toHaveBeenCalledWith(
       'COOP',
-      { clientId: 'new-client', clientSecret: 'new-secret' },
+      { consumerKey: 'new-client', consumerSecret: 'new-secret' },
       { connectionId: 'connection-1', credentialVersion: 9 }
     );
 

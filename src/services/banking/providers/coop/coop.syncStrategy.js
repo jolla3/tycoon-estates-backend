@@ -7,7 +7,7 @@
 // Overlaps are safe via Batch 03 idempotency.
 
 import { BankSyncStrategy } from '../../syncStrategy.js';
-import { mapCoopFullStatementItem, mapCoopPolledTransaction } from './coop.mapper.js';
+import { mapCoopFullStatementItem } from './coop.mapper.js';
 import { Errors } from '../../../../utils/errors.js';
 import { logger } from '../../../../config/logger.js';
 
@@ -31,6 +31,8 @@ export class CoopSyncStrategy extends BankSyncStrategy {
     super();
     this.mode = mode;
     this.windowDays = windowDays;
+    this.requiredEntitlement = mode === 'full_statement_window' ? 'statement' : null;
+    this.requiredCapability = mode === 'full_statement_window' ? 'statementImport' : null;
   }
 
   getProviderName() {
@@ -93,16 +95,17 @@ export class CoopSyncStrategy extends BankSyncStrategy {
     const startDate = ymd(session.start);
     const endDate = ymd(session.end);
 
-    let rawItems;
+    let items;
     try {
-      // Provider returns already-mapped list from getFullStatement in current adapter
-      // (mapCoopPolledTransaction). Prefer FullStatement field mapping when raw shape allows.
+      // getFullStatement returns items already mapped via mapCoopFullStatementItem.
       const mapped = await session.adapter.getFullStatement(
         session.account,
         startDate,
         endDate
       );
-      rawItems = Array.isArray(mapped) ? mapped : [];
+      items = Array.isArray(mapped)
+        ? mapped.map((item) => ({ ...item, sourceChannel: 'statement' }))
+        : [];
     } catch (err) {
       logger.warn({ error: err.message }, 'Co-op full statement fetch failed');
       return {
@@ -114,19 +117,6 @@ export class CoopSyncStrategy extends BankSyncStrategy {
         pageError: err.message || 'statement_fetch_failed',
       };
     }
-
-    // Re-map through FullStatement helper when payload looks documented;
-    // otherwise keep adapter mapping but mark unverified.
-    const items = rawItems.map((item) => {
-      if (item?.rawPayload && (item.rawPayload.CreditAmount != null || item.rawPayload.DebitAmount != null)) {
-        return mapCoopFullStatementItem(item.rawPayload);
-      }
-      return {
-        ...item,
-        sourceChannel: 'poll',
-        schemaUnverified: item.schemaUnverified !== false,
-      };
-    });
 
     session.done = true; // single window per run; continuation is next schedule with new acceptedThrough
 
@@ -152,6 +142,12 @@ export function createCoopSyncStrategy() {
 
 /** Explicit non-operational AccountTransactions strategy (documented limitation). */
 export class CoopUnverifiedTransactionsPollStrategy extends BankSyncStrategy {
+  constructor() {
+    super();
+    this.requiredEntitlement = 'poll';
+    this.requiredCapability = 'polling';
+  }
+
   getProviderName() {
     return 'COOP';
   }

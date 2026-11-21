@@ -15,7 +15,7 @@ import {
   newSyncWorkerId,
 } from './syncCoordination.service.js';
 import { ingestNormalizedTransactionBatch } from './transactionIngestion.service.js';
-import { getBankProviderCapabilities } from './bank.factory.js';
+import { assertProviderCapabilityOperational } from './bank.factory.js';
 import { Errors } from '../../utils/errors.js';
 import { logger } from '../../config/logger.js';
 import { audit } from '../audit.service.js';
@@ -44,6 +44,7 @@ async function assertCurrentSyncContext({
   expectedConnectionId,
   expectedCredentialVersion,
   adapter,
+  requiredEntitlement,
 }) {
   const currentAccount = await BankAccount.findOne({
     _id: originalAccount._id,
@@ -71,9 +72,9 @@ async function assertCurrentSyncContext({
   if (currentAccount.validationStatus !== 'validated') {
     throw Errors.Conflict('Bank account validation changed during synchronization');
   }
-  if (!hasBankSyncEntitlement(currentAccount.entitlements)) {
+  if (!hasBankSyncEntitlement(currentAccount.entitlements, requiredEntitlement)) {
     throw Errors.Forbidden(
-      'Bank account polling or statement entitlement was revoked during synchronization'
+      `Bank account ${requiredEntitlement} entitlement was revoked during synchronization`
     );
   }
 
@@ -139,8 +140,9 @@ function syncLeaseLostResult(bankAccountId, fenceGeneration, stage, {
  * Run synchronized ingestion for one account.
  * Shared by manual API and scheduled job.
  */
-export function hasBankSyncEntitlement(entitlements) {
-  return entitlements?.poll === true || entitlements?.statement === true;
+export function hasBankSyncEntitlement(entitlements, requiredEntitlement) {
+  if (!['poll', 'statement'].includes(requiredEntitlement)) return false;
+  return entitlements?.[requiredEntitlement] === true;
 }
 
 export async function synchronizeBankAccount(clientId, bankAccountId, {
@@ -158,33 +160,32 @@ export async function synchronizeBankAccount(clientId, bankAccountId, {
   if (account.validationStatus !== 'validated') {
     throw Errors.Conflict('Bank account has not completed validation');
   }
-  if (!hasBankSyncEntitlement(account.entitlements)) {
-    throw Errors.Forbidden('Account is not entitled for polling or statement import');
+  const strategy = strategyForProvider(account.provider);
+  const requiredEntitlement = strategy.requiredEntitlement;
+  const requiredCapability = strategy.requiredCapability;
+
+  if (!requiredEntitlement || !requiredCapability) {
+    throw Errors.BankCapabilityUnsupported(
+      `Sync strategy for ${account.provider} has no declared authorization policy`
+    );
   }
-
-  const caps = getBankProviderCapabilities(account.provider);
-  if (!caps?.implemented) {
-    throw Errors.BankProviderUnavailable(`Provider ${account.provider} is not implemented`);
-  }
-
-  const permittedCoopLab = (
-    String(account.provider).toUpperCase() === 'COOP'
-    && env.NODE_ENV !== 'production'
-    && env.COOP_BANK_LAB_MODE === true
-  );
-
-  if (caps.operationalReady !== true && !permittedCoopLab) {
-    throw Errors.BankProviderUnavailable(
-      `Provider ${account.provider} is not operationally ready for customer sync`
+  if (!hasBankSyncEntitlement(account.entitlements, requiredEntitlement)) {
+    throw Errors.Forbidden(
+      `Account is not entitled for ${requiredEntitlement} synchronization`
     );
   }
 
-  const strategy = strategyForProvider(account.provider);
   if (!strategy.supportsOperationalSync()) {
     throw Errors.Conflict(
       `Operational sync is not available for ${account.provider} under verified contracts`
     );
   }
+
+  assertProviderCapabilityOperational(account.provider, requiredCapability, {
+    allowLab: true,
+    labMode: env.COOP_BANK_LAB_MODE,
+    nodeEnv: env.NODE_ENV,
+  });
 
   const lease = await acquireSyncLease(account._id, { workerId });
   const { fenceGeneration } = lease;
@@ -236,6 +237,7 @@ export async function synchronizeBankAccount(clientId, bankAccountId, {
         expectedConnectionId: connection._id,
         expectedCredentialVersion,
         adapter,
+        requiredEntitlement,
       });
 
       const renewedBeforeFetch = await extendSyncLease(account._id, {
@@ -278,6 +280,7 @@ export async function synchronizeBankAccount(clientId, bankAccountId, {
         expectedConnectionId: connection._id,
         expectedCredentialVersion,
         adapter,
+        requiredEntitlement,
       });
 
       if (page.pageError) {
@@ -288,7 +291,7 @@ export async function synchronizeBankAccount(clientId, bankAccountId, {
 
       const batch = await ingestNormalizedTransactionBatch(acceptedAccount, page.items || [], {
         process,
-        ingestionChannel: 'poll',
+        ingestionChannel: requiredEntitlement,
         connectionId: connection._id,
         expectedCredentialVersion,
       });
