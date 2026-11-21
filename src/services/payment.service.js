@@ -1,7 +1,7 @@
 // src/services/payment.service.js
-import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { Payment } from '../models/Payment.js';
+import { ManualReceipt } from '../models/ManualReceipt.js';
 import { House } from '../models/House.js';
 import { Tenant } from '../models/Tenant.js';
 import { dateUtil } from '../utils/date.js';
@@ -12,28 +12,27 @@ import { supportsMongoTransactions } from '../config/database.js';
 import { audit } from './audit.service.js';
 import { tenancyService } from './tenancy.service.js';
 import { settleTenantAccount, tenantAccountSnapshot } from './tenantCredit.service.js';
+import { assertManualReceiptIndexesAligned } from '../utils/manualReceiptIndexReadiness.js';
 
-/**
- * Stable identity for a manual receipt (idempotency).
- * Prefer operator reference when present; otherwise a content hash so retries
- * without a reference still reuse the original result within the same details.
- */
-function manualIdentityKey({
-  clientId, houseId, amountCents, paymentDateStr, tenderMethod, paymentReference, actorId,
+function normalizeReference(value) {
+  const s = value == null ? '' : String(value).trim();
+  return s || null;
+}
+
+function normalizeIdempotencyKey(value) {
+  const s = value == null ? '' : String(value).trim();
+  if (!s || s.length < 8 || s.length > 128) return null;
+  return s;
+}
+
+function payloadMatchesReceipt(receipt, {
+  houseId, amountCents, paymentDateLocal, tenderMethod, paymentReference,
 }) {
-  if (paymentReference && String(paymentReference).trim()) {
-    return `ref:${clientId}:${String(paymentReference).trim()}`;
-  }
-  const material = [
-    String(clientId),
-    String(houseId),
-    String(amountCents),
-    String(paymentDateStr),
-    String(tenderMethod),
-    String(actorId || 'anon'),
-  ].join('|');
-  const digest = crypto.createHash('sha256').update(material).digest('hex').slice(0, 32);
-  return `content:${digest}`;
+  return String(receipt.houseId) === String(houseId)
+    && Number(receipt.amountCents) === Number(amountCents)
+    && String(receipt.paymentDateLocal) === String(paymentDateLocal)
+    && String(receipt.tenderMethod) === String(tenderMethod)
+    && String(receipt.paymentReference || '') === String(paymentReference || '');
 }
 
 export const paymentService = {
@@ -52,13 +51,18 @@ export const paymentService = {
   },
 
   /**
-   * Ordinary manual payment: house + amount + Nairobi payment date + tender method.
-   * Backend resolves occupancy tenant from the payment date, then settles the
-   * tenant account (existing credit first, then receipt) across the tenant's
-   * eligible obligations in the same client+estate. Does not generate RentCharges.
+   * Ordinary manual payment: house + amount + Nairobi payment date + tender method
+   * + client-supplied idempotencyKey.
+   * Backend resolves occupancy tenant from the payment date, persists a ManualReceipt
+   * envelope, then settles the tenant account (existing credit first, then receipt).
+   * Does not generate RentCharges.
    */
   async recordManual(clientId, body, estateFilter = null, actor = null, reqMeta = {}) {
-    const { houseId, amountCents, paymentDate, paymentReference, period, tenantId, tenancyId, tenderMethod } = body;
+    const {
+      houseId, amountCents, paymentDate, paymentReference, period, tenantId, tenancyId,
+      tenderMethod, idempotencyKey: rawKey,
+    } = body;
+
     if (!houseId) throw Errors.InvalidRequest('houseId is required');
     const amount = Math.trunc(Number(amountCents));
     if (!Number.isSafeInteger(amount) || amount <= 0) {
@@ -67,63 +71,134 @@ export const paymentService = {
     if (!paymentDate) throw Errors.InvalidRequest('paymentDate is required');
     if (!tenderMethod) throw Errors.InvalidRequest('tenderMethod is required');
 
-    // Parse as Nairobi calendar date (never `new Date('YYYY-MM-DD')`).
+    const idempotencyKey = normalizeIdempotencyKey(rawKey);
+    if (!idempotencyKey) {
+      throw Errors.InvalidRequest('idempotencyKey is required (8–128 characters)');
+    }
+
     const nairobi = dateUtil.parseNairobiDateOnly(paymentDate);
     if (!nairobi) {
       throw Errors.InvalidRequest('paymentDate must be a valid YYYY-MM-DD Nairobi calendar date');
     }
-    const payDate = nairobi.noon; // stable instant within the Nairobi day for storage
+    const payDate = nairobi.noon;
+    const reference = normalizeReference(paymentReference);
 
-    const house = await House.findOne({
-      _id: houseId,
-      clientId,
-      ...estateFilterClause(estateFilter),
-    });
-    if (!house) throw Errors.HouseNotFound();
+    // Optional legacy period must not contradict the payment date's Nairobi period.
+    if (period && period !== nairobi.period) {
+      throw Errors.InvalidRequest('period does not match the payment date accounting period');
+    }
 
     if (supportsMongoTransactions() !== true) {
       throw Errors.ServiceUnavailable('MongoDB transactions required for financial posting');
     }
 
-    // Authoritative current occupancy (never trust prior context response).
-    const occupancy = await tenancyService.resolveOccupancyForManualPayment(
-      clientId, house, nairobi
-    );
-    if (!occupancy.ok) {
-      throw Errors.InvalidRequest(occupancy.reason || 'House is not eligible for ordinary payment recording');
+    // Fail closed when ManualReceipt identity indexes are not ready.
+    try {
+      await assertManualReceiptIndexesAligned();
+    } catch (err) {
+      if (err?.code === 'MANUAL_RECEIPT_INDEX_NOT_ALIGNED') {
+        throw Errors.ServiceUnavailable('Manual receipt identity indexes are not ready');
+      }
+      throw err;
     }
 
-    // Historical covering tenancy for the payment date (may differ from active).
-    const covering = occupancy.tenancy;
-    if (tenantId && String(covering.tenantId) !== String(tenantId)) {
-      throw Errors.InvalidRequest('tenantId does not match the occupant on the payment date');
-    }
-    if (tenancyId && String(covering._id) !== String(tenancyId)) {
-      throw Errors.InvalidRequest('tenancyId does not match the covering tenancy for the payment date');
-    }
-
-    const identityKey = manualIdentityKey({
+    // Pre-flight house scope (authoritative reload happens inside the transaction).
+    const houseProbe = await House.findOne({
+      _id: houseId,
       clientId,
-      houseId: house._id,
-      amountCents: amount,
-      paymentDateStr: nairobi.dateStr,
-      tenderMethod,
-      paymentReference: paymentReference || null,
-      actorId: actor?._id,
-    });
+      ...estateFilterClause(estateFilter),
+    }).lean();
+    if (!houseProbe) throw Errors.HouseNotFound();
 
     const session = await mongoose.startSession();
-    let settled;
+    let settled = null;
+    let receiptDoc = null;
     let tenantDoc = null;
+    let covering = null;
     let balanceBefore = null;
+    let reused = false;
+    let houseInTx = null;
+
     try {
       await session.withTransaction(async () => {
-        // Re-validate occupancy inside the transaction.
-        const occTx = await tenancyService.resolveOccupancyForManualPayment(
-          clientId, house, nairobi, { session }
+        // Idempotent reuse by submission key.
+        const existing = await ManualReceipt.findOne({
+          clientId,
+          idempotencyKey,
+        }).session(session);
+
+        if (existing) {
+          if (!payloadMatchesReceipt(existing, {
+            houseId,
+            amountCents: amount,
+            paymentDateLocal: nairobi.dateStr,
+            tenderMethod,
+            paymentReference: reference,
+          })) {
+            throw Errors.Conflict(
+              'idempotencyKey was already used with different receipt details'
+            );
+          }
+          receiptDoc = existing;
+          reused = true;
+          covering = { _id: existing.occupancyTenancyId, tenantId: existing.tenantId, estateId: existing.estateId };
+          tenantDoc = await Tenant.findOne({
+            _id: existing.tenantId, clientId, estateId: existing.estateId,
+          }).session(session).lean();
+          balanceBefore = await tenantAccountSnapshot({
+            clientId, estateId: existing.estateId, tenantId: existing.tenantId,
+          }, { session });
+          settled = {
+            plan: {
+              creditAppliedCents: existing.creditAppliedCents || 0,
+              receiptAppliedCents: existing.receiptAppliedCents || 0,
+              newCreditCents: existing.newCreditCents || 0,
+            },
+            receiptPayments: existing.paymentIds?.length
+              ? await Payment.find({ _id: { $in: existing.paymentIds } }).session(session)
+              : [],
+            creditPayments: existing.creditPaymentIds?.length
+              ? await Payment.find({ _id: { $in: existing.creditPaymentIds } }).session(session)
+              : [],
+            allocations: [],
+            movements: [],
+            reused: true,
+          };
+          return;
+        }
+
+        // Reference collision with a different submission key must not silently settle.
+        if (reference) {
+          const refHit = await ManualReceipt.findOne({
+            clientId,
+            paymentReference: reference,
+          }).session(session).lean();
+          if (refHit && refHit.idempotencyKey !== idempotencyKey) {
+            throw Errors.Conflict('This payment reference was already used by another receipt');
+          }
+        }
+
+        // Reload house inside the transaction — never trust the pre-tx object.
+        houseInTx = await House.findOne({
+          _id: houseId,
+          clientId,
+          ...estateFilterClause(estateFilter),
+        }).session(session);
+        if (!houseInTx) throw Errors.HouseNotFound();
+
+        const occupancy = await tenancyService.resolveOccupancyForManualPayment(
+          clientId, houseInTx, nairobi, { session }
         );
-        if (!occTx.ok || String(occTx.tenancy._id) !== String(covering._id)) {
-          throw Errors.Conflict('House occupancy changed during payment recording');
+        if (!occupancy.ok) {
+          throw Errors.InvalidRequest(occupancy.reason || 'House is not eligible for ordinary payment recording');
+        }
+
+        covering = occupancy.tenancy;
+        if (tenantId && String(covering.tenantId) !== String(tenantId)) {
+          throw Errors.InvalidRequest('tenantId does not match the occupant on the payment date');
+        }
+        if (tenancyId && String(covering._id) !== String(tenancyId)) {
+          throw Errors.InvalidRequest('tenancyId does not match the covering tenancy for the payment date');
         }
 
         tenantDoc = await Tenant.findOne({
@@ -141,53 +216,106 @@ export const paymentService = {
           tenantId: covering.tenantId,
         }, { session });
 
-        // Tenant-wide settlement: existing credit first, then this receipt. No charge generation.
+        // Canonical receipt envelope (identity only — not a ledger posting).
+        const [createdReceipt] = await ManualReceipt.create([{
+          clientId,
+          estateId: covering.estateId,
+          houseId: houseInTx._id,
+          tenantId: covering.tenantId,
+          occupancyTenancyId: covering._id,
+          paymentDateLocal: nairobi.dateStr,
+          paymentDate: payDate,
+          period: nairobi.period,
+          tenderMethod,
+          amountCents: amount,
+          paymentReference: reference,
+          idempotencyKey,
+          recordedByUserId: actor?._id || null,
+          creditAppliedCents: 0,
+          receiptAppliedCents: 0,
+          newCreditCents: 0,
+          paymentIds: [],
+          creditPaymentIds: [],
+          creditMovementIds: [],
+          status: 'CONFIRMED',
+        }], { session });
+        receiptDoc = createdReceipt;
+
         settled = await settleTenantAccount({
           clientId,
           estateId: covering.estateId,
           tenantId: covering.tenantId,
           receipt: {
             source: 'MANUAL',
-            identityKey,
+            identityKey: idempotencyKey,
             amountCents: amount,
             tenderMethod,
-            paymentReference: paymentReference || null,
-            houseId: house._id,
+            manualReceiptId: createdReceipt._id,
             recordedByUserId: actor?._id || null,
             paymentDate: payDate,
           },
           paymentDate: payDate,
           session,
         });
+
+        // Attach settlement figures and child links to the envelope.
+        createdReceipt.creditAppliedCents = settled.plan?.creditAppliedCents || 0;
+        createdReceipt.receiptAppliedCents = settled.plan?.receiptAppliedCents || 0;
+        createdReceipt.newCreditCents = settled.plan?.newCreditCents || 0;
+        createdReceipt.paymentIds = (settled.receiptPayments || []).map((p) => p._id);
+        createdReceipt.creditPaymentIds = (settled.creditPayments || []).map((p) => p._id);
+        createdReceipt.creditMovementIds = (settled.movements || []).map((m) => m._id);
+        await createdReceipt.save({ session });
+
+        // Gross identity: receipt amount = applied to charges + new surplus credit.
+        const applied = createdReceipt.receiptAppliedCents;
+        const surplus = createdReceipt.newCreditCents;
+        if (applied + surplus !== amount) {
+          throw Errors.Conflict('Manual receipt gross amount does not reconcile with settlement');
+        }
       });
+    } catch (err) {
+      // Surface duplicate key on ManualReceipt as conflict.
+      if (err?.code === 11000) {
+        const key = err?.keyPattern || {};
+        if (key.idempotencyKey || (err.message && err.message.includes('idempotency'))) {
+          throw Errors.Conflict('idempotencyKey collision while recording receipt');
+        }
+        if (key.paymentReference || (err.message && err.message.includes('paymentReference'))) {
+          throw Errors.Conflict('This payment reference was already used by another receipt');
+        }
+      }
+      throw err;
     } finally {
       await session.endSession();
     }
 
+    const estateId = covering.estateId || receiptDoc.estateId;
+    const resolvedTenantId = covering.tenantId || receiptDoc.tenantId;
+
     const balanceAfter = await tenantAccountSnapshot({
       clientId,
-      estateId: covering.estateId,
-      tenantId: covering.tenantId,
+      estateId,
+      tenantId: resolvedTenantId,
     });
-
-    const primaryPayment = settled.receiptPayments?.[0] || settled.creditPayments?.[0] || null;
 
     await audit({
       clientId,
-      estateId: house.estateId,
+      estateId,
       userId: actor?._id,
       action: 'PAYMENT_RECORDED',
-      resource: 'Payment',
-      resourceId: primaryPayment?._id,
-      description: `Manual payment ${amount} cents for house ${house.houseNumber}`,
+      resource: 'ManualReceipt',
+      resourceId: receiptDoc._id,
+      description: `Manual receipt ${amount} cents for house ${houseProbe.houseNumber}`,
       metadata: {
         amountCents: amount,
-        reused: Boolean(settled.reused),
-        occupancyTenancyId: String(covering._id),
-        tenantId: String(covering.tenantId),
+        reused,
+        occupancyTenancyId: String(receiptDoc.occupancyTenancyId),
+        tenantId: String(resolvedTenantId),
         tenderMethod,
         paymentDate: nairobi.dateStr,
-        identityKey,
+        period: nairobi.period,
+        idempotencyKey,
         creditAppliedCents: settled.plan?.creditAppliedCents,
         receiptAppliedCents: settled.plan?.receiptAppliedCents,
         newCreditCents: settled.plan?.newCreditCents,
@@ -197,21 +325,38 @@ export const paymentService = {
       userAgent: reqMeta.userAgent,
     });
 
+    const primaryPayment = settled.receiptPayments?.[0] || null;
+
     return {
+      receipt: {
+        _id: String(receiptDoc._id),
+        houseId: String(receiptDoc.houseId),
+        tenantId: String(receiptDoc.tenantId),
+        occupancyTenancyId: String(receiptDoc.occupancyTenancyId),
+        paymentDateLocal: receiptDoc.paymentDateLocal,
+        period: receiptDoc.period,
+        tenderMethod: receiptDoc.tenderMethod,
+        amountCents: receiptDoc.amountCents,
+        paymentReference: receiptDoc.paymentReference || null,
+        idempotencyKey: receiptDoc.idempotencyKey,
+        creditAppliedCents: receiptDoc.creditAppliedCents,
+        receiptAppliedCents: receiptDoc.receiptAppliedCents,
+        newCreditCents: receiptDoc.newCreditCents,
+      },
       payment: primaryPayment,
       payments: settled.receiptPayments || [],
       creditPayments: settled.creditPayments || [],
-      allocations: [], // allocations live on child payments; detailed list optional for UI
-      reused: Boolean(settled.reused),
-      tenancyId: covering._id,
-      tenantId: covering.tenantId,
+      allocations: settled.allocations || [],
+      reused,
+      tenancyId: receiptDoc.occupancyTenancyId,
+      tenantId: resolvedTenantId,
       unappliedCents: settled.plan?.newCreditCents ?? 0,
       remainingBalanceCents: balanceAfter.netCents,
-      balanceBeforeCents: balanceBefore.netCents,
+      balanceBeforeCents: balanceBefore?.netCents ?? null,
       balanceAfterCents: balanceAfter.netCents,
-      creditBeforeCents: balanceBefore.creditCents,
+      creditBeforeCents: balanceBefore?.creditCents ?? null,
       creditAfterCents: balanceAfter.creditCents,
-      outstandingBeforeCents: balanceBefore.outstandingCents,
+      outstandingBeforeCents: balanceBefore?.outstandingCents ?? null,
       outstandingAfterCents: balanceAfter.outstandingCents,
       plan: settled.plan,
       tenant: tenantDoc
@@ -226,9 +371,6 @@ export const paymentService = {
     return tenancyService.manualPaymentOptions(clientId, house, period || dateUtil.currentPeriod(), { page, limit, search, eligiblePage, eligibleLimit, eligibleSearch });
   },
 
-  /**
-   * Occupancy + tenant-wide balance for the Record Payment form.
-   */
   async manualContext(clientId, estateFilter, { houseId, paymentDate }) {
     const house = await House.findOne({
       _id: houseId,
@@ -285,7 +427,6 @@ export const paymentService = {
         tenantId: occupancy.tenancy ? String(occupancy.tenancy.tenantId) : null,
       },
       tenant,
-      // Tenant-wide net (credit - outstanding). null only when tenant cannot be resolved.
       tenantBalanceCents,
       creditCents,
       outstandingCents,
