@@ -1,7 +1,13 @@
 import '../setup.js';
+import { jest } from '@jest/globals';
+import mongoose from 'mongoose';
+import { tenancyService } from '../../src/services/tenancy.service.js';
+import { Tenancy } from '../../src/models/Tenancy.js';
+import { Tenant } from '../../src/models/Tenant.js';
+import { dateUtil } from '../../src/utils/date.js';
 import { classifyTenanciesForPeriod, tenancyIneligibleReason, TENANCY_RESOLUTION } from '../../src/utils/manualPaymentTenancy.js';
 import { isTenancyEligibleForPeriod } from '../../src/utils/tenancyEligibility.js';
-import { manualPaymentSchema, manualOptionsQuerySchema } from '../../src/routes/payment.routes.js';
+import { manualPaymentSchema, manualOptionsQuerySchema, tenantContextQuerySchema } from '../../src/routes/payment.routes.js';
 
 const oid = (n) => String(n).padStart(24, 'a');
 const T = (o) => ({ status: 'CLOSED', tenantId: oid(1), ...o });
@@ -102,16 +108,31 @@ describe('tenancyIneligibleReason / isTenancyEligibleForPeriod share one boundar
 });
 
 describe('manual payment request schemas', () => {
-  const base = { houseId: oid(1), amountCents: 1000 };
-  test('accepts tenancyId and period', () => {
-    const r = manualPaymentSchema.safeParse({ ...base, tenancyId: oid(2), period: '2026-03' });
+  const base = {
+    houseId: oid(1), tenantId: oid(3), tenancyId: oid(2), amountCents: 1000,
+    paymentDate: '2026-03-10', tenderMethod: 'CASH', idempotencyKey: 'key-12345678',
+  };
+  test('accepts an explicit tenant + house + tenancy submission', () => {
+    const r = manualPaymentSchema.safeParse({ ...base, period: '2026-03' });
     expect(r.success).toBe(true);
-    expect(r.data.tenancyId).toBe(oid(2));
+    expect(r.data).toMatchObject({ tenantId: oid(3), houseId: oid(1), tenancyId: oid(2) });
+  });
+  test('tenantId and tenancyId are REQUIRED: no silent assignment to the current occupant', () => {
+    const { tenantId, ...noTenant } = base;
+    const { tenancyId, ...noTenancy } = base;
+    expect(manualPaymentSchema.safeParse(noTenant).success).toBe(false);
+    expect(manualPaymentSchema.safeParse(noTenancy).success).toBe(false);
   });
   test('rejects malformed ids and impossible periods', () => {
     expect(manualPaymentSchema.safeParse({ ...base, tenancyId: 'abc' }).success).toBe(false);
+    expect(manualPaymentSchema.safeParse({ ...base, tenantId: 'abc' }).success).toBe(false);
     expect(manualPaymentSchema.safeParse({ ...base, houseId: 'abc' }).success).toBe(false);
     expect(manualPaymentSchema.safeParse({ ...base, period: '2026-13' }).success).toBe(false);
+  });
+  test('tenant-context query requires a tenantId and rejects unknown keys', () => {
+    expect(tenantContextQuerySchema.safeParse({}).success).toBe(false);
+    expect(tenantContextQuerySchema.safeParse({ tenantId: oid(3), paymentDate: '2026-03-10' }).success).toBe(true);
+    expect(tenantContextQuerySchema.safeParse({ tenantId: oid(3), x: 1 }).success).toBe(false);
   });
   test('options query requires a houseId', () => {
     expect(manualOptionsQuerySchema.safeParse({}).success).toBe(false);
@@ -126,5 +147,76 @@ describe('manual-options pagination/search query', () => {
     expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, limit: '500' }).success).toBe(false);
     expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, page: '0' }).success).toBe(false);
     expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, unexpected: 1 }).success).toBe(false);
+  });
+});
+
+const resolveOid = () => new mongoose.Types.ObjectId();
+const resolveClient = resolveOid();
+const resolveEstate = resolveOid();
+const resolveHouseId = resolveOid();
+const resolveOldTenant = resolveOid();
+const resolveCurrentTenant = resolveOid();
+const resolveHouse = { _id: resolveHouseId, estateId: resolveEstate, houseNumber: '78' };
+const resolveOldTenancy = {
+  _id: resolveOid(), clientId: resolveClient, estateId: resolveEstate, houseId: resolveHouseId,
+  tenantId: resolveOldTenant, status: 'CLOSED',
+  startAt: new Date('2026-01-01T00:00:00+03:00'), endAt: new Date('2026-07-01T00:00:00+03:00'),
+};
+const resolveCurrentTenancy = {
+  _id: resolveOid(), clientId: resolveClient, estateId: resolveEstate, houseId: resolveHouseId,
+  tenantId: resolveCurrentTenant, status: 'ACTIVE',
+  startAt: new Date('2026-07-01T00:00:00+03:00'), endAt: null,
+};
+const resolveChain = (result) => {
+  const q = { session: () => q, lean: () => q,
+    then: (resolve, reject) => Promise.resolve(result).then(resolve, reject) };
+  return q;
+};
+function stubResolveRecords(rows, tenants = [
+  { _id: resolveOldTenant, clientId: resolveClient, estateId: resolveEstate },
+  { _id: resolveCurrentTenant, clientId: resolveClient, estateId: resolveEstate },
+]) {
+  const match = (query, row) => Object.entries(query).every(([key, value]) => String(row[key]) === String(value));
+  jest.spyOn(Tenancy, 'findOne').mockImplementation((query) => resolveChain(rows.find((row) => match(query, row)) || null));
+  jest.spyOn(Tenant, 'findOne').mockImplementation((query) => resolveChain(tenants.find((row) => match(query, row)) || null));
+}
+afterEach(() => jest.restoreAllMocks());
+
+describe('resolveExplicitForManualPayment ownership', () => {
+  const resolve = (ids, date) => tenancyService.resolveExplicitForManualPayment(
+    resolveClient, resolveHouse, ids, dateUtil.parseNairobiDateOnly(date),
+  );
+  test('backdated payment goes to the former occupant, never the current one', async () => {
+    stubResolveRecords([resolveOldTenancy, resolveCurrentTenancy]);
+    const result = await resolve({ tenantId: resolveOldTenant, tenancyId: resolveOldTenancy._id }, '2026-03-10');
+    expect(String(result.tenancy.tenantId)).toBe(String(resolveOldTenant));
+    expect(String(result.tenant._id)).toBe(String(resolveOldTenant));
+  });
+  test('contradictory tenant and tenancy ids are rejected', async () => {
+    stubResolveRecords([resolveOldTenancy, resolveCurrentTenancy]);
+    await expect(resolve({ tenantId: resolveCurrentTenant, tenancyId: resolveOldTenancy._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveCurrentTenancy._id }, '2026-08-15')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+  });
+  test('payment date must fall inside exact tenancy bounds', async () => {
+    stubResolveRecords([resolveOldTenancy, resolveCurrentTenancy]);
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveOldTenancy._id }, '2026-06-30')).resolves.toBeDefined();
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveOldTenancy._id }, '2026-07-01')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(resolve({ tenantId: resolveCurrentTenant, tenancyId: resolveCurrentTenancy._id }, '2026-07-01')).resolves.toBeDefined();
+  });
+  test('client, estate and house scope the identity query', async () => {
+    const find = jest.spyOn(Tenancy, 'findOne').mockReturnValue(resolveChain(null));
+    jest.spyOn(Tenant, 'findOne').mockReturnValue(resolveChain(null));
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveOid() }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(find.mock.calls[0][0]).toMatchObject({ clientId: resolveClient, estateId: resolveEstate, houseId: resolveHouseId });
+  });
+  test('a VOID tenancy is not selectable', async () => {
+    stubResolveRecords([{ ...resolveOldTenancy, status: 'VOID' }]);
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveOldTenancy._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+  });
+  test('missing explicit ids are rejected before database lookup', async () => {
+    const find = jest.spyOn(Tenancy, 'findOne');
+    await expect(resolve({ tenantId: resolveOldTenant }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(resolve({ tenancyId: resolveOldTenancy._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(find).not.toHaveBeenCalled();
   });
 });
