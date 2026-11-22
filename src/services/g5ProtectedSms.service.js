@@ -29,7 +29,7 @@ function hasValidOnboardingPaymentUrl(body) {
 
   // A protected onboarding body must contain exactly one URI, and it must be
   // the configured public /pay route with the bearer token in the fragment.
-  const urls = body.match(/\\b[a-z][a-z0-9+.-]*:\\/\\/[^\\s]+/gi) || [];
+  const urls = body.match(/\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi) || [];
   if (urls.length !== 1) return false;
 
   let url;
