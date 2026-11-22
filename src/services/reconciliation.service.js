@@ -387,17 +387,33 @@ export const reconciliationService = {
     }
 
     if (tenant?.phone) {
-      await smsService.sendPaymentConfirmation({
+      try {
+        await smsService.sendPaymentConfirmation({
         clientId: bankTransaction.clientId,
-        estateId: house.estateId,
-        tenantId: tenant._id,
-        houseId: house._id,
-        phone: tenant.phone,
-        tenantName: tenant.name,
-        houseNumber: house.houseNumber,
-        amountCents: bankTransaction.amountCents,
-        balanceCents: Math.max(remainingBalanceCents ?? 0, 0),
-      });
+          estateId: bankTransaction.estateId,
+          tenantId: tenant._id,
+          houseId: house._id,
+          phone: tenant.phone,
+          tenantName: tenant.name,
+          houseNumber: house.houseNumber,
+          amountCents: bankTransaction.amountCents,
+          balanceCents: Math.max(remainingBalanceCents ?? 0, 0),
+          currency: bankTransaction.currency || 'KES',
+          period,
+          notificationVersion: 'payment_confirmation:v1',
+          idempotencyKey: 'bank-payment-confirmation:' + String(bankTransaction._id) + ':' + String(tenant._id),
+        });
+      } catch (smsError) {
+        logger.warn(
+          { bankTransactionId: String(bankTransaction._id), estateId: String(bankTransaction.estateId), code: smsError.code || 'PAYMENT_SMS_QUEUE_FAILED' },
+          'Bank payment posted but confirmation SMS was not queued'
+        );
+      }
+    } else {
+      logger.warn(
+        { bankTransactionId: String(bankTransaction._id), estateId: String(bankTransaction.estateId), tenantId: String(tenant._id), reason: 'tenant_phone_missing' },
+        'Bank payment posted but confirmation SMS was skipped because tenant phone is missing'
+      );
     }
 
     return { matched: true, house, payment, allocations };

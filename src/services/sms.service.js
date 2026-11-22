@@ -171,7 +171,13 @@ export const smsService = {
     const estateQuery = Estate.findOne({ _id: estateId, clientId }).select('name');
     if (session) estateQuery.session(session);
     const estate = await estateQuery.lean();
-    if (!estate?.name) throw Errors.InvalidRequest('SMS estate ownership/name could not be verified');
+    if (!estate?.name) {
+      logger.error(
+        { clientId: String(clientId), estateId: String(estateId), tenantId: tenantId ? String(tenantId) : null, type, reason: 'estate_identity_unavailable' },
+        'SMS was not queued because estate ownership/name could not be verified'
+      );
+      throw Errors.InvalidRequest('SMS estate ownership/name could not be verified');
+    }
     const body = prefixEstate(estate.name, message);
 
     const version =
@@ -301,6 +307,8 @@ export const smsService = {
       priority = 0,
       period,
       forceResend = false,
+      idempotencyKey,
+      notificationVersion,
       ...templateData
     } = args;
     const message = render({ currency: args.currency || 'KES', period, ...templateData });
@@ -315,6 +323,8 @@ export const smsService = {
       priority,
       period: period || null,
       forceResend,
+      idempotencyKey,
+      notificationVersion,
     });
   },
 
