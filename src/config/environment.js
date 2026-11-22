@@ -146,8 +146,8 @@ export const env = {
 function validateG5EnvelopeKeyring() {
   const raw = optional('G5_ENVELOPE_KEYS');
   if (!raw) {
-    if (!isTest && (env.G5_PROTECTED_SMS_ENABLED === '1' || env.G5_PUBLIC_PAYMENT_URL)) {
-      throw new Error('[config] G5_ENVELOPE_KEYS is required when public payment links or protected SMS are enabled');
+    if (!isTest && env.G5_PROTECTED_SMS_ENABLED === '1') {
+      throw new Error('[config] G5_ENVELOPE_KEYS is required when G5_PROTECTED_SMS_ENABLED=1');
     }
     return;
   }

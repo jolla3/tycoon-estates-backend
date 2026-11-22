@@ -21,6 +21,7 @@ const SmsMessageSchema = new Schema(
         'broadcast',
         'general',
         'g5_onboarding_link',
+        'tenant_registration',
       ],
       default: 'general',
     },
@@ -74,4 +75,5 @@ export const NOTIFICATION_VERSIONS = {
   arrears_notice: 'arrears_notice:v1',
   payment_confirmation: 'payment_confirmation:v1',
   broadcast: 'broadcast:v1',
+  tenant_registration: 'tenant_registration:v1',
 };

@@ -57,6 +57,17 @@ const TEMPLATES = {
   },
 };
 
+
+function prefixEstate(estateName, message) {
+  const name = String(estateName || '').trim();
+  const body = String(message || '').trim();
+  if (!name || !body) {
+    throw Errors.InvalidRequest('Estate name and SMS body are required');
+  }
+  const prefix = name + ':';
+  return body.startsWith(prefix) ? body : prefix + ' ' + body;
+}
+
 export function previewSms(type, templateData) {
   const render = TEMPLATES[type];
   if (!render) throw Errors.InvalidRequest(`Unknown SMS template: ${type}`);
@@ -109,10 +120,17 @@ export const smsService = {
     broadcastId = null,
     forceResend = false,
     idempotencyKey: providedKey,
+    session = null,
   }) {
     if (!clientId) throw Errors.InvalidRequest('clientId is required');
     if (!estateId) throw Errors.InvalidRequest('estateId is required for SMS');
     if (!to || !message) throw Errors.InvalidRequest('Phone number and message are required');
+
+    const estateQuery = Estate.findOne({ _id: estateId, clientId }).select('name');
+    if (session) estateQuery.session(session);
+    const estate = await estateQuery.lean();
+    if (!estate?.name) throw Errors.InvalidRequest('SMS estate ownership/name could not be verified');
+    const body = prefixEstate(estate.name, message);
 
     const version =
       notificationVersion || NOTIFICATION_VERSIONS[type] || null;
@@ -130,25 +148,35 @@ export const smsService = {
         broadcastId,
       });
 
-    const { doc, created } = await withIdempotency(SmsMessage, idempotencyKey, 'idempotencyKey', () =>
-      SmsMessage.create({
-        clientId,
-        estateId,
-        tenantId,
-        houseId,
-        phoneNumber: to,
-        message,
-        type,
-        priority,
-        period,
-        notificationVersion: version,
-        broadcastId,
-        idempotencyKey,
-      })
-    );
-    return { doc, created };
-  },
+    const payload = {
+      clientId,
+      estateId,
+      tenantId,
+      houseId,
+      phoneNumber: to,
+      message: body,
+      type,
+      priority,
+      period,
+      notificationVersion: version,
+      broadcastId,
+      idempotencyKey,
+    };
 
+    if (session) {
+      const existing = await SmsMessage.findOne({ clientId, idempotencyKey }).session(session);
+      if (existing) return { doc: existing, created: false };
+      const [doc] = await SmsMessage.create([payload], { session });
+      return { doc, created: true };
+    }
+
+    return withIdempotency(
+      SmsMessage,
+      idempotencyKey,
+      'idempotencyKey',
+      () => SmsMessage.create(payload)
+    );
+  },
 
   /**
    * Individual SMS: resolve recipient from tenant (preferred) or house under

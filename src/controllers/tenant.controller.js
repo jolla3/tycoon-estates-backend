@@ -18,7 +18,7 @@ export const tenantController = {
 
   async create(req, res, next) {
     try {
-      const tenant = await tenantService.create(req.clientId, req.body);
+      const tenant = await tenantService.create(req.clientId, req.body, req.currentUser._id);
       await audit({ clientId: req.clientId, estateId: tenant.estateId, userId: req.currentUser._id, action: 'TENANT_CREATED', resource: 'Tenant', resourceId: tenant._id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
       apiResponse.success(res, tenant, 'Tenant created', 201);
     } catch (err) { next(err); }

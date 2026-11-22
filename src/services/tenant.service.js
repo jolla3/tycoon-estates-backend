@@ -11,33 +11,106 @@ import { estateFilterClause } from '../utils/estateFilter.js';
 import { dateUtil } from '../utils/date.js';
 import { ledgerService } from './ledger.service.js';
 import { tenancyService } from './tenancy.service.js';
+import { smsService } from './sms.service.js';
+import { mpesaSubmissionLinkService } from './mpesa/mpesaSubmissionLink.service.js';
+import { aggregateRentCharges } from '../utils/smsBilling.js';
+import { logger } from '../config/logger.js';
+import { money } from '../utils/money.js';
+import { generateBearerToken } from '../utils/g5Token.js';
 import mongoose from 'mongoose';
 import { supportsMongoTransactions } from '../config/database.js';
 
+
 export const tenantService = {
   async create(clientId, data, actorUserId = null) {
-    const house = await House.findOne({ _id: data.houseId, clientId });
-    if (!house) throw Errors.HouseNotFound();
     if (supportsMongoTransactions() === false) {
       throw Errors.ServiceUnavailable('MongoDB transactions required for tenant create');
     }
+    const tenantId = new mongoose.Types.ObjectId();
+    const registrationLinkId = new mongoose.Types.ObjectId();
+    const registrationMessageId = new mongoose.Types.ObjectId();
+    const registrationToken = generateBearerToken();
     const session = await mongoose.startSession();
     try {
       let tenant;
       await session.withTransaction(async () => {
+        // House/Estate ownership is checked inside the same transaction as occupancy.
+        const house = await House.findOne({ _id: data.houseId, clientId }).session(session);
+        if (!house || house.isActive === false) throw Errors.HouseNotFound();
+        const estate = await Estate.findOne({ _id: house.estateId, clientId }).session(session).lean();
+        if (!estate?.name) throw Errors.Conflict('House Estate ownership could not be verified');
         const [created] = await Tenant.create(
-          [{ ...data, clientId, estateId: house.estateId, status: 'active' }],
+          [{ ...data, phone: typeof data.phone === 'string' && data.phone.trim() ? data.phone.trim() : null, _id: tenantId, clientId, estateId: house.estateId, status: 'active' }],
           { session }
         );
         tenant = created;
-        await tenancyService.open({
+        const tenancy = await tenancyService.open({
           clientId, estateId: house.estateId, houseId: house._id,
           tenantId: tenant._id, startAt: data.moveInDate || new Date(), actorUserId,
         }, { session });
+
+        // Registration statements are informational snapshots only. Never generate
+        // financial charges here or alter the G3 billing/partial-period policy.
+        const period = dateUtil.currentPeriod();
+        const currentCharges = await RentCharge.find({
+          clientId, estateId: house.estateId, tenancyId: tenancy._id, period,
+        }).session(session).lean();
+        let billText = 'Current billing details are not available yet.';
+        if (currentCharges.length) {
+          try {
+            const totals = aggregateRentCharges(currentCharges);
+            billText = [
+              `Current bill ${period}:`,
+              `Rent ${money.format(totals.rentCents, estate.currency || 'KES')}`,
+              `Water ${money.format(totals.waterCents, estate.currency || 'KES')}`,
+              `Electricity ${money.format(totals.electricityCents, estate.currency || 'KES')}`,
+              `Other ${money.format(totals.otherCents, estate.currency || 'KES')}`,
+              `Paid ${money.format(totals.paidCents, estate.currency || 'KES')}`,
+              `Outstanding ${money.format(totals.totalOutstandingCents, estate.currency || 'KES')}`,
+              totals.dueDates.length ? `Due ${totals.dueDates.map((d) => dateUtil.format(d, 'DD MMM YYYY')).join(', ')}` : null,
+            ].filter(Boolean).join('. ') + '.';
+          } catch (err) {
+            logger.warn({ tenantId: String(tenant._id), estateId: String(house.estateId), code: err.code || 'BILLING_SNAPSHOT_INVALID' }, 'Registration billing snapshot omitted because source data was invalid');
+            billText = 'Current billing details are temporarily unavailable.';
+          }
+        }
+        const registrationText = `Registration confirmed for ${tenant.name}, House ${house.houseNumber}. ${billText}`;
+        const provision = await mpesaSubmissionLinkService.provisionForRegistration({
+          clientId, estateId: house.estateId, tenant, house, estate,
+          registrationText, session, linkId: registrationLinkId,
+          messageId: registrationMessageId, token: registrationToken, actorUserId,
+        });
+
+        // Exactly one welcome path: protected M-PESA onboarding OR ordinary SMS.
+        // No phone means no outbox row, but a valid tenant/tenancy still commits.
+        if (!provision.eligible) {
+          if (tenant.phone) {
+            // BankAccount is a statement-ingestion connection, not an authoritative
+            // rent-receiving destination. Do not expose it as payment instructions.
+            const ordinaryRegistrationText = registrationText + ' For verified bank payment instructions, contact the estate office.';
+            await smsService.queueSms({
+              clientId, estateId: house.estateId, tenantId: tenant._id, houseId: house._id,
+              to: tenant.phone, message: ordinaryRegistrationText,
+              type: 'tenant_registration', priority: 8, period,
+              notificationVersion: 'tenant_registration:v1',
+              idempotencyKey: `registration:${String(tenant._id)}:v1`,
+              session,
+            });
+          } else {
+            await AuditLog.create([{
+              clientId, estateId: house.estateId, userId: actorUserId || undefined,
+              action: 'TENANT_REGISTRATION_SMS_BLOCKED',
+              resource: 'Tenant', resourceId: String(tenant._id),
+              description: 'Registration SMS could not be queued because the tenant phone number is missing',
+              metadata: { reason: 'tenant_phone_missing' },
+            }], { session });
+            logger.warn({ tenantId: String(tenant._id), estateId: String(house.estateId), reason: 'tenant_phone_missing' }, 'Tenant registration SMS was not queued because the tenant has no phone number');
+          }
+        }
       });
       return tenant;
     } finally {
-      session.endSession();
+      await session.endSession();
     }
   },
 

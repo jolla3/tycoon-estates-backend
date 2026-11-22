@@ -72,10 +72,11 @@ function buildOnboardingBody({ estateName, tillCode, token, registrationText = n
 async function queueOnboarding({ clientId, estateId, tenant, link, token, merchant, estateName, registrationText = null, session = null, messageId = null, attempt = 'delivery' }) {
   const phone = tenant?.phone && String(tenant.phone).trim();
   const tillCode = merchant?.businessShortCode ? String(merchant.businessShortCode) : null;
-  if (!phone || !tillCode || !env.G5_PUBLIC_PAYMENT_URL || !estateName) {
-    const reason = !phone ? 'tenant_phone_missing'
-      : !tillCode ? 'merchant_till_unavailable'
-        : !env.G5_PUBLIC_PAYMENT_URL ? 'public_payment_url_missing' : 'estate_name_missing';
+  if (env.G5_PROTECTED_SMS_ENABLED !== '1' || !phone || !tillCode || !env.G5_PUBLIC_PAYMENT_URL || !estateName) {
+    const reason = env.G5_PROTECTED_SMS_ENABLED !== '1' ? 'protected_sms_disabled'
+      : !phone ? 'tenant_phone_missing'
+        : !tillCode ? 'merchant_till_unavailable'
+          : !env.G5_PUBLIC_PAYMENT_URL ? 'public_payment_url_missing' : 'estate_name_missing';
     logger.info({ reason, linkId: String(link._id) }, 'G5 onboarding SMS not queued');
     return { queued: false, reason };
   }
@@ -323,8 +324,13 @@ export const mpesaSubmissionLinkService = {
     if (!resolution.merchant || resolution.ambiguous) {
       return { eligible: false, reason: resolution.ambiguous ? 'estate_till_ambiguous' : 'estate_till_unavailable' };
     }
-    if (!tenant?.phone || !env.G5_PUBLIC_PAYMENT_URL || !estate?.name) {
-      return { eligible: false, reason: !tenant?.phone ? 'tenant_phone_missing' : !env.G5_PUBLIC_PAYMENT_URL ? 'public_payment_url_missing' : 'estate_name_missing' };
+    if (env.G5_PROTECTED_SMS_ENABLED !== '1' || !tenant?.phone || !env.G5_PUBLIC_PAYMENT_URL || !estate?.name) {
+      return {
+        eligible: false,
+        reason: env.G5_PROTECTED_SMS_ENABLED !== '1' ? 'protected_sms_disabled'
+          : !tenant?.phone ? 'tenant_phone_missing'
+            : !env.G5_PUBLIC_PAYMENT_URL ? 'public_payment_url_missing' : 'estate_name_missing',
+      };
     }
     const existing = await MpesaSubmissionLink.findOne({ clientId, estateId, tenantId: tenant._id })
       .session(session).select('+tokenDigest +tokenEnvelope');
