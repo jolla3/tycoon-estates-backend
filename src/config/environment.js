@@ -46,6 +46,37 @@ function optional(name) {
   return value || undefined;
 }
 
+function optionalHttpsOrigin(name) {
+  const value = optional(name);
+  if (!value) return undefined;
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      `[config] ${name} must be one HTTPS origin, for example https://tycoon-frontend.vercel.app`
+    );
+  }
+
+  if (
+    value.includes(',') ||
+    parsed.protocol !== 'https:' ||
+    parsed.origin !== value ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    parsed.username !== '' ||
+    parsed.password !== ''
+  ) {
+    throw new Error(
+      `[config] ${name} must be one HTTPS origin without a path, query, fragment, credentials, or comma-separated hosts`
+    );
+  }
+
+  return parsed.origin;
+}
+
 function requiredEncryptionKey() {
   const key = required('ENCRYPTION_KEY');
   if (!/^[0-9a-fA-F]{64}$/.test(key)) {
@@ -61,6 +92,8 @@ export const env = {
   NODE_ENV,
   PORT: parseInt(process.env.PORT || '4000', 10),
   FRONTEND_URL: (optional('FRONTEND_URL') || 'http://localhost:5173').replace(/\/+$/, ''),
+  // One customer-facing payment origin. Keep FRONTEND_URL as the multi-origin CORS allowlist.
+  G5_PUBLIC_PAYMENT_URL: optionalHttpsOrigin('G5_PUBLIC_PAYMENT_URL'),
   TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS || '1', 10),
 
   MONGODB_URI: isTest
