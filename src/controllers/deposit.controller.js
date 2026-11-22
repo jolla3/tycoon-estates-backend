@@ -8,7 +8,12 @@ function idempotencyKeyFrom(req) {
 export const depositController = {
   async get(req, res, next) {
     try {
-      const data = await depositService.getForTenant(req.clientId, req.params.tenantId, req.estateFilter);
+      const { tenancyId, estateId } = req.query;
+      const data = tenancyId
+        ? await depositService.getExact(
+          req.clientId, { tenantId: req.params.tenantId, tenancyId, estateId }, req.estateFilter
+        )
+        : await depositService.getForTenant(req.clientId, req.params.tenantId, req.estateFilter);
       apiResponse.success(res, data);
     } catch (err) {
       next(err);
@@ -18,7 +23,7 @@ export const depositController = {
     try {
       const dep = await depositService.ensureRequired(
         req.clientId,
-        { tenantId: req.params.tenantId, requiredCents: req.body.requiredCents, moveInDate: req.body.moveInDate },
+        { tenantId: req.params.tenantId, tenancyId: req.body.tenancyId, estateId: req.body.estateId, requiredCents: req.body.requiredCents, moveInDate: req.body.moveInDate },
         req.currentUser,
         req.estateFilter
       );
@@ -35,7 +40,7 @@ export const depositController = {
         req.body.amountCents,
         req.currentUser,
         req.estateFilter,
-        { idempotencyKey: idempotencyKeyFrom(req) }
+        { idempotencyKey: idempotencyKeyFrom(req), tenancyId: req.body.tenancyId, estateId: req.body.estateId }
       );
       apiResponse.success(res, dep, 'Deposit payment recorded');
     } catch (err) {
@@ -44,13 +49,14 @@ export const depositController = {
   },
   async deduct(req, res, next) {
     try {
+      const { tenancyId: _t, estateId: _e, ...deduction } = req.body;
       const dep = await depositService.addDeduction(
         req.clientId,
         req.params.tenantId,
-        req.body,
+        deduction,
         req.currentUser,
         req.estateFilter,
-        { idempotencyKey: idempotencyKeyFrom(req) }
+        { idempotencyKey: idempotencyKeyFrom(req), tenancyId: req.body.tenancyId, estateId: req.body.estateId }
       );
       apiResponse.success(res, dep, 'Deduction recorded');
     } catch (err) {
@@ -63,9 +69,10 @@ export const depositController = {
         req.clientId,
         req.params.tenantId,
         req.currentUser,
-        req.estateFilter
+        req.estateFilter,
+        { tenancyId: req.body?.tenancyId, estateId: req.body?.estateId }
       );
-      apiResponse.success(res, data, 'Move-out settlement completed');
+      apiResponse.success(res, data, 'Deposit settled');
     } catch (err) {
       next(err);
     }

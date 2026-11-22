@@ -40,14 +40,11 @@ export class CoopBankProvider extends BankProviderInterface {
     // baseUrl is platform endpoint config (not customer secret).
     this.baseUrl = config.baseUrl || env.COOP_BASE_URL;
     // Customer credential fields: connection-scoped only. No env fallback
-    // for clientId/secret/username/password/scope/ins secret on customer paths.
+    // for consumerKey/consumerSecret/ins secret on customer paths.
     this.auth = new CoopAuthService({
       baseUrl: this.baseUrl,
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-      username: config.username,
-      password: config.password,
-      scope: config.scope,
+      consumerKey: config.consumerKey,
+      consumerSecret: config.consumerSecret,
     });
     this.insBasicSecret = config.insBasicSecret;
     this.connectionId = config.connectionId || null;

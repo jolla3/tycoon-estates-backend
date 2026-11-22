@@ -71,6 +71,8 @@ jest.unstable_mockModule(
   '../../src/services/audit.service.js',
   () => ({
     audit: jest.fn().mockResolvedValue(undefined),
+    auditRequired: jest.fn().mockResolvedValue(undefined),
+    listAuditLogs: jest.fn().mockResolvedValue([]),
   })
 );
 

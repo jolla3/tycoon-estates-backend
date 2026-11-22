@@ -1,6 +1,6 @@
 # Co-op Connect APIs 2.0.0 — Implementation Traceability and Preflight Challenge
 
-**Status:** pre-implementation specification. No application code is changed by this document.  
+**Status:** Target implementation specification with current-main source reconciliation appended below. The correction remains outstanding; this documentation commit does not change application code.  
 **Audited implementation baseline:** `jolla3/tycoon-estates-backend` branch `docs/superadmin-onboarding-and-history` at `2f1bad7fd674babf26fd86e51036a4be0ea06ad6`; `jolla3/tycoon-frontend` branch `docs/superadmin-onboarding-and-history` at `bd78e8867f2642d77333d1dfc1f408235e179bbf`.  
 **Audit specification sources:** backend alignment commit `98cc95185b32507f5e3af8349acd824439cee015`; frontend alignment commit `a424179496f17b5ab905763403cdfa2c210bfce6`.  
 **Rule:** source line references below describe the audited baseline and will move after implementation. The source files at the baseline SHAs are the evidence, not these line numbers.
@@ -142,3 +142,36 @@ The current registry conflates some of these. The corrected path must fail close
 - Existing G3 transaction/ledger behaviour remains unchanged and passes regression.
 - No AccountTransactions polling, Balance or production webhook capability is represented as available without its evidence gate.
 - The final report names exact commits, tests and environments. No claim of sandbox or production readiness is made from source inspection or compilation alone.
+
+
+## 7. Current-main source reconciliation — 21 November 2026
+
+**Current backend main:** `0dbf7ef75ed6c1a39e24775aec9a86e08f7d0617`  
+**Current frontend main:** `a27f20dd3244cdc7370cffa16b70c6cd32a45576`
+
+The requirements above remain the target. The merged current source still does not satisfy the normal credential contract end-to-end:
+
+- The frontend onboarding form sends the legacy `{ clientId, clientSecret, username, password, scope? }` shape.
+- Backend strict create/reauthorize validation accepts `{ consumerKey, consumerSecret }` and rejects the legacy keys. This explains the observed 422 at validation.
+- Updating only the frontend will not complete the repair: `bank.factory.js` still passes the legacy credential context, and the Co-op auth adapter still expects username/password/scope and uses the password grant.
+
+The correction must align the frontend DTO, backend validator, credential mapping, provider auth implementation and tests with the G4 PRD/architecture decision: normal onboarding accepts Co-op CK/SK and uses the documented CK/SK-only `client_credentials` flow; grant/scope/resource configuration is trusted provider configuration, not landlord-entered data. `BankConnection.clientId` remains Tycoon's owning Client ID and must never be replaced with the Co-op Consumer Key.
+
+This source correction does **not** clear unresolved resource-specific scope, token lifetime, production host or endpoint evidence. Keep unverified operations and `operationalReady` gated. Do not claim a working Co-op integration merely because the 422 is removed.
+
+Required proof: frontend request-body tests; strict validator accept/reject tests; factory-to-auth credential mapping tests; token request fixture with no customer username/password; token cache isolation by connection/credential version/config; failure and rotation race tests; existing G3 reconciliation regression. Sandbox evidence remains a separate gate.
+
+
+## Current implementation hold — 21 November 2026
+
+The CK/SK request-contract correction is a credential-shape and authentication implementation task only. It does **not** establish Co-op production readiness.
+
+Keep `operationalReady` false and keep unverified resource capabilities unavailable until the evidence is complete for each resource: accepted grant and token type, exact scope, token expiry/refresh lifecycle, production host and route, subscribed product access, request/response schema, and successful provider-approved verification. Do not enable production Pull registration/reconciliation, production webhook processing or Balance/AccountTransactions capabilities from adapter presence, a successful token request, compilation or mocked tests alone. Sandbox and production approval remain separate gates.
+
+## Verified-gap correction (branch `fix/verified-platform-gaps`) — Co-op credential contract
+
+Implemented: customer credentials are `consumerKey`/`consumerSecret` only. Request schemas are strict (unknown or legacy fields — `clientId`, `clientSecret`, `username`, `password`, `scope`, PIN/OTP — are rejected, including next to `credentialMaterial`). `bank.factory.js` maps only CK/SK; legacy stored material is not mapped and fails closed at authentication. `BankConnection.clientId` remains the Tycoon owner Client ID. Credential versioning, staged reauthorization and retention of the previous credential on failed reauthorization are unchanged. Tokens are connection-scoped, single-flight per adapter, cached only for a response-supplied `expires_in`, and never logged.
+
+Deliberately NOT done (unresolved provider requirement): the token request contract is platform configuration without defaults (`COOP_TOKEN_PATH`, `COOP_TOKEN_GRANT_TYPE`, optional `COOP_TOKEN_SCOPE`). Co-op must confirm in writing/sandbox: (1) the token path per environment, (2) the grant type for each resource (AccountFullStatement, AccountValidation, AccountBalance, AccountTransactions), (3) the scope string(s) per resource, (4) token TTL and whether refresh tokens exist, (5) production hosts. Until then `operationalReady` stays `false`, unverified operations stay fail-closed, AccountTransactions polling, Balance and the production webhook are not enabled. Tests that touch the provider mock the HTTP layer; they are not sandbox verification.
+
+Documentation contradiction noted (C2-022, not resolved here): this file describes the normal flow as a documented CK/SK `client_credentials` POST, while the readiness profile and fail-closed rules treat the grant as unverified. The implementation follows the stricter reading (configuration required, no default).

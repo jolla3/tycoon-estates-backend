@@ -160,11 +160,12 @@ export function createBankProviderForConnection(providerName, credentialContext,
       // platform configuration, never tenant-controlled credential material.
       // CoopBankProvider resolves COOP_BASE_URL from trusted environment config.
       return new CoopBankProvider({
-        clientId: credentialContext.clientId,
-        clientSecret: credentialContext.clientSecret,
-        username: credentialContext.username,
-        password: credentialContext.password,
-        scope: credentialContext.scope,
+        // CK/SK only. Legacy keys (clientId/clientSecret/username/password/
+        // scope) are deliberately NOT mapped, so stored legacy material
+        // fails closed at authenticate() instead of being half-used.
+        // BankConnection.clientId (Tycoon owner) is unrelated and never here.
+        consumerKey: credentialContext.consumerKey,
+        consumerSecret: credentialContext.consumerSecret,
         connectionId: cacheKey.connectionId,
         credentialVersion: cacheKey.credentialVersion,
       });

@@ -27,6 +27,10 @@ export const houseTypeCreateSchema = z.object({
   defaultDueDay: z.coerce.number().int().min(1).max(31).optional(),
   defaultBilling: z.array(billingLine).optional(),
   isActive: z.boolean().optional(),
+  // Versioned plan terms: validate() strips unknown keys, so these must be declared
+  // or the service never receives them and silently falls back to its defaults.
+  effectiveFromPeriod: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Use YYYY-MM').optional(),
+  changeReason: z.string().trim().min(1).max(500).optional(),
 });
 
 // Estate ownership is immutable. estateId stays in the update schema (validated, optional) so

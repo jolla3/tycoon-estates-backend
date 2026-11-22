@@ -25,10 +25,10 @@ describe('bank factory connection isolation', () => {
 
   test('two COOP adapters are distinct instances (no provider-name singleton)', () => {
     const a = createBankProviderForConnection('COOP', {
-      clientId: 'a', clientSecret: 'a', username: 'a', password: 'a', scope: 's',
+      consumerKey: 'a', consumerSecret: 'a',
     }, { connectionId: 'conn-a', credentialVersion: 1 });
     const b = createBankProviderForConnection('COOP', {
-      clientId: 'b', clientSecret: 'b', username: 'b', password: 'b', scope: 's',
+      consumerKey: 'b', consumerSecret: 'b',
     }, { connectionId: 'conn-b', credentialVersion: 2 });
     expect(a).not.toBe(b);
     expect(a.connectionId).toBe('conn-a');
@@ -50,11 +50,14 @@ describe('bank factory connection isolation', () => {
       {
         baseUrl: untrustedBaseUrl,
         insBasicSecret: untrustedWebhookSecret,
-        clientId: 'tenant-client-id',
-        clientSecret: 'tenant-client-secret',
-        username: 'tenant-username',
-        password: 'tenant-password',
-        scope: 'account.read',
+        consumerKey: 'tenant-ck',
+        consumerSecret: 'tenant-sk',
+        // legacy keys must be ignored, never mapped
+        clientId: 'legacy-id',
+        clientSecret: 'legacy-secret',
+        username: 'legacy-user',
+        password: 'legacy-pass',
+        scope: 'legacy.scope',
       },
       {
         connectionId: 'connection-test',
@@ -70,11 +73,11 @@ describe('bank factory connection isolation', () => {
     expect(provider.insBasicSecret).toBeUndefined();
 
     // Customer-specific OAuth credentials still reach the auth service.
-    expect(provider.auth.clientId).toBe('tenant-client-id');
-    expect(provider.auth.clientSecret).toBe('tenant-client-secret');
-    expect(provider.auth.username).toBe('tenant-username');
-    expect(provider.auth.password).toBe('tenant-password');
-    expect(provider.auth.scope).toBe('account.read');
+    expect(provider.auth.consumerKey).toBe('tenant-ck');
+    expect(provider.auth.consumerSecret).toBe('tenant-sk');
+    for (const legacy of ['clientId', 'clientSecret', 'username', 'password', 'scope']) {
+      expect(provider.auth[legacy]).toBeUndefined();
+    }
   });
   test('COOP lab access requires the explicit flag and is rejected in production', () => {
     expect(() => assertProviderOperational('COOP', {

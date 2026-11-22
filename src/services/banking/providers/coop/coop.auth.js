@@ -1,106 +1,97 @@
 // src/services/banking/providers/coop/coop.auth.js
 //
-// Rewritten against Co-op Connect's actual documented auth flow (the V1
-// version of this file assumed a generic client_credentials POST — that
-// was wrong; this replaces it).
+// Co-op Connect token acquisition for ONE bank connection.
 //
-// Per the supplied Co-op Connect docs ("Authentication" section):
+// Customer credential contract: consumerKey + consumerSecret (CK/SK) only.
+// No username/password/PIN/OTP, no tenant-supplied scope.
 //
-//   1. Dynamic Client Registration (DCR) — a ONE-TIME setup step done via
-//      the developer portal / a registration call, producing a
-//      clientId/clientSecret pair. This is not a runtime concern for this
-//      service; COOP_CLIENT_ID / COOP_CLIENT_SECRET are assumed to already
-//      exist by the time this code runs.
+// What is NOT verified (and therefore not hard-coded here): the OAuth grant
+// type, the token path, the scope string(s), the token TTL when the response
+// omits `expires_in`, refresh-token use, and production hosts. They come from
+// platform configuration (COOP_TOKEN_PATH, COOP_TOKEN_GRANT_TYPE,
+// COOP_TOKEN_SCOPE). If the path or grant type is not configured,
+// authentication fails closed WITHOUT any network call. The exact outstanding
+// provider requirement is recorded in docs/provider-contracts/.
 //
-//   2. Token acquisition — the documented example uses the OAuth2
-//      *password* grant, NOT client_credentials:
-//
-//        curl https://<host>:<gateway_port>/token -k \
-//          -H "Authorization: Basic base64(client_id:client_secret)" \
-//          -d "grant_type=password&username=<u>&password=<p>&scope=<scopes>"
-//
-//      i.e. form-urlencoded body, Basic-auth'd with the DCR client
-//      credentials, resource-owner username/password as separate
-//      COOP_USERNAME/COOP_PASSWORD env vars, and a scope string whose
-//      actual value for AccountTransactions/AccountFullStatement/
-//      AccountBalance/AccountValidation was NOT given in the supplied
-//      docs — COOP_SCOPE is configurable precisely because of that gap.
-//
-//   3. Response: { access_token, refresh_token, scope, token_type,
-//      expires_in }. Token is cached and reused until near expiry.
+// Tokens live only in this instance (connection-scoped; never shared across
+// connections) and are never logged. Secrets never appear in errors or logs.
 
 import axios from 'axios';
+import { env } from '../../../../config/environment.js';
 import { logger } from '../../../../config/logger.js';
 import { Errors } from '../../../../utils/errors.js';
 
 const EXPIRY_SAFETY_MARGIN_MS = 60_000;
 
 export class CoopAuthService {
-  constructor({ baseUrl, clientId, clientSecret, username, password, scope }) {
+  constructor({ baseUrl, consumerKey, consumerSecret, tokenConfig } = {}) {
     this.baseUrl = baseUrl;
-    this.clientId = clientId;
-    this.clientSecret = clientSecret;
-    this.username = username;
-    this.password = password;
-    this.scope = scope;
+    this.consumerKey = consumerKey;
+    this.consumerSecret = consumerSecret;
+    this.tokenConfig = tokenConfig || {
+      path: env.COOP_TOKEN_PATH,
+      grantType: env.COOP_TOKEN_GRANT_TYPE,
+      scope: env.COOP_TOKEN_SCOPE,
+    };
     this._token = null;
-    this._refreshToken = null;
     this._expiresAt = 0;
+    this._inflight = null;
   }
 
   async getAccessToken() {
     if (this._token && Date.now() < this._expiresAt - EXPIRY_SAFETY_MARGIN_MS) {
       return this._token;
     }
-    return this._requestNewToken();
+    // Single-flight: concurrent callers share one token request.
+    if (!this._inflight) {
+      this._inflight = this._requestNewToken().finally(() => { this._inflight = null; });
+    }
+    return this._inflight;
   }
 
   async _requestNewToken() {
-    if (!this.clientId || !this.clientSecret) {
-      throw Errors.BankAuthFailed('COOP_CLIENT_ID / COOP_CLIENT_SECRET are not configured');
+    if (!this.consumerKey || !this.consumerSecret) {
+      throw Errors.BankAuthFailed('Co-op consumer key and secret are required for this connection');
     }
-    if (!this.username || !this.password) {
-      throw Errors.BankAuthFailed('COOP_USERNAME / COOP_PASSWORD are not configured (Co-op Connect uses the password grant, not client_credentials)');
-    }
-    if (!this.scope) {
-      // Deliberately not defaulting to a guessed value (e.g. "default")
-      // — sending an OAuth scope Co-op never actually granted can look
-      // like a working integration right up until the first call that
-      // genuinely needs a scope 401s. Fail loudly and immediately instead.
-      throw Errors.BankAuthFailed('COOP_SCOPE is not configured — get the required scope string(s) from Co-op\'s developer portal for your subscribed APIs before connecting a real account');
+    const { path, grantType, scope } = this.tokenConfig;
+    if (!this.baseUrl || !path || !grantType) {
+      // Deliberately no guessed grant/path/scope: sending an unverified
+      // contract can look like a working integration until a real call fails.
+      throw Errors.BankAuthFailed('Co-op token contract is not configured for this platform');
     }
 
-    const basicAuth = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64');
-    const body = new URLSearchParams({
-      grant_type: 'password',
-      username: this.username,
-      password: this.password,
-      scope: this.scope,
-    });
+    const basicAuth = Buffer.from(`${this.consumerKey}:${this.consumerSecret}`).toString('base64');
+    const form = new URLSearchParams({ grant_type: grantType });
+    if (scope) form.set('scope', scope);
 
     try {
-      const response = await axios.post(`${this.baseUrl}/token`, body.toString(), {
+      const response = await axios.post(`${this.baseUrl}${path}`, form.toString(), {
         headers: {
           Authorization: `Basic ${basicAuth}`,
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         timeout: 15000,
       });
-
-      this._token = response.data.access_token;
-      this._refreshToken = response.data.refresh_token || null;
-      const expiresInMs = (response.data.expires_in || 3600) * 1000;
-      this._expiresAt = Date.now() + expiresInMs;
-
-      logger.info({ expiresInSec: response.data.expires_in, scope: response.data.scope }, 'Co-op access token acquired');
-      return this._token;
+      const token = response.data?.access_token;
+      if (!token || typeof token !== 'string') {
+        throw new Error('token response missing access_token');
+      }
+      this._token = token;
+      // Cache only for a provider-stated lifetime. No assumed TTL: without a
+      // valid expires_in the token is used once and re-requested next time.
+      const ttlSec = Number(response.data.expires_in);
+      this._expiresAt = Number.isFinite(ttlSec) && ttlSec > 0 ? Date.now() + ttlSec * 1000 : 0;
+      logger.info('Co-op access token acquired');
+      return token;
     } catch (err) {
-      logger.error({ error: err.message, status: err.response?.status }, 'Co-op authentication failed');
+      // Never log err.config (carries the Authorization header) or response bodies.
+      logger.error({ status: err.response?.status }, 'Co-op authentication failed');
+      this.invalidate();
       throw Errors.BankAuthFailed('Failed to authenticate with Co-op Bank');
     }
   }
 
-  /** Forces a refresh on the next getAccessToken() call — e.g. after a 401 from Co-op. */
+  /** Forces a new token on the next getAccessToken() call (e.g. after a 401). */
   invalidate() {
     this._token = null;
     this._expiresAt = 0;

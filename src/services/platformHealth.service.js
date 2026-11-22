@@ -26,7 +26,7 @@ const safe = async (fn, fallback = null) => {
 
 async function bankingHealth(mongoReady) {
   const coopConfigured = Boolean(
-    env.COOP_BASE_URL && env.COOP_CLIENT_ID && env.COOP_CLIENT_SECRET && env.COOP_USERNAME && env.COOP_PASSWORD
+    env.COOP_BASE_URL && env.COOP_TOKEN_PATH && env.COOP_TOKEN_GRANT_TYPE
   );
   let clientConnections = null;
   let lastAuthAt = null;

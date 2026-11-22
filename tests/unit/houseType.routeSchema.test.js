@@ -26,3 +26,15 @@ describe('houseType route schemas', () => {
     expect(houseTypeUpdateSchema.safeParse({ defaultRentCents: 1000 }).success).toBe(true);
   });
 });
+
+describe('versioned plan fields reach the service', () => {
+  it('update keeps effectiveFromPeriod and changeReason (not stripped)', () => {
+    const r = houseTypeUpdateSchema.safeParse({ defaultRentCents: 5000, effectiveFromPeriod: '2027-01', changeReason: 'Annual review' });
+    expect(r.success).toBe(true);
+    expect(r.data).toMatchObject({ effectiveFromPeriod: '2027-01', changeReason: 'Annual review' });
+  });
+  it('rejects a malformed effective period', () => {
+    expect(houseTypeUpdateSchema.safeParse({ effectiveFromPeriod: '2027-13' }).success).toBe(false);
+    expect(houseTypeUpdateSchema.safeParse({ effectiveFromPeriod: 'Jan' }).success).toBe(false);
+  });
+});

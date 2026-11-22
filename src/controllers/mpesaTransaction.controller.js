@@ -9,4 +9,11 @@ export const mpesaTransactionController = {
       next(err);
     }
   },
+  async summary(req, res, next) {
+    try {
+      apiResponse.success(res, await mpesaTransactionService.summary(req.clientId, req.estateFilter, req.query));
+    } catch (err) {
+      next(err);
+    }
+  },
 };

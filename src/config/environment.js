@@ -75,11 +75,13 @@ export const env = {
   ENCRYPTION_KEY: requiredEncryptionKey(),
 
   COOP_BASE_URL: optional('COOP_BASE_URL'),
-  COOP_CLIENT_ID: optional('COOP_CLIENT_ID'),
-  COOP_CLIENT_SECRET: optional('COOP_CLIENT_SECRET'),
-  COOP_USERNAME: optional('COOP_USERNAME'),
-  COOP_PASSWORD: optional('COOP_PASSWORD'),
-  COOP_SCOPE: optional('COOP_SCOPE') || null,
+  // Token-endpoint contract is PLATFORM configuration and has no default:
+  // the grant type, path and scope for Co-op Connect are not verified, so an
+  // unset value makes authentication fail closed (no network call).
+  // Tenant credentials are consumerKey/consumerSecret only (per connection).
+  COOP_TOKEN_PATH: optional('COOP_TOKEN_PATH') || null,
+  COOP_TOKEN_GRANT_TYPE: optional('COOP_TOKEN_GRANT_TYPE') || null,
+  COOP_TOKEN_SCOPE: optional('COOP_TOKEN_SCOPE') || null,
   COOP_INS_BASIC_SECRET: optional('COOP_INS_BASIC_SECRET'),
   BANK_SECRETS_ENCRYPTION_KEY: optional('BANK_SECRETS_ENCRYPTION_KEY') || '',
   BANK_SECRETS_ENCRYPTION_KEY_PREVIOUS: optional('BANK_SECRETS_ENCRYPTION_KEY_PREVIOUS') || '',
