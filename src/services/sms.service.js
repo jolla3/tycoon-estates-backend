@@ -25,7 +25,37 @@ import { audit } from './audit.service.js';
 
 const TEMPLATES = {
   rent_reminder: ({ tenantName, houseNumber, balanceCents, currency }) =>
-    `Dear ${tenantName}, House ${houseNumber} has an outstanding rent balance of ${money.format(balanceCents, currency)}. Kindly settle it at your earliest convenience.`,
+    'Dear ' + tenantName + ', House ' + houseNumber + ' has an outstanding rent balance of ' +
+      money.format(balanceCents, currency) + '. Kindly settle it at your earliest convenience.',
+  rent_reminder_d5: ({
+    tenantName, houseNumber, period, dueDate,
+    rentOutstandingCents, waterOutstandingCents,
+    electricityOutstandingCents, otherOutstandingCents,
+    previousArrearsCents, totalOutstandingCents, currency = 'KES',
+  }) => {
+    for (const [field, value] of Object.entries({
+      rentOutstandingCents, waterOutstandingCents,
+      electricityOutstandingCents, otherOutstandingCents,
+      previousArrearsCents, totalOutstandingCents,
+    })) {
+      requireTemplateCents(value, field);
+    }
+    for (const [field, value] of Object.entries({ tenantName, houseNumber, period, dueDate })) {
+      if (typeof value !== 'string' || !value.trim()) {
+        throw Errors.InvalidRequest('Cannot render D-5 reminder without ' + field);
+      }
+    }
+    return [
+      'Rent due in five days on ' + dueDate + ' for ' + tenantName +
+        ', House ' + houseNumber + ' (' + period + ').',
+      rentOutstandingCents ? 'Rent outstanding: ' + money.format(rentOutstandingCents, currency) + '.' : null,
+      waterOutstandingCents ? 'Water outstanding: ' + money.format(waterOutstandingCents, currency) + '.' : null,
+      electricityOutstandingCents ? 'Electricity outstanding: ' + money.format(electricityOutstandingCents, currency) + '.' : null,
+      otherOutstandingCents ? 'Other outstanding: ' + money.format(otherOutstandingCents, currency) + '.' : null,
+      previousArrearsCents ? 'Previous arrears: ' + money.format(previousArrearsCents, currency) + '.' : null,
+      'Total outstanding: ' + money.format(totalOutstandingCents, currency) + '.',
+    ].filter(Boolean).join(' ');
+  },
   payment_confirmation: ({ tenantName, houseNumber, amountCents, balanceCents, currency }) =>
     `Dear ${tenantName}, we have received your payment of ${money.format(amountCents, currency)} for House ${houseNumber}. Remaining balance: ${money.format(Math.max(balanceCents, 0), currency)}. Thank you.`,
   arrears_notice: ({ tenantName, houseNumber, monthsOverdue, balanceCents, currency }) =>
