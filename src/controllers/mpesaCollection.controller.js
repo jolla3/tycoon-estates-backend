@@ -16,7 +16,16 @@ export const mpesaCollectionController = {
   inspectLink: wrap(async (req, res) => apiResponse.success(res, { link: await mpesaSubmissionLinkService.inspect(await scopedTenant(req)) })),
   issueLink: wrap(async (req, res) => {
     res.set('Cache-Control', 'no-store');
-    return apiResponse.success(res, await mpesaSubmissionLinkService.issue(await scopedTenant(req)), 'Link issued; token is shown once', 201);
+    const result = await mpesaSubmissionLinkService.issue(await scopedTenant(req));
+    return apiResponse.success(res, result, result.created ? 'Payment link created' : 'Existing payment link reused', result.created ? 201 : 200);
+  }),
+  resendLink: wrap(async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return apiResponse.success(res, await mpesaSubmissionLinkService.resend(await scopedTenant(req)), 'Existing payment link delivery queued');
+  }),
+  rotateLink: wrap(async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return apiResponse.success(res, await mpesaSubmissionLinkService.rotate({ ...(await scopedTenant(req)), expectedLinkVersion: req.body.expectedLinkVersion }), 'Payment link security rotation completed');
   }),
   revokeLink: wrap(async (req, res) => apiResponse.success(res, { link: await mpesaSubmissionLinkService.revoke(await scopedTenant(req)) })),
   references: wrap(async (req, res) => {

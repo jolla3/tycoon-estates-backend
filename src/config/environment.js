@@ -142,6 +142,30 @@ export const env = {
   DARAJA_PULL_RECONCILIATION_ENABLED: optional('DARAJA_PULL_RECONCILIATION_ENABLED') === '1' ? '1' : '',
 };
 
+
+function validateG5EnvelopeKeyring() {
+  const raw = optional('G5_ENVELOPE_KEYS');
+  if (!raw) {
+    if (!isTest && (env.G5_PROTECTED_SMS_ENABLED === '1' || env.G5_PUBLIC_PAYMENT_URL)) {
+      throw new Error('[config] G5_ENVELOPE_KEYS is required when public payment links or protected SMS are enabled');
+    }
+    return;
+  }
+  const seen = new Set();
+  for (const part of raw.split(',').map((value) => value.trim()).filter(Boolean)) {
+    const pieces = part.split(':');
+    const [id, hex] = pieces;
+    if (pieces.length !== 2 || !/^[A-Za-z0-9_-]{1,16}$/.test(id || '') || !/^[0-9a-fA-F]{64}$/.test(hex || '') || seen.has(id)) {
+      throw new Error('[config] G5_ENVELOPE_KEYS entries must be unique id:64hex values');
+    }
+    seen.add(id);
+  }
+  if (seen.size === 0) throw new Error('[config] G5_ENVELOPE_KEYS contains no usable key');
+}
+
+// Validate at boot, before a tenant registration or dispatcher first touches the keyring.
+validateG5EnvelopeKeyring();
+
 export function isCrossSiteFrontend() {
   const raw = String(env.FRONTEND_URL || '');
   const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
