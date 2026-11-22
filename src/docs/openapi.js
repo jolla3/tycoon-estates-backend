@@ -247,7 +247,10 @@ export const openApiSpec = {
         tags: ['G5 M-PESA Collection'],
         summary: 'Inspect safe metadata for the Tenant submission link',
         description: 'Requires MPESA entitlement and an administrative role. Never returns a bearer token, token digest or token envelope.',
-        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [
+          { name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'estateId', in: 'query', required: false, description: 'Select the estate tenancy/link context when the tenant has records in multiple estates; defaults to the Tenant estate pointer.', schema: { type: 'string', pattern: '^[a-fA-F0-9]{24}$' } },
+        ],
         responses: { 200: { description: 'Safe link metadata' }, 404: { description: 'No link' } },
       },
       post: {
@@ -255,7 +258,10 @@ export const openApiSpec = {
         summary: 'Create a Tenant submission link or reuse the existing ACTIVE link',
         description: 'Requires CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN plus MPESA entitlement. Creates and queues the first protected onboarding message when no link exists. Reusing an ACTIVE link does not send another message; use /resend. Raw bearer token is never returned by the API.',
         security: [{ cookieAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [
+          { name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'estateId', in: 'query', required: false, description: 'Select the estate tenancy/link context when the tenant has records in multiple estates; defaults to the Tenant estate pointer.', schema: { type: 'string', pattern: '^[a-fA-F0-9]{24}$' } },
+        ],
         responses: {
           201: { description: 'Link created and protected onboarding SMS queued', content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkIssueResponse' } } } },
           200: { description: 'Existing ACTIVE link reused; no additional SMS was sent', content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkIssueResponse' } } } },
@@ -270,7 +276,10 @@ export const openApiSpec = {
         summary: 'Queue a new delivery attempt for the existing Tenant payment link',
         description: 'Requires CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN plus MPESA entitlement. Sends the same URL with the same linkVersion in a new protected outbox attempt. A short resend throttle may return queued=false. It never rotates the token.',
         security: [{ cookieAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [
+          { name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'estateId', in: 'query', required: false, description: 'Select the estate tenancy/link context when the tenant has records in multiple estates; defaults to the Tenant estate pointer.', schema: { type: 'string', pattern: '^[a-fA-F0-9]{24}$' } },
+        ],
         responses: {
           200: { description: 'Resend queued or throttled', content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkResendResponse' } } } },
           404: { description: 'No active link' },
@@ -284,7 +293,10 @@ export const openApiSpec = {
         summary: 'Explicitly rotate a Tenant payment link for security',
         description: 'Requires CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN plus MPESA entitlement. The expectedLinkVersion must match the inspected current version. Rotation creates a new token/version and queues its protected delivery; the raw token is never returned.',
         security: [{ cookieAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [
+          { name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'estateId', in: 'query', required: false, description: 'Select the estate tenancy/link context when the tenant has records in multiple estates; defaults to the Tenant estate pointer.', schema: { type: 'string', pattern: '^[a-fA-F0-9]{24}$' } },
+        ],
         requestBody: {
           required: true,
           content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkRotateRequest' } } },
@@ -298,7 +310,10 @@ export const openApiSpec = {
         summary: 'Administratively revoke the Tenant submission link',
         description: 'Requires CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN plus MPESA entitlement. Revocation invalidates the current token version and cancels protected messages that have not started sending.',
         security: [{ cookieAuth: [], csrfToken: [] }],
-        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        parameters: [
+          { name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'estateId', in: 'query', required: false, description: 'Select the estate tenancy/link context when the tenant has records in multiple estates; defaults to the Tenant estate pointer.', schema: { type: 'string', pattern: '^[a-fA-F0-9]{24}$' } },
+        ],
         responses: { 200: { description: 'Revoked' }, 404: { description: 'Link not found' } },
       },
     },

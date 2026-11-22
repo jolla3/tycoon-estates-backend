@@ -98,7 +98,6 @@ export async function smsReminderJob() {
     const tenantIds = [...new Set(groups.map(([, group]) => String(group.tenantId)))];
     const tenantRows = await Tenant.find({
       clientId: estate.clientId,
-      estateId: estate._id,
       _id: { $in: tenantIds },
     }).select('_id name phone').lean();
     const tenantById = new Map(tenantRows.map((row) => [String(row._id), row]));

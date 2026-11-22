@@ -47,7 +47,9 @@ function view(link, merchant) {
 }
 
 async function assertTenant(clientId, estateId, tenantId, session = null) {
-  const query = Tenant.findOne({ _id: tenantId, clientId, estateId }).select('_id name phone');
+  // Tenant.estateId is a mutable compatibility pointer. Estate membership is
+  // established by assertActiveEstateTenancy, not by this pointer.
+  const query = Tenant.findOne({ _id: tenantId, clientId }).select('_id name phone');
   if (session) query.session(session);
   const tenant = await query;
   if (!tenant) throw Errors.TenantNotFound();
