@@ -382,7 +382,8 @@ export const mpesaSubmissionLinkService = {
   },
 
   // Called from the tenancy-closing transaction. The tenant-level link survives
-  // one house closing, any other active occupancy, unpaid obligation or carried credit.
+  // while another ACTIVE Tenancy remains in the same estate; final active exit
+  // revokes it regardless of retained unpaid balances or carried credit.
   async revokeAfterEstateExit({ clientId, estateId, tenantId, session, actorUserId = null }) {
     if (!session) throw Errors.ServiceUnavailable('Link exit checks require the tenancy transaction');
     const active = await Tenancy.countDocuments({ clientId, estateId, tenantId, status: 'ACTIVE' }).session(session);

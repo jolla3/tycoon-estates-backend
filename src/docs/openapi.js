@@ -27,9 +27,81 @@ export const openApiSpec = {
           error: { type: 'object', properties: { code: { type: 'string' }, message: { type: 'string' } } },
         },
       },
+      TenantRegistrationRequest: {
+        type: 'object',
+        required: ['name', 'houseId'],
+        properties: {
+          name: { type: 'string', minLength: 1 },
+          phone: { type: 'string', nullable: true, description: 'Optional. Omit, send null or an empty string when the tenant has no phone.' },
+          houseId: { type: 'string', minLength: 1 },
+          moveInDate: { type: 'string', format: 'date', description: 'Optional move-in date.' },
+        },
+      },
+      MpesaTenantLink: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          tenantId: { type: 'string' },
+          estateId: { type: 'string' },
+          status: { type: 'string', enum: ['ACTIVE', 'REVOKED'] },
+          version: { type: 'integer', minimum: 1 },
+          rotatedAt: { type: 'string', format: 'date-time', nullable: true },
+          revokedAt: { type: 'string', format: 'date-time', nullable: true },
+          operational: { type: 'boolean' },
+        },
+        description: 'Safe link metadata only. Never contains the raw bearer token, token digest or encrypted token envelope.',
+      },
+      MpesaLinkIssueResponse: {
+        type: 'object',
+        properties: {
+          link: { $ref: '#/components/schemas/MpesaTenantLink' },
+          created: { type: 'boolean' },
+          smsMeta: {
+            type: 'object',
+            properties: {
+              queued: { type: 'boolean' },
+              created: { type: 'boolean' },
+              reason: { type: 'string', nullable: true },
+              messageId: { type: 'string', nullable: true },
+            },
+          },
+        },
+      },
+      MpesaLinkResendResponse: {
+        type: 'object',
+        properties: {
+          link: { $ref: '#/components/schemas/MpesaTenantLink' },
+          queued: { type: 'boolean' },
+          reason: { type: 'string', nullable: true },
+        },
+      },
+      MpesaLinkRotateRequest: {
+        type: 'object',
+        required: ['expectedLinkVersion'],
+        additionalProperties: false,
+        properties: {
+          expectedLinkVersion: { type: 'integer', minimum: 1, description: 'Current inspected link version; prevents rotating a stale link.' },
+        },
+      },
+      MpesaLinkRotateResponse: {
+        type: 'object',
+        properties: {
+          link: { $ref: '#/components/schemas/MpesaTenantLink' },
+          smsMeta: {
+            type: 'object',
+            properties: {
+              queued: { type: 'boolean' },
+              created: { type: 'boolean' },
+              reason: { type: 'string', nullable: true },
+              messageId: { type: 'string', nullable: true },
+            },
+          },
+        },
+      },
     },
     securitySchemes: {
       cookieAuth: { type: 'apiKey', in: 'cookie', name: 'connect.sid' },
+      csrfToken: { type: 'apiKey', in: 'header', name: 'X-CSRF-Token', description: 'Required for state-changing authenticated API requests.' },
     },
   },
   security: [{ cookieAuth: [] }],
@@ -53,8 +125,27 @@ export const openApiSpec = {
     '/sms/preview': {
       post: {
         tags: ['SMS'],
-        summary: 'Preview billing SMS without sending',
-        responses: { 200: { description: 'Preview message' } },
+        summary: 'Preview an SMS template without sending',
+        description: 'Billing notification previews require tenantId or houseId and are calculated from saved RentCharge rows. Caller-supplied amounts are not accepted as the billing source of truth. Estate identity is resolved by the backend.',
+        security: [{ cookieAuth: [], csrfToken: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  template: { type: 'string', enum: ['billing_notification', 'rent_reminder', 'arrears_notice', 'payment_confirmation'] },
+                  tenantId: { type: 'string' },
+                  houseId: { type: 'string' },
+                  period: { type: 'string', pattern: '^[0-9]{4}-(0[1-9]|1[0-2])$' },
+                },
+                description: 'For billing_notification (or omitted template), tenantId or houseId is required.',
+              },
+            },
+          },
+        },
+        responses: { 200: { description: 'Preview message and source-derived variables' }, 400: { description: 'Billing source identifiers or stored financial data invalid' } },
       },
     },
 
@@ -77,7 +168,34 @@ export const openApiSpec = {
     },
     '/tenants': {
       get: { summary: 'List tenants', responses: { 200: { description: 'OK' } } },
-      post: { summary: 'Create a tenant', responses: { 201: { description: 'Created' } } },
+      post: {
+        summary: 'Register a tenant and queue the estate-aware welcome notification',
+        description: 'Phone is optional. Tenant and Tenancy creation plus the appropriate standard or protected SMS outbox write use the existing registration transaction; Celcom is called later by the dispatcher.',
+        security: [{ cookieAuth: [], csrfToken: [] }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/TenantRegistrationRequest' } } },
+        },
+        responses: {
+          201: { description: 'Tenant created; notification queued when a valid phone and eligible delivery path exist.' },
+          400: { description: 'Invalid registration data' },
+          409: { description: 'House/tenancy conflict' },
+          503: { description: 'Required eligible M-PESA protected outbox write failed; registration transaction rolled back.' },
+        },
+      },
+    },
+    '/tenants/{id}/move': {
+      post: {
+        summary: 'Move a tenant to another house',
+        description: 'A same-estate move preserves the estate-scoped M-PESA link. A cross-estate move retires the old estate link on final exit and provisions the destination estate flow.',
+        security: [{ cookieAuth: [], csrfToken: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['houseId'], properties: { houseId: { type: 'string' } } } } },
+        },
+        responses: { 200: { description: 'Tenant moved' }, 404: { description: 'Tenant/house not found' }, 409: { description: 'Target house already occupied' } },
+      },
     },
     '/payments': { get: { summary: 'List confirmed payments', responses: { 200: { description: 'OK' } } } },
     '/bank/accounts': {
@@ -127,23 +245,61 @@ export const openApiSpec = {
     '/mpesa-collection/tenants/{tenantId}/link': {
       get: {
         tags: ['G5 M-PESA Collection'],
-        summary: 'Inspect the Tenant submission link (never returns the raw token)',
+        summary: 'Inspect safe metadata for the Tenant submission link',
+        description: 'Requires MPESA entitlement and an administrative role. Never returns a bearer token, token digest or token envelope.',
         parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { 200: { description: 'OK' }, 404: { description: 'No link' } },
+        responses: { 200: { description: 'Safe link metadata' }, 404: { description: 'No link' } },
       },
       post: {
         tags: ['G5 M-PESA Collection'],
-        summary: 'Issue or rotate the Tenant submission link (raw token returned once)',
+        summary: 'Create a Tenant submission link or reuse the existing ACTIVE link',
+        description: 'Requires CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN plus MPESA entitlement. Creates and queues the first protected onboarding message when no link exists. Reusing an ACTIVE link does not send another message; use /resend. Raw bearer token is never returned by the API.',
+        security: [{ cookieAuth: [], csrfToken: [] }],
         parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { 200: { description: 'Link + one-time token' }, 409: { description: 'Concurrent conflict' } },
+        responses: {
+          201: { description: 'Link created and protected onboarding SMS queued', content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkIssueResponse' } } } },
+          200: { description: 'Existing ACTIVE link reused; no additional SMS was sent', content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkIssueResponse' } } } },
+          409: { description: 'Concurrent conflict or link was revoked; use explicit rotation where authorized' },
+          503: { description: 'Required protected outbox unavailable' },
+        },
+      },
+    },
+    '/mpesa-collection/tenants/{tenantId}/link/resend': {
+      post: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'Queue a new delivery attempt for the existing Tenant payment link',
+        description: 'Requires CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN plus MPESA entitlement. Sends the same URL with the same linkVersion in a new protected outbox attempt. A short resend throttle may return queued=false. It never rotates the token.',
+        security: [{ cookieAuth: [], csrfToken: [] }],
+        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'Resend queued or throttled', content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkResendResponse' } } } },
+          404: { description: 'No active link' },
+          503: { description: 'Required protected SMS prerequisites unavailable' },
+        },
+      },
+    },
+    '/mpesa-collection/tenants/{tenantId}/link/rotate': {
+      post: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'Explicitly rotate a Tenant payment link for security',
+        description: 'Requires CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN plus MPESA entitlement. The expectedLinkVersion must match the inspected current version. Rotation creates a new token/version and queues its protected delivery; the raw token is never returned.',
+        security: [{ cookieAuth: [], csrfToken: [] }],
+        parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkRotateRequest' } } },
+        },
+        responses: { 200: { description: 'Link rotated and protected delivery queued', content: { 'application/json': { schema: { $ref: '#/components/schemas/MpesaLinkRotateResponse' } } } }, 409: { description: 'Expected link version is stale' }, 503: { description: 'Replacement link delivery could not be queued; rotation rolled back' } },
       },
     },
     '/mpesa-collection/tenants/{tenantId}/link/revoke': {
       post: {
         tags: ['G5 M-PESA Collection'],
-        summary: 'Revoke the Tenant submission link',
+        summary: 'Administratively revoke the Tenant submission link',
+        description: 'Requires CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN plus MPESA entitlement. Revocation invalidates the current token version and cancels protected messages that have not started sending.',
+        security: [{ cookieAuth: [], csrfToken: [] }],
         parameters: [{ name: 'tenantId', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { 200: { description: 'Revoked' } },
+        responses: { 200: { description: 'Revoked' }, 404: { description: 'Link not found' } },
       },
     },
     '/mpesa-collection/submissions': {
