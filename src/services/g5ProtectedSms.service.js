@@ -16,12 +16,43 @@ import { getSmsProvider } from './sms/sms.factory.js';
 import { isEntitled } from './entitlement.service.js';
 import { env } from '../config/environment.js';
 import { logger } from '../config/logger.js';
+import { isWellFormedToken } from '../utils/g5Token.js';
 
 export const PROTECTED_LEASE_MS = 90_000;
 export const G5_ONBOARDING_TYPE = 'g5_onboarding_link';
 export const G5_ONBOARDING_VERSION = 'g5_onboarding_link:v1';
 export const G5_PAYMENT_CONFIRM_TYPE = 'payment_confirmation';
 const PLACEHOLDER = '[protected]';
+
+function hasValidOnboardingPaymentUrl(body) {
+  if (typeof body !== 'string' || !env.G5_PUBLIC_PAYMENT_URL) return false;
+
+  // A protected onboarding body must contain exactly one URI, and it must be
+  // the configured public /pay route with the bearer token in the fragment.
+  const urls = body.match(/\\b[a-z][a-z0-9+.-]*:\\/\\/[^\\s]+/gi) || [];
+  if (urls.length !== 1) return false;
+
+  let url;
+  try {
+    url = new URL(urls[0]);
+  } catch {
+    return false;
+  }
+
+  if (
+    url.protocol !== 'https:' ||
+    url.origin !== env.G5_PUBLIC_PAYMENT_URL ||
+    url.pathname !== '/pay' ||
+    url.search !== '' ||
+    url.username !== '' ||
+    url.password !== ''
+  ) {
+    return false;
+  }
+
+  const tokenMatch = /^#t=([A-Za-z0-9_-]{43})$/.exec(url.hash);
+  return Boolean(tokenMatch && isWellFormedToken(tokenMatch[1]));
+}
 
 /** Canonical AAD for AEAD. Must match exactly on seal and open. */
 export function buildProtectedSmsAad({
@@ -193,6 +224,27 @@ export async function dispatchProtectedBatch(limit = 20) {
         failureReason: `envelope_${err.code || 'error'}`,
       });
       continue;
+    }
+
+    // Old or malformed onboarding notices may already be encrypted in the outbox.
+    // Cancel them before link authorization, sendStartedAt, or any Celcom side effect.
+    const isOnboardingNotice =
+      row.type === G5_ONBOARDING_TYPE ||
+      row.notificationVersion === G5_ONBOARDING_VERSION;
+    if (isOnboardingNotice) {
+      let invalidReason = null;
+      if (row.type !== G5_ONBOARDING_TYPE || row.notificationVersion !== G5_ONBOARDING_VERSION) {
+        invalidReason = 'onboarding_notification_identity_invalid';
+      } else if (row.g5LinkId == null || row.g5LinkVersion == null) {
+        invalidReason = 'onboarding_link_binding_missing';
+      } else if (!hasValidOnboardingPaymentUrl(payload.body)) {
+        invalidReason = 'onboarding_payment_url_invalid';
+      }
+
+      if (invalidReason) {
+        await complete({ status: 'cancelled', failureReason: invalidReason });
+        continue;
+      }
     }
 
     // Atomic dispatch authorization: link CAS + sendStartedAt under one session.

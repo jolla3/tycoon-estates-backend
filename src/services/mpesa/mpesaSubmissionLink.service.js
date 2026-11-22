@@ -44,8 +44,7 @@ async function assertTenant(clientId, estateId, tenantId) {
 }
 
 function buildOnboardingBody({ tillCode, token }) {
-  const base = env.FRONTEND_URL;
-  const url = `${base}/pay#t=${token}`;
+  const url = `${env.G5_PUBLIC_PAYMENT_URL}/pay#t=${token}`;
   const till = tillCode ? ` Till ${tillCode}.` : '';
   return `Tycoon Estates: submit your M-PESA Buy Goods confirmation here.${till} ${url}`;
 }
@@ -55,8 +54,12 @@ async function queueOnboardingIfPossible({
 }) {
   const phone = tenant?.phone && String(tenant.phone).trim();
   const tillCode = merchant?.businessShortCode ? String(merchant.businessShortCode) : null;
-  if (!phone || !tillCode || !env.FRONTEND_URL) {
-    const reason = !phone ? 'tenant_phone_missing' : !tillCode ? 'merchant_till_unavailable' : 'frontend_url_missing';
+  if (!phone || !tillCode || !env.G5_PUBLIC_PAYMENT_URL) {
+    const reason = !phone
+      ? 'tenant_phone_missing'
+      : !tillCode
+        ? 'merchant_till_unavailable'
+        : 'public_payment_url_missing';
     await audit({
       clientId, estateId, userId: actor?.userId,
       action: 'G5_LINK_SMS_BLOCKED', resource: 'MpesaSubmissionLink',
