@@ -12,6 +12,8 @@ import { Estate } from '../models/Estate.js';
 import { ledgerService } from './ledger.service.js';
 import { tenancyService } from './tenancy.service.js';
 import { RentCharge } from '../models/RentCharge.js';
+import { Tenancy } from '../models/Tenancy.js';
+import { aggregateRentCharges, sumOutstandingCents } from '../utils/smsBilling.js';
 import { getSmsProvider } from './sms/sms.factory.js';
 import { withIdempotency } from '../utils/idempotency.js';
 import { money } from '../utils/money.js';
@@ -29,34 +31,44 @@ const TEMPLATES = {
   arrears_notice: ({ tenantName, houseNumber, monthsOverdue, balanceCents, currency }) =>
     `Dear ${tenantName}, House ${houseNumber} is ${monthsOverdue} month(s) in arrears, totaling ${money.format(balanceCents, currency)}. Please contact the estate office urgently.`,
   billing_notification: ({
-    tenantName,
-    houseNumber,
-    period,
-    rentCents = 0,
-    waterCents = 0,
-    electricityCents = 0,
-    otherCents = 0,
-    previousArrearsCents = 0,
-    paidCents = 0,
-    totalOutstandingCents = 0,
-    dueDate,
-    currency = 'KES',
+    tenantName, houseNumber, period,
+    rentOutstandingCents, waterOutstandingCents,
+    electricityOutstandingCents, otherOutstandingCents,
+    previousArrearsCents, paidCents, totalOutstandingCents,
+    dueDate, currency = 'KES',
   }) => {
+    for (const [field, value] of Object.entries({
+      rentOutstandingCents, waterOutstandingCents,
+      electricityOutstandingCents, otherOutstandingCents,
+      previousArrearsCents, paidCents, totalOutstandingCents,
+    })) {
+      requireTemplateCents(value, field);
+    }
     const lines = [
-      `Dear ${tenantName}, billing for House ${houseNumber} (${period}).`,
-      rentCents ? `Rent: ${money.format(rentCents, currency)}` : null,
-      waterCents ? `Water: ${money.format(waterCents, currency)}` : null,
-      electricityCents ? `Electricity: ${money.format(electricityCents, currency)}` : null,
-      otherCents ? `Other: ${money.format(otherCents, currency)}` : null,
-      previousArrearsCents ? `Previous arrears: ${money.format(previousArrearsCents, currency)}` : null,
-      paidCents ? `Paid: ${money.format(paidCents, currency)}` : null,
-      `Total outstanding: ${money.format(totalOutstandingCents, currency)}.`,
-      dueDate ? `Due: ${dueDate}.` : null,
+      'Billing statement ' + period + ' for ' + tenantName + ', House' +
+        (String(houseNumber).includes(',') ? 's' : '') + ' ' + houseNumber + '.',
+      rentOutstandingCents ? 'Rent outstanding: ' + money.format(rentOutstandingCents, currency) + '.' : null,
+      waterOutstandingCents ? 'Water outstanding: ' + money.format(waterOutstandingCents, currency) + '.' : null,
+      electricityOutstandingCents ? 'Electricity outstanding: ' + money.format(electricityOutstandingCents, currency) + '.' : null,
+      otherOutstandingCents ? 'Other outstanding: ' + money.format(otherOutstandingCents, currency) + '.' : null,
+      previousArrearsCents ? 'Previous arrears: ' + money.format(previousArrearsCents, currency) + '.' : null,
+      paidCents ? 'Paid this period: ' + money.format(paidCents, currency) + '.' : null,
+      'Total outstanding: ' + money.format(totalOutstandingCents, currency) + '.',
+      dueDate ? 'Due: ' + dueDate + '.' : null,
     ].filter(Boolean);
     return lines.join(' ');
   },
 };
 
+
+function requireTemplateCents(value, field) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    const err = Errors.InvalidRequest('Cannot render billing SMS: ' + field + ' must be a verified non-negative integer-cent value');
+    err.code = 'SMS_TEMPLATE_AMOUNT_INVALID';
+    throw err;
+  }
+  return value;
+}
 
 function prefixEstate(estateName, message) {
   const name = String(estateName || '').trim();
@@ -298,6 +310,113 @@ export const smsService = {
    */
   async preview(clientId, { template = 'billing_notification', tenantId, houseId, period, estateFilter = null, ...vars }) {
     const p = period || dateUtil.currentPeriod();
+    if (template === 'billing_notification') {
+      let tenant = null;
+      let house = null;
+      if (tenantId) {
+        tenant = await Tenant.findOne({
+          _id: tenantId, clientId, status: 'active',
+          ...estateFilterClause(estateFilter),
+        }).lean();
+        if (!tenant) throw Errors.TenantNotFound();
+        houseId = houseId || tenant.houseId;
+      }
+      if (houseId) {
+        house = await House.findOne({
+          _id: houseId, clientId, ...estateFilterClause(estateFilter),
+        }).select('_id estateId houseNumber tenantId').lean();
+        if (!house) throw Errors.HouseNotFound();
+        if (tenant && String(tenant.estateId) !== String(house.estateId)) {
+          throw Errors.Conflict('Billing preview tenant and house belong to different estates');
+        }
+        if (tenant && house.tenantId && String(house.tenantId) !== String(tenant._id)) {
+          throw Errors.Conflict('Billing preview house is occupied by a different tenant');
+        }
+        if (!tenant && house.tenantId) {
+          tenant = await Tenant.findOne({
+            _id: house.tenantId, clientId, status: 'active',
+            ...estateFilterClause(estateFilter),
+          }).lean();
+        }
+      }
+      const estateId = tenant ? tenant.estateId : house?.estateId;
+      if (!estateId) throw Errors.InvalidRequest('Estate could not be resolved for billing preview');
+      const estate = await Estate.findOne({ _id: estateId, clientId }).select('name currency').lean();
+      if (!estate?.name) throw Errors.InvalidRequest('Estate identity could not be verified for billing preview');
+
+      let tenancyIds = [];
+      if (tenant?._id) {
+        tenancyIds = (await Tenancy.find({
+          clientId, estateId, tenantId: tenant._id,
+          status: { $in: ['ACTIVE', 'CLOSED'] },
+        }).select('_id').lean()).map((row) => row._id);
+      }
+      const currentFilter = { clientId, estateId, period: p };
+      if (tenancyIds.length && tenant?._id) {
+        currentFilter.$or = [
+          { tenancyId: { $in: tenancyIds } },
+          { tenantId: tenant._id },
+        ];
+      } else if (tenant?._id) {
+        currentFilter.tenantId = tenant._id;
+      } else if (house?._id) {
+        currentFilter.houseId = house._id;
+      } else {
+        throw Errors.InvalidRequest('Tenant tenancy history is unavailable for billing preview');
+      }
+
+      const charges = await RentCharge.find(currentFilter).lean();
+      const current = aggregateRentCharges(charges);
+      const previousFilter = {
+        clientId, estateId, period: { $lt: p },
+        status: { $in: ['UNPAID', 'PARTIAL'] },
+      };
+      if (tenancyIds.length && tenant?._id) {
+        previousFilter.$or = [
+          { tenancyId: { $in: tenancyIds } },
+          { tenantId: tenant._id },
+        ];
+      } else if (tenant?._id) {
+        previousFilter.tenantId = tenant._id;
+      } else {
+        previousFilter.houseId = house._id;
+      }
+      const previous = await RentCharge.find(previousFilter).lean();
+      const previousArrearsCents = sumOutstandingCents(previous);
+      const totalOutstandingCents = current.totalOutstandingCents + previousArrearsCents;
+      requireTemplateCents(totalOutstandingCents, 'totalOutstandingCents');
+
+      const billedHouseIds = [...new Set(charges.map((row) => String(row.houseId)).filter(Boolean))];
+      const houses = billedHouseIds.length
+        ? await House.find({ clientId, estateId, _id: { $in: billedHouseIds } }).select('_id houseNumber').lean()
+        : [];
+      const houseNumbers = houses.map((row) => row.houseNumber).filter(Boolean);
+      const dueDate = current.dueDates.map((date) => dateUtil.format(date, 'DD MMM YYYY')).join(', ') || null;
+      const variables = {
+        tenantName: tenant?.name || vars.tenantName || 'Tenant',
+        houseNumber: houseNumbers.join(', ') || house?.houseNumber || 'your registered house',
+        period: p,
+        rentOutstandingCents: current.rentOutstandingCents,
+        waterOutstandingCents: current.waterOutstandingCents,
+        electricityOutstandingCents: current.electricityOutstandingCents,
+        otherOutstandingCents: current.otherOutstandingCents,
+        previousArrearsCents,
+        paidCents: current.paidCents,
+        totalOutstandingCents,
+        dueDate,
+        currency: estate.currency || 'KES',
+      };
+      const message = prefixEstate(estate.name, previewSms('billing_notification', variables));
+      return {
+        template,
+        notificationVersion: NOTIFICATION_VERSIONS[template] || template,
+        period: p,
+        recipient: tenant?.phone ? maskPhone(tenant.phone) : null,
+        message,
+        variables,
+      };
+    }
+
     let tenantName = vars.tenantName;
     let houseNumber = vars.houseNumber;
     let phone = vars.phone;
@@ -606,6 +725,143 @@ export const smsService = {
       status: 'QUEUED',
       jobIds: jobIds.slice(0, 50), // sample only
     };
+  },
+
+  async queueBillingNotificationsForEstate(clientId, estateId, period = dateUtil.currentPeriod(), { skipTenantIds = [] } = {}) {
+    const estate = await Estate.findOne({ _id: estateId, clientId }).select('name currency').lean();
+    if (!estate?.name) throw Errors.InvalidRequest('Billing notification estate ownership could not be verified');
+
+    const tenancies = await Tenancy.find({
+      clientId, estateId, status: { $in: ['ACTIVE', 'CLOSED'] },
+    }).select('_id tenantId').lean();
+    const tenancyById = new Map(tenancies.map((row) => [String(row._id), row]));
+    const tenancyIdsByTenant = new Map();
+    for (const tenancy of tenancies) {
+      if (!tenancy.tenantId) continue;
+      const key = String(tenancy.tenantId);
+      if (!tenancyIdsByTenant.has(key)) tenancyIdsByTenant.set(key, []);
+      tenancyIdsByTenant.get(key).push(tenancy._id);
+    }
+
+    const charges = await RentCharge.find({ clientId, estateId, period }).lean();
+    if (!charges.length) {
+      return { estateId: String(estateId), period, queued: 0, skipped: 0, skippedNoBill: true };
+    }
+
+    const skippedTenants = new Set((skipTenantIds || []).map(String));
+    const grouped = new Map();
+    const invalidGroups = new Set();
+    for (const charge of charges) {
+      const tenancy = charge.tenancyId ? tenancyById.get(String(charge.tenancyId)) : null;
+      if (tenancy?.tenantId && charge.tenantId
+        && String(tenancy.tenantId) !== String(charge.tenantId)) {
+        invalidGroups.add(String(tenancy.tenantId));
+        invalidGroups.add(String(charge.tenantId));
+        continue;
+      }
+      const tenantId = tenancy?.tenantId || charge.tenantId;
+      if (!tenantId || skippedTenants.has(String(tenantId))) continue;
+      const key = String(tenantId);
+      if (!grouped.has(key)) {
+        grouped.set(key, { tenantId, charges: [], houseIds: new Set() });
+      }
+      const group = grouped.get(key);
+      group.charges.push(charge);
+      if (charge.houseId) group.houseIds.add(String(charge.houseId));
+    }
+
+    let queued = 0;
+    let skipped = 0;
+    for (const tenantKey of invalidGroups) {
+      logger.error(
+        { estateId: String(estateId), tenantId: tenantKey, period, reason: 'rent_charge_tenant_tenancy_mismatch' },
+        'Billing statement skipped because RentCharge tenant and tenancy identities disagree'
+      );
+      skipped += 1;
+    }
+    const tenantRows = grouped.size
+      ? await Tenant.find({ clientId, _id: { $in: [...grouped.values()].map((group) => group.tenantId) } }).lean()
+      : [];
+    const tenantById = new Map(tenantRows.map((row) => [String(row._id), row]));
+    const houseIds = [...new Set([...grouped.values()].flatMap((group) => [...group.houseIds]))];
+    const houseRows = houseIds.length
+      ? await House.find({ clientId, estateId, _id: { $in: houseIds } }).select('_id houseNumber').lean()
+      : [];
+    const houseById = new Map(houseRows.map((row) => [String(row._id), row]));
+
+    for (const [tenantKey, group] of grouped) {
+      if (invalidGroups.has(tenantKey)) continue;
+      const tenant = tenantById.get(tenantKey);
+      if (!tenant?.phone) {
+        logger.warn(
+          { estateId: String(estateId), tenantId: tenantKey, period, reason: 'tenant_phone_missing' },
+          'Billing notification skipped because tenant phone is missing'
+        );
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const current = aggregateRentCharges(group.charges);
+        const tenantTenancyIds = tenancyIdsByTenant.get(tenantKey) || [];
+        const previousFilter = {
+          clientId, estateId, period: { $lt: period },
+          status: { $in: ['UNPAID', 'PARTIAL'] },
+          $or: [
+            ...(tenantTenancyIds.length ? [{ tenancyId: { $in: tenantTenancyIds } }] : []),
+            { tenantId: group.tenantId },
+          ],
+        };
+        const previous = await RentCharge.find(previousFilter).lean();
+        const previousArrearsCents = sumOutstandingCents(previous);
+        const totalOutstandingCents = current.totalOutstandingCents + previousArrearsCents;
+        requireTemplateCents(totalOutstandingCents, 'totalOutstandingCents');
+
+        const houseNumbers = [...group.houseIds]
+          .map((id) => houseById.get(id)?.houseNumber)
+          .filter(Boolean);
+        const dueDate = current.dueDates
+          .map((date) => dateUtil.format(date, 'DD MMM YYYY'))
+          .join(', ') || null;
+        const message = previewSms('billing_notification', {
+          tenantName: tenant.name,
+          houseNumber: houseNumbers.join(', ') || 'your registered house',
+          period,
+          rentOutstandingCents: current.rentOutstandingCents,
+          waterOutstandingCents: current.waterOutstandingCents,
+          electricityOutstandingCents: current.electricityOutstandingCents,
+          otherOutstandingCents: current.otherOutstandingCents,
+          previousArrearsCents,
+          paidCents: current.paidCents,
+          totalOutstandingCents,
+          dueDate,
+          currency: estate.currency || 'KES',
+        });
+        const idempotencyKey = 'billing:' + String(clientId) + ':' + String(estateId) + ':' + tenantKey + ':' + period + ':v2';
+        const result = await this.queueSms({
+          clientId,
+          estateId,
+          tenantId: tenant._id,
+          houseId: group.houseIds.size === 1 ? [...group.houseIds][0] : null,
+          to: tenant.phone,
+          message,
+          type: 'billing_notification',
+          priority: 7,
+          period,
+          notificationVersion: 'billing_notification:v2',
+          idempotencyKey,
+        });
+        if (result.created) queued += 1;
+        else skipped += 1;
+      } catch (err) {
+        logger.warn(
+          { estateId: String(estateId), tenantId: tenantKey, code: err.code || 'BILLING_SMS_INVALID' },
+          'Billing notification skipped because financial source data was not valid'
+        );
+        skipped += 1;
+      }
+    }
+    return { estateId: String(estateId), period, queued, skipped };
   },
 
   history: (clientId, estateFilter, { limit = 100 } = {}) =>

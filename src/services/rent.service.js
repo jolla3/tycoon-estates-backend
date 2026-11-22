@@ -402,18 +402,21 @@ export const rentService = {
     // its own transaction; a failure never fails billing (credit simply stays unapplied
     // and is retried on the next run).
     let creditApplied = 0;
-    for (const tenantId of new Set(tenancies.map((t) => String(t.tenantId)))) {
+    const creditApplyFailedTenantIds = [];
+    for (const tenantId of new Set(tenancies.filter((t) => t.tenantId).map((t) => String(t.tenantId)))) {
       try {
         const r = await autoApplyCredit({ clientId, estateId, tenantId: new mongoose.Types.ObjectId(tenantId) });
         creditApplied += r.applied || 0;
       } catch (err) {
-        logger.warn({ code: err.code, estateId: String(estateId) }, 'Tenant credit auto-apply skipped');
+        creditApplyFailedTenantIds.push(String(tenantId));
+        logger.warn({ code: err.code, estateId: String(estateId), tenantId: String(tenantId) }, 'Tenant credit auto-apply skipped');
       }
     }
 
     return {
       created,
       creditAppliedCents: creditApplied,
+      creditApplyFailedTenantIds,
       period,
       eligibleTenancies: tenancies.length,
       partialPeriodExcluded: partial.length,

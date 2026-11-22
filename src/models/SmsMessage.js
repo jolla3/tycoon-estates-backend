@@ -70,7 +70,7 @@ SmsMessageSchema.index({ clientId: 1, tenantId: 1, type: 1, period: 1, notificat
 export const SmsMessage = mongoose.model('SmsMessage', SmsMessageSchema);
 
 export const NOTIFICATION_VERSIONS = {
-  billing_notification: 'billing_notification:v1',
+  billing_notification: 'billing_notification:v2',
   rent_reminder: 'rent_reminder:v1',
   arrears_notice: 'arrears_notice:v1',
   payment_confirmation: 'payment_confirmation:v1',
