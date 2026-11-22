@@ -28,7 +28,7 @@ export const tenantController = {
     try {
       // req.body is already restricted to schemas.updateTenant's field
       // set (name/phone/status/moveOutDate) — no houseId here, see move().
-      const tenant = await tenantService.update(req.clientId, req.params.id, req.body, req.estateFilter);
+      const tenant = await tenantService.update(req.clientId, req.params.id, req.body, req.estateFilter, req.currentUser._id);
       await audit({ clientId: req.clientId, estateId: tenant.estateId, userId: req.currentUser._id, action: 'TENANT_UPDATED', resource: 'Tenant', resourceId: tenant._id, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
       apiResponse.success(res, tenant, 'Tenant updated');
     } catch (err) { next(err); }
@@ -36,7 +36,7 @@ export const tenantController = {
 
   async move(req, res, next) {
     try {
-      const tenant = await tenantService.moveToHouse(req.clientId, req.params.id, req.body.houseId, req.estateFilter);
+      const tenant = await tenantService.moveToHouse(req.clientId, req.params.id, req.body.houseId, req.estateFilter, req.currentUser._id);
       await audit({ clientId: req.clientId, estateId: tenant.estateId, userId: req.currentUser._id, action: 'TENANT_MOVED', resource: 'Tenant', resourceId: tenant._id, metadata: { newHouseId: req.body.houseId }, ipAddress: req.ip, userAgent: req.headers['user-agent'] });
       apiResponse.success(res, tenant, 'Tenant moved');
     } catch (err) { next(err); }

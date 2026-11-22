@@ -255,7 +255,7 @@ export const tenantService = {
     };
   },
 
-  async update(clientId, tenantId, updates, estateFilter = null) {
+  async update(clientId, tenantId, updates, estateFilter = null, actorUserId = null) {
     const tenant = await Tenant.findOneAndUpdate(
       { _id: tenantId, clientId, ...estateFilterClause(estateFilter) },
       updates,
@@ -266,7 +266,7 @@ export const tenantService = {
     if (updates.status === 'moved_out') {
       const active = await tenancyService.getActiveForHouse(clientId, tenant.houseId);
       if (active && String(active.tenantId) === String(tenant._id)) {
-        await tenancyService.close(clientId, active._id, { reason: 'MOVE_OUT' });
+        await tenancyService.close(clientId, active._id, { reason: 'MOVE_OUT', actorUserId });
       } else {
         await House.updateOne(
           { _id: tenant.houseId, clientId, ...estateFilterClause(estateFilter) },

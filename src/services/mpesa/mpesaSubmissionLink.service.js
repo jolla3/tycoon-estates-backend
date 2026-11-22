@@ -320,10 +320,6 @@ export const mpesaSubmissionLinkService = {
     await assertActiveEstateTenancy(clientId, estateId, tenant._id, session);
     const eligibility = await checkEntitlement(clientId, 'MPESA', { session });
     if (!eligibility.entitled) return { eligible: false, reason: 'mpesa_not_entitled' };
-    const resolution = await resolveTillMerchant(clientId, estateId, { session });
-    if (!resolution.merchant || resolution.ambiguous) {
-      return { eligible: false, reason: resolution.ambiguous ? 'estate_till_ambiguous' : 'estate_till_unavailable' };
-    }
     if (env.G5_PROTECTED_SMS_ENABLED !== '1' || !tenant?.phone || !env.G5_PUBLIC_PAYMENT_URL || !estate?.name) {
       return {
         eligible: false,
@@ -334,15 +330,26 @@ export const mpesaSubmissionLinkService = {
     }
     const existing = await MpesaSubmissionLink.findOne({ clientId, estateId, tenantId: tenant._id })
       .session(session).select('+tokenDigest +tokenEnvelope');
+    // An active reusable link retains its original operational Till binding.
+    // Never send a newly mapped Till with an old link token.
+    const merchantProfileId = existing?.status === 'ACTIVE' ? existing.merchantProfileId : null;
+    const resolution = await resolveTillMerchant(clientId, estateId, { merchantProfileId, session });
+    if (!resolution.merchant || resolution.ambiguous) {
+      return { eligible: false, reason: resolution.ambiguous ? 'estate_till_ambiguous' : 'estate_till_unavailable' };
+    }
     if (existing?.status === 'ACTIVE') {
       // Reuse the original token when the Tenant returns to an estate; never rotate it.
+      if (!existing.merchantProfileId) {
+        existing.merchantProfileId = resolution.merchant._id;
+        await existing.save({ session });
+      }
       const token = await loadToken(existing, { session });
       const smsMeta = await queueOnboarding({
         clientId, estateId, tenant, link: existing, token, merchant: resolution.merchant,
         estateName: estate.name, registrationText, session, messageId: messageId || new mongoose.Types.ObjectId(), attempt: 'registration-reuse',
       });
       if (!smsMeta.queued) {
-        const err = Errors.ServiceUnavailable(`Eligible M-PESA notification could not be queued: ${smsMeta.reason}`);
+        const err = Errors.ServiceUnavailable('Eligible M-PESA notification could not be queued: ' + smsMeta.reason);
         err.code = 'G5_REGISTRATION_OUTBOX_FAILED';
         throw err;
       }

@@ -2,6 +2,8 @@
 import mongoose from 'mongoose';
 import { MpesaCollectionReference } from '../models/MpesaCollectionReference.js';
 import { Tenancy } from '../models/Tenancy.js';
+import { AuditLog } from '../models/AuditLog.js';
+import { Estate } from '../models/Estate.js';
 import { Tenant } from '../models/Tenant.js';
 import { House } from '../models/House.js';
 import { Errors } from '../utils/errors.js';
@@ -9,6 +11,9 @@ import { estateFilterClause } from '../utils/estateFilter.js';
 import { supportsMongoTransactions } from '../config/database.js';
 import { tenancyIneligibleReason, TENANCY_RESOLUTION } from '../utils/manualPaymentTenancy.js';
 import { eligibleTenancyFilter } from '../utils/tenancyEligibility.js';
+import { generateBearerToken } from '../utils/g5Token.js';
+import { mpesaSubmissionLinkService } from './mpesa/mpesaSubmissionLink.service.js';
+import { smsService } from './sms.service.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 
@@ -408,11 +413,20 @@ export const tenancyService = {
         { tenantId: null, status: 'vacant' },
         { session }
       );
+      const remainingTenancy = await Tenancy.findOne({
+        clientId, tenantId: tenancy.tenantId, status: 'ACTIVE',
+      }).sort({ startAt: -1 }).session(session).lean();
       await Tenant.updateOne(
         { _id: tenancy.tenantId, clientId },
-        { status: 'moved_out', moveOutDate: end },
+        remainingTenancy
+          ? { status: 'active', houseId: remainingTenancy.houseId, estateId: remainingTenancy.estateId, moveOutDate: null }
+          : { status: 'moved_out', moveOutDate: end },
         { session }
       );
+      await mpesaSubmissionLinkService.revokeAfterEstateExit({
+        clientId, estateId: tenancy.estateId, tenantId: tenancy.tenantId,
+        session, actorUserId,
+      });
       return tenancy;
     };
     if (outer) return run(outer);
@@ -428,6 +442,10 @@ export const tenancyService = {
 
   async moveToHouse(clientId, tenantId, newHouseId, estateFilter = null, actorUserId = null) {
     requireTransactions();
+    const nextTenancyId = new mongoose.Types.ObjectId();
+    const transferLinkId = new mongoose.Types.ObjectId();
+    const transferMessageId = new mongoose.Types.ObjectId();
+    const transferToken = generateBearerToken();
     const session = await mongoose.startSession();
     try {
       let newTenancy;
@@ -440,8 +458,8 @@ export const tenancyService = {
           _id: newHouseId, clientId, isActive: true, ...estateFilterClause(estateFilter),
         }).session(session);
         if (!newHouse) throw Errors.HouseNotFound('Target house not found for your client');
-        const activeOnTarget = await Tenancy.findOne({ houseId: newHouse._id, status: 'ACTIVE' }).session(session);
-        if (activeOnTarget && !activeOnTarget.tenantId.equals(tenant._id)) {
+        const activeOnTarget = await Tenancy.findOne({ clientId, estateId: newHouse.estateId, houseId: newHouse._id, status: 'ACTIVE' }).session(session);
+        if (activeOnTarget && String(activeOnTarget.tenantId || '') !== String(tenant._id)) {
           throw Errors.Conflict('Target house already has a tenant');
         }
         const current = await Tenancy.findOne({ clientId, tenantId: tenant._id, status: 'ACTIVE' }).session(session);
@@ -465,6 +483,7 @@ export const tenancyService = {
         }
         const [created] = await Tenancy.create(
           [{
+            _id: nextTenancyId,
             clientId,
             estateId: newHouse.estateId,
             houseId: newHouse._id,
@@ -485,6 +504,42 @@ export const tenancyService = {
           { houseId: newHouse._id, estateId: newHouse.estateId, status: 'active', moveInDate: now, moveOutDate: null },
           { session }
         );
+        if (current && String(current.estateId) !== String(newHouse.estateId)) {
+          await mpesaSubmissionLinkService.revokeAfterEstateExit({
+            clientId, estateId: current.estateId, tenantId: tenant._id,
+            session, actorUserId,
+          });
+          const destinationEstate = await Estate.findOne({
+            _id: newHouse.estateId, clientId,
+          }).session(session).lean();
+          if (!destinationEstate?.name) throw Errors.Conflict('Destination estate ownership could not be verified');
+          const transferText = `Your tenancy has been transferred to House ${newHouse.houseNumber}. Current billing details will be sent when available.`;
+          const provision = await mpesaSubmissionLinkService.provisionForRegistration({
+            clientId, estateId: newHouse.estateId, tenant, house: newHouse,
+            estate: destinationEstate, registrationText: transferText,
+            session, linkId: transferLinkId, messageId: transferMessageId,
+            token: transferToken, actorUserId,
+          });
+          if (!provision.eligible && tenant.phone) {
+            await smsService.queueSms({
+              clientId, estateId: newHouse.estateId, tenantId: tenant._id,
+              houseId: newHouse._id, to: tenant.phone,
+              message: transferText + ' For verified bank payment instructions, contact the estate office.',
+              type: 'tenant_registration', priority: 8,
+              notificationVersion: 'tenant_registration:v1',
+              idempotencyKey: `estate-transfer:${String(tenant._id)}:${String(newHouse.estateId)}:${String(transferMessageId)}:v1`,
+              session,
+            });
+          } else if (!provision.eligible) {
+            await AuditLog.create([{
+              clientId, estateId: newHouse.estateId, userId: actorUserId || undefined,
+              action: 'TENANT_TRANSFER_SMS_BLOCKED',
+              resource: 'Tenant', resourceId: String(tenant._id),
+              description: 'Estate transfer completed without an SMS because the tenant has no phone number',
+              metadata: { reason: 'tenant_phone_missing', oldEstateId: String(current.estateId), newEstateId: String(newHouse.estateId) },
+            }], { session });
+          }
+        }
       });
       return newTenancy;
     } finally {
