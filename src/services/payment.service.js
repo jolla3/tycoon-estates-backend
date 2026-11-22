@@ -6,6 +6,7 @@ import { ManualReceipt } from '../models/ManualReceipt.js';
 import { TenantCreditMovement } from '../models/TenantCreditMovement.js';
 import { House } from '../models/House.js';
 import { Tenant } from '../models/Tenant.js';
+import { Tenancy } from '../models/Tenancy.js';
 import { dateUtil } from '../utils/date.js';
 import { paginationParams, paginatedResponse } from '../utils/pagination.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
@@ -28,9 +29,11 @@ function normalizeIdempotencyKey(value) {
 }
 
 function payloadMatchesReceipt(receipt, {
-  houseId, amountCents, paymentDateLocal, tenderMethod, paymentReference,
+  houseId, tenantId, tenancyId, amountCents, paymentDateLocal, tenderMethod, paymentReference,
 }) {
   return String(receipt.houseId) === String(houseId)
+    && String(receipt.tenantId) === String(tenantId)
+    && String(receipt.occupancyTenancyId) === String(tenancyId)
     && Number(receipt.amountCents) === Number(amountCents)
     && String(receipt.paymentDateLocal) === String(paymentDateLocal)
     && String(receipt.tenderMethod) === String(tenderMethod)
@@ -200,8 +203,25 @@ export const paymentService = {
       },
     ]);
 
-    const items = facet?.items || [];
+    const rawItems = facet?.items || [];
     const total = facet?.total?.[0]?.n || 0;
+
+    // Resolve real relationships for display (scoped to client; no raw ids needed in the UI).
+    // Missing/deleted relations degrade to null rather than failing the page.
+    const ids = (k) => [...new Set(rawItems.map((r) => r[k]).filter(Boolean).map(String))];
+    const [tenants, houses] = await Promise.all([
+      Tenant.find({ _id: { $in: ids('tenantId') }, clientId: scope.clientId }).select('name phone').lean(),
+      House.find({ _id: { $in: ids('houseId') }, clientId: scope.clientId }).select('houseNumber').lean(),
+    ]);
+    const tenantById = new Map(tenants.map((t) => [String(t._id), t]));
+    const houseById = new Map(houses.map((h) => [String(h._id), h]));
+    const items = rawItems.map((r) => ({
+      ...r,
+      tenantName: tenantById.get(String(r.tenantId))?.name ?? null,
+      houseNumber: houseById.get(String(r.houseId))?.houseNumber ?? null,
+      // CREDIT-origin rows apply existing credit; they are not money received.
+      isMoneyReceived: r.origin !== 'CREDIT',
+    }));
     return paginatedResponse(items, total, { page, limit });
   },
 
@@ -219,6 +239,8 @@ export const paymentService = {
     } = body;
 
     if (!houseId) throw Errors.InvalidRequest('houseId is required');
+    if (!tenantId) throw Errors.InvalidRequest('tenantId is required: choose the tenant who paid');
+    if (!tenancyId) throw Errors.InvalidRequest('tenancyId is required: choose the tenant\'s tenancy for this house');
     const amount = Math.trunc(Number(amountCents));
     if (!Number.isSafeInteger(amount) || amount <= 0) {
       throw Errors.InvalidRequest('amountCents must be a positive integer');
@@ -280,6 +302,8 @@ export const paymentService = {
         if (existing) {
           if (!payloadMatchesReceipt(existing, {
             houseId,
+            tenantId,
+            tenancyId,
             amountCents: amount,
             paymentDateLocal: nairobi.dateStr,
             tenderMethod,
@@ -335,20 +359,12 @@ export const paymentService = {
         }).session(session);
         if (!houseInTx) throw Errors.HouseNotFound();
 
-        const occupancy = await tenancyService.resolveOccupancyForManualPayment(
-          clientId, houseInTx, nairobi, { session }
+        // Explicit ownership: validate the operator's tenant/house/tenancy/date; never
+        // substitute the house's current occupant.
+        const explicit = await tenancyService.resolveExplicitForManualPayment(
+          clientId, houseInTx, { tenantId, tenancyId }, nairobi, { session }
         );
-        if (!occupancy.ok) {
-          throw Errors.InvalidRequest(occupancy.reason || 'House is not eligible for ordinary payment recording');
-        }
-
-        covering = occupancy.tenancy;
-        if (tenantId && String(covering.tenantId) !== String(tenantId)) {
-          throw Errors.InvalidRequest('tenantId does not match the occupant on the payment date');
-        }
-        if (tenancyId && String(covering._id) !== String(tenancyId)) {
-          throw Errors.InvalidRequest('tenancyId does not match the covering tenancy for the payment date');
-        }
+        covering = explicit.tenancy;
 
         tenantDoc = await Tenant.findOne({
           _id: covering.tenantId,
@@ -501,6 +517,64 @@ export const paymentService = {
     const house = await House.findOne({ _id: houseId, clientId, ...estateFilterClause(estateFilter) });
     if (!house) throw Errors.HouseNotFound();
     return tenancyService.manualPaymentOptions(clientId, house, period || dateUtil.currentPeriod(), { page, limit, search, eligiblePage, eligibleLimit, eligibleSearch });
+  },
+
+  /**
+   * Tenant-first manual payment picker. Lists the chosen tenant's tenancies (and houses)
+   * in the caller's estate scope, flagging which cover the payment day. Read-only; the
+   * POST re-validates everything independently.
+   */
+  async tenantContext(clientId, estateFilter, { tenantId, paymentDate } = {}) {
+    const tenant = await Tenant.findOne({
+      _id: tenantId, clientId, ...estateFilterClause(estateFilter),
+    }).lean();
+    if (!tenant) throw Errors.TenantNotFound('Tenant not found in this estate');
+
+    let nairobi = null;
+    if (paymentDate) {
+      nairobi = dateUtil.parseNairobiDateOnly(paymentDate);
+      if (!nairobi) throw Errors.InvalidRequest('paymentDate must be a valid YYYY-MM-DD Nairobi calendar date');
+    }
+
+    const tenancies = await Tenancy.find({
+      clientId, tenantId: tenant._id, estateId: tenant.estateId, status: { $in: ['ACTIVE', 'CLOSED'] },
+    }).sort({ startAt: -1 }).lean();
+    const houses = await House.find({
+      _id: { $in: tenancies.map((t) => t.houseId) }, clientId, estateId: tenant.estateId,
+    }).select('houseNumber status isActive').lean();
+    const houseById = new Map(houses.map((h) => [String(h._id), h]));
+
+    const rows = tenancies.map((t) => {
+      const h = houseById.get(String(t.houseId));
+      const start = new Date(t.startAt).getTime();
+      const end = t.endAt == null ? null : new Date(t.endAt).getTime();
+      const coversPaymentDate = nairobi
+        ? start <= nairobi.end.getTime() && (end === null || end > nairobi.start.getTime())
+        : null;
+      return {
+        tenancyId: String(t._id),
+        houseId: String(t.houseId),
+        houseNumber: h ? h.houseNumber : null,
+        status: t.status,
+        startAt: t.startAt,
+        endAt: t.endAt || null,
+        coversPaymentDate,
+      };
+    });
+
+    const snap = await tenantAccountSnapshot({
+      clientId, estateId: tenant.estateId, tenantId: tenant._id,
+    });
+    return {
+      tenant: { _id: String(tenant._id), name: tenant.name, phone: tenant.phone, status: tenant.status },
+      paymentDate: nairobi ? nairobi.dateStr : null,
+      tenancies: rows,
+      account: {
+        creditCents: snap.creditCents,
+        outstandingCents: snap.outstandingCents,
+        netCents: snap.netCents,
+      },
+    };
   },
 
   async manualContext(clientId, estateFilter, { houseId, paymentDate }) {

@@ -24,6 +24,17 @@ export const paymentController = {
     }
   },
 
+  async tenantContext(req, res, next) {
+    try {
+      apiResponse.success(
+        res,
+        await paymentService.tenantContext(req.clientId, req.estateFilter, req.query)
+      );
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async manualContext(req, res, next) {
     try {
       apiResponse.success(

@@ -1,7 +1,7 @@
 import '../setup.js';
 import { classifyTenanciesForPeriod, tenancyIneligibleReason, TENANCY_RESOLUTION } from '../../src/utils/manualPaymentTenancy.js';
 import { isTenancyEligibleForPeriod } from '../../src/utils/tenancyEligibility.js';
-import { manualPaymentSchema, manualOptionsQuerySchema } from '../../src/routes/payment.routes.js';
+import { manualPaymentSchema, manualOptionsQuerySchema, tenantContextQuerySchema } from '../../src/routes/payment.routes.js';
 
 const oid = (n) => String(n).padStart(24, 'a');
 const T = (o) => ({ status: 'CLOSED', tenantId: oid(1), ...o });
@@ -102,16 +102,31 @@ describe('tenancyIneligibleReason / isTenancyEligibleForPeriod share one boundar
 });
 
 describe('manual payment request schemas', () => {
-  const base = { houseId: oid(1), amountCents: 1000 };
-  test('accepts tenancyId and period', () => {
-    const r = manualPaymentSchema.safeParse({ ...base, tenancyId: oid(2), period: '2026-03' });
+  const base = {
+    houseId: oid(1), tenantId: oid(3), tenancyId: oid(2), amountCents: 1000,
+    paymentDate: '2026-03-10', tenderMethod: 'CASH', idempotencyKey: 'key-12345678',
+  };
+  test('accepts an explicit tenant + house + tenancy submission', () => {
+    const r = manualPaymentSchema.safeParse({ ...base, period: '2026-03' });
     expect(r.success).toBe(true);
-    expect(r.data.tenancyId).toBe(oid(2));
+    expect(r.data).toMatchObject({ tenantId: oid(3), houseId: oid(1), tenancyId: oid(2) });
+  });
+  test('tenantId and tenancyId are REQUIRED: no silent assignment to the current occupant', () => {
+    const { tenantId, ...noTenant } = base;
+    const { tenancyId, ...noTenancy } = base;
+    expect(manualPaymentSchema.safeParse(noTenant).success).toBe(false);
+    expect(manualPaymentSchema.safeParse(noTenancy).success).toBe(false);
   });
   test('rejects malformed ids and impossible periods', () => {
     expect(manualPaymentSchema.safeParse({ ...base, tenancyId: 'abc' }).success).toBe(false);
+    expect(manualPaymentSchema.safeParse({ ...base, tenantId: 'abc' }).success).toBe(false);
     expect(manualPaymentSchema.safeParse({ ...base, houseId: 'abc' }).success).toBe(false);
     expect(manualPaymentSchema.safeParse({ ...base, period: '2026-13' }).success).toBe(false);
+  });
+  test('tenant-context query requires a tenantId and rejects unknown keys', () => {
+    expect(tenantContextQuerySchema.safeParse({}).success).toBe(false);
+    expect(tenantContextQuerySchema.safeParse({ tenantId: oid(3), paymentDate: '2026-03-10' }).success).toBe(true);
+    expect(tenantContextQuerySchema.safeParse({ tenantId: oid(3), x: 1 }).success).toBe(false);
   });
   test('options query requires a houseId', () => {
     expect(manualOptionsQuerySchema.safeParse({}).success).toBe(false);

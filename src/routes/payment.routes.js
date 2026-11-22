@@ -22,10 +22,10 @@ export const manualPaymentSchema = z.object({
   /** Client-generated once per intended submission; retries must reuse the same key. */
   idempotencyKey: z.string().trim().min(8).max(128),
   paymentReference: z.string().max(120).optional(),
-  // Edge-case / legacy fields — ordinary UI does not send these.
+  /** Explicit ownership: the operator picks tenant, then one of that tenant's tenancies. */
+  tenantId: objectId,
+  tenancyId: objectId,
   period: periodString.optional(),
-  tenantId: objectId.optional(),
-  tenancyId: objectId.optional(),
 });
 
 export const manualOptionsQuerySchema = z.object({
@@ -44,7 +44,20 @@ export const manualContextQuerySchema = z.object({
   paymentDate: z.string().optional(),
 }).strict();
 
+export const tenantContextQuerySchema = z.object({
+  tenantId: objectId,
+  paymentDate: z.string().optional(),
+}).strict();
+
 router.get('/', authenticate, clientContext, paymentController.list);
+router.get(
+  '/tenant-context',
+  authenticate,
+  clientContext,
+  authorize('CLIENT_OWNER', 'CLIENT_ADMIN'),
+  validate(tenantContextQuerySchema, 'query'),
+  paymentController.tenantContext
+);
 router.get(
   '/manual-options',
   authenticate,

@@ -241,6 +241,52 @@ export const tenancyService = {
     return { ok: true, reason: null, tenancy: chosen, activeTenancy: active };
   },
 
+  /**
+   * Explicit manual-payment ownership. The operator chose tenant, house and tenancy;
+   * this only VALIDATES that those three ids, the client/estate and the Nairobi payment
+   * day agree. It never substitutes another tenant (e.g. the house's current occupant).
+   * Rejects (422) when:
+   *   - the tenancy is not in this client/estate scope, or is not ACTIVE/CLOSED;
+   *   - the tenancy belongs to a different house or tenant than supplied;
+   *   - the tenant is not in the tenancy's client+estate;
+   *   - the tenancy does not cover the payment day (start after it, or ended before it).
+   * A CLOSED tenancy is valid for a backdated payment inside its own dates.
+   *
+   * @param {object} house   House doc already scoped to client + estate filter.
+   * @param {object} nairobiDay from dateUtil.parseNairobiDateOnly ({start,end,...}).
+   */
+  async resolveExplicitForManualPayment(clientId, house, { tenantId, tenancyId }, nairobiDay, { session } = {}) {
+    if (!tenantId || !tenancyId) {
+      throw Errors.InvalidRequest('tenantId and tenancyId are required to record a payment');
+    }
+    // One generic message for every identity mismatch so ids cannot be probed.
+    const mismatch = () => Errors.InvalidRequest('tenant, house and tenancy do not match one another in this estate');
+
+    const tenancy = await Tenancy.findOne({
+      _id: tenancyId, clientId, houseId: house._id, estateId: house.estateId,
+    }).session(session || null).lean();
+    if (!tenancy || String(tenancy.tenantId) !== String(tenantId)) throw mismatch();
+    if (!['ACTIVE', 'CLOSED'].includes(tenancy.status)) {
+      throw Errors.InvalidRequest('The selected tenancy is not valid for payments');
+    }
+
+    const tenant = await Tenant.findOne({
+      _id: tenantId, clientId, estateId: tenancy.estateId,
+    }).session(session || null).lean();
+    if (!tenant) throw mismatch();
+
+    const start = new Date(tenancy.startAt).getTime();
+    const end = tenancy.endAt == null ? null : new Date(tenancy.endAt).getTime();
+    const dayStart = nairobiDay.start.getTime();
+    const dayEnd = nairobiDay.end.getTime();
+    // Same overlap rule as coveringNairobiDay: starts on/before the day's end, ends after its start.
+    const covers = Number.isFinite(start) && start <= dayEnd && (end === null || end > dayStart);
+    if (!covers) {
+      throw Errors.InvalidRequest('The selected tenancy did not cover the payment date');
+    }
+    return { tenancy, tenant };
+  },
+
   async resolveForManualPayment(clientId, house, { period = null, paymentDate = null, tenancyId = null, tenantId = null } = {}, { session } = {}) {
     const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
 
