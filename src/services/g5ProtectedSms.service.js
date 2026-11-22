@@ -84,6 +84,7 @@ export async function queueProtectedSms({
   notificationVersion = null,
   idempotencyKey, linkId = null, linkVersion = null, dispatchMode = 'ENABLED',
   session = null,
+  messageId = null,
 }) {
   if (!idempotencyKey || !phone || !body) {
     throw new Error('queueProtectedSms: idempotencyKey, phone and body are required');
@@ -93,7 +94,7 @@ export async function queueProtectedSms({
     .session(session || null).select('_id');
   if (existing) return { id: existing._id, created: false };
 
-  const _id = new mongoose.Types.ObjectId();
+  const _id = messageId || new mongoose.Types.ObjectId();
   const aad = buildProtectedSmsAad({
     messageId: _id, clientId, estateId, tenantId, linkId, linkVersion,
     type, notificationVersion, idempotencyKey: fullKey,
@@ -122,8 +123,14 @@ export async function queueProtectedSms({
 /** Cancel still-queued protected messages bound to a link (rotation/revocation). */
 export async function cancelQueuedForLink(linkId, { clientId, session = null } = {}) {
   const r = await SmsMessage.updateMany(
-    { clientId, g5LinkId: linkId, deliveryMode: 'G5_PROTECTED', status: 'queued' },
-    { $set: { status: 'cancelled', failureReason: 'link_rotated_or_revoked' } },
+    {
+      clientId, g5LinkId: linkId, deliveryMode: 'G5_PROTECTED',
+      status: { $in: ['queued', 'processing'] }, sendStartedAt: null,
+    },
+    { $set: {
+      status: 'cancelled', failureReason: 'link_rotated_or_revoked',
+      dispatchLeaseToken: null, dispatchLeaseExpiresAt: null,
+    } },
     { session: session || undefined }
   );
   return r.modifiedCount;

@@ -21,6 +21,7 @@ const SmsMessageSchema = new Schema(
         'broadcast',
         'general',
         'g5_onboarding_link',
+        'tenant_registration',
       ],
       default: 'general',
     },
@@ -69,9 +70,10 @@ SmsMessageSchema.index({ clientId: 1, tenantId: 1, type: 1, period: 1, notificat
 export const SmsMessage = mongoose.model('SmsMessage', SmsMessageSchema);
 
 export const NOTIFICATION_VERSIONS = {
-  billing_notification: 'billing_notification:v1',
-  rent_reminder: 'rent_reminder:v1',
+  billing_notification: 'billing_notification:v2',
+  rent_reminder: 'rent_reminder:v2',
   arrears_notice: 'arrears_notice:v1',
   payment_confirmation: 'payment_confirmation:v1',
   broadcast: 'broadcast:v1',
+  tenant_registration: 'tenant_registration:v1',
 };

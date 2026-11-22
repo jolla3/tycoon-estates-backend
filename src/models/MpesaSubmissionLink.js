@@ -4,12 +4,18 @@
 // Rotation/revocation change the secret digest, never the Tenant identity.
 // `linkVersion` is a non-monetary CAS token: submissions read it and later write
 // conditioned on it, so a rotate/revoke between read and write defeats the submission.
-// The raw bearer token is NEVER persisted — only a keyed HMAC digest.
+// Store only a keyed HMAC digest and an authenticated, context-bound token envelope; never plaintext.
 // autoIndex:false — unique identity is migration-controlled.
 
 import mongoose from 'mongoose';
 
 const { Schema } = mongoose;
+
+function stripLinkSecrets(_doc, ret) {
+  delete ret.tokenDigest;
+  delete ret.tokenEnvelope;
+  return ret;
+}
 
 const MpesaSubmissionLinkSchema = new Schema(
   {
@@ -19,6 +25,8 @@ const MpesaSubmissionLinkSchema = new Schema(
     merchantProfileId: { type: Schema.Types.ObjectId, ref: 'MpesaMerchantProfile', default: null },
     status: { type: String, enum: ['ACTIVE', 'REVOKED'], default: 'ACTIVE' },
     tokenDigest: { type: String, default: null, select: false },
+    // AES-GCM encrypted reusable token; never selected or serialized by default.
+    tokenEnvelope: { type: String, default: null, select: false },
     linkVersion: { type: Number, default: 1, min: 1 },
     /** Non-token fence for concurrent submission acceptance (not rotated on submit). */
     submissionRevision: { type: Number, default: 0, min: 0 },
@@ -29,7 +37,13 @@ const MpesaSubmissionLinkSchema = new Schema(
     createdByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     lastRotatedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
   },
-  { timestamps: true, autoIndex: false, collection: 'mpesasubmissionlinks' }
+  {
+    timestamps: true,
+    autoIndex: false,
+    collection: 'mpesasubmissionlinks',
+    toJSON: { transform: stripLinkSecrets },
+    toObject: { transform: stripLinkSecrets },
+  }
 );
 
 export const SUBMISSION_LINK_INDEXES = Object.freeze({

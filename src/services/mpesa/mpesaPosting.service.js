@@ -24,6 +24,7 @@ import { AuditLog } from '../../models/AuditLog.js';
 import { settleTenantAccount } from '../tenantCredit.service.js';
 import { queueProtectedSms } from '../g5ProtectedSms.service.js';
 import { Tenant } from '../../models/Tenant.js';
+import { Estate } from '../../models/Estate.js';
 import { TXN_VERIFICATION_STATE } from './daraja.constants.js';
 import { inspectMpesaIndexes } from '../../utils/mpesaIndexReadiness.js';
 import { assertPaymentReceiptIndexesAligned } from '../../utils/paymentReceiptIndexReadiness.js';
@@ -275,25 +276,33 @@ export async function executeFencedPosting({ txn, clientId, estateId, tenantId, 
         if (sub.matchedCount !== 1) throw Errors.Conflict('Submission state changed; aborting');
       }
 
-      // One Tenant-level confirmation SMS per canonical receipt (not per child Payment).
-      const tenant = await Tenant.findOne({ _id: tenantId, clientId, estateId }).session(session).select('phone');
+      // Confirmation follows the validated canonical receipt attribution, not the
+      // Tenant's mutable current estate pointer (tenants can transfer after payment).
+      const tenant = await Tenant.findOne({ _id: tenantId, clientId }).session(session).select('phone');
+      const estate = await Estate.findOne({ _id: estateId, clientId }).session(session).select('name');
       const phone = tenant?.phone && String(tenant.phone).trim();
-      if (phone) {
-        const amountKes = (Number(txn.amountCents) / 100).toFixed(2);
-        const body = `Tycoon Estates: M-PESA receipt ${txn.receiptNumber} of KES ${amountKes} has been applied to your rent account.`;
+      if (phone && estate?.name) {
+        if (!Number.isSafeInteger(txn.amountCents) || txn.amountCents <= 0) {
+          throw Errors.Conflict('Canonical M-PESA receipt amount is invalid for confirmation');
+        }
+        const currency = txn.currency || 'KES';
+        const amount = (Number(txn.amountCents) / 100).toFixed(2);
+        const body = estate.name + ': M-PESA receipt ' + txn.receiptNumber + ' of ' + currency + ' ' + amount + ' has been applied to your rent account.';
         await queueProtectedSms({
           clientId, estateId, tenantId,
           phone, body, type: 'payment_confirmation',
           notificationVersion: 'payment_confirmation:v1',
-          idempotencyKey: `confirm:${String(txn._id)}:${String(tenantId)}`,
+          idempotencyKey: 'confirm:' + String(txn._id) + ':' + String(tenantId),
           session,
         });
       } else {
+        const reason = !tenant ? 'tenant_not_found'
+          : !phone ? 'tenant_phone_missing' : 'estate_identity_unavailable';
         await AuditLog.create([{
           clientId, estateId, userId: actorUserId || undefined,
           action: 'G5_CONFIRMATION_SMS_BLOCKED', resource: 'MpesaTransaction', resourceId: txn._id,
-          description: 'Payment confirmation SMS not queued — tenant phone missing',
-          metadata: { tenantId: String(tenantId), reason: 'tenant_phone_missing' },
+          description: 'Payment confirmation SMS not queued because canonical tenant or estate identity was unavailable',
+          metadata: { tenantId: String(tenantId), reason },
           ipAddress,
         }], { session });
       }

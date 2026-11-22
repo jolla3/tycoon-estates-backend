@@ -24,18 +24,22 @@ export const ENTITLEMENT_PRODUCTS = Object.freeze(['BANKING', 'MPESA']);
  * reason is one of: null (entitled), 'PRODUCT_UNKNOWN', 'CLIENT_NOT_FOUND',
  * 'CLIENT_INACTIVE', 'SUBSCRIPTION_MISSING', 'PRODUCT_NOT_ASSIGNED'.
  */
-export async function checkEntitlement(clientId, product) {
+export async function checkEntitlement(clientId, product, { session = null } = {}) {
   if (!ENTITLEMENT_PRODUCTS.includes(product)) {
     return { entitled: false, reason: 'PRODUCT_UNKNOWN' };
   }
   if (!clientId) {
     return { entitled: false, reason: 'CLIENT_NOT_FOUND' };
   }
-  const client = await Client.findById(clientId).select('isActive').lean();
+  const clientQuery = Client.findById(clientId).select('isActive');
+  if (session) clientQuery.session(session);
+  const client = await clientQuery.lean();
   if (!client) return { entitled: false, reason: 'CLIENT_NOT_FOUND' };
   if (client.isActive !== true) return { entitled: false, reason: 'CLIENT_INACTIVE' };
 
-  const subscription = await Subscription.findOne({ clientId }).select('products').lean();
+  const subscriptionQuery = Subscription.findOne({ clientId }).select('products');
+  if (session) subscriptionQuery.session(session);
+  const subscription = await subscriptionQuery.lean();
   if (!subscription || !Array.isArray(subscription.products)) {
     return { entitled: false, reason: 'SUBSCRIPTION_MISSING' };
   }
@@ -46,7 +50,7 @@ export async function checkEntitlement(clientId, product) {
 }
 
 /** Convenience boolean wrapper for callers (e.g. workers) that only need yes/no. */
-export async function isEntitled(clientId, product) {
-  const result = await checkEntitlement(clientId, product);
+export async function isEntitled(clientId, product, options = {}) {
+  const result = await checkEntitlement(clientId, product, options);
   return result.entitled;
 }
