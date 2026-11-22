@@ -14,6 +14,8 @@ dayjs.extend(timezone);
 
 export const BUSINESS_TZ = 'Africa/Nairobi';
 
+const DATE_ONLY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
 export const dateUtil = {
   now: () => dayjs().tz(BUSINESS_TZ),
   today: () => dayjs().tz(BUSINESS_TZ).format('YYYY-MM-DD'),
@@ -29,4 +31,29 @@ export const dateUtil = {
   },
   format: (date, fmt = 'DD MMM YYYY, HH:mm') => dayjs(date).tz(BUSINESS_TZ).format(fmt),
   isSamePeriod: (dateA, dateB) => dateUtil.periodOf(dateA) === dateUtil.periodOf(dateB),
+
+  /**
+   * Parse a UI date-only string (YYYY-MM-DD) as an Africa/Nairobi calendar day.
+   * Returns { start: Date, end: Date, noon: Date, dateStr, period } in UTC instants.
+   * Never uses `new Date('YYYY-MM-DD')` (that is UTC midnight).
+   */
+  parseNairobiDateOnly(value) {
+    const raw = String(value || '').trim();
+    if (!DATE_ONLY.test(raw)) {
+      return null;
+    }
+    const start = dayjs.tz(raw, BUSINESS_TZ).startOf('day');
+    if (!start.isValid() || start.format('YYYY-MM-DD') !== raw) {
+      return null; // e.g. 2026-02-31
+    }
+    const end = start.endOf('day');
+    const noon = start.hour(12).minute(0).second(0).millisecond(0);
+    return {
+      dateStr: raw,
+      period: start.format('YYYY-MM'),
+      start: start.toDate(),
+      end: end.toDate(),
+      noon: noon.toDate(),
+    };
+  },
 };

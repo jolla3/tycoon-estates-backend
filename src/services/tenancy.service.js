@@ -10,14 +10,34 @@ import { supportsMongoTransactions } from '../config/database.js';
 import { tenancyIneligibleReason, TENANCY_RESOLUTION } from '../utils/manualPaymentTenancy.js';
 import { eligibleTenancyFilter } from '../utils/tenancyEligibility.js';
 
-const ELIGIBLE_OPTIONS_CAP = 20; // display bound only; resolution uses the database count/limit(2)
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 
-/**
- * Resolve NONE / UNIQUE / AMBIGUOUS over the COMPLETE eligible set in the database.
- * Two rows are enough to distinguish the three outcomes, so nothing is truncated and nothing
- * unbounded is loaded: limit(2) is a decision bound, not a candidate cap.
- */
+const escapeRegex = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const clampPage = (v) => Math.min(Math.max(Math.trunc(Number(v)) || 1, 1), 10000);
+const clampLimit = (v, dflt) => Math.min(Math.max(Math.trunc(Number(v)) || dflt, 1), 50);
+
+async function tenancyPage({ clientId, house, extra = null, term = '', pageNo, pageSize }) {
+  const clientOid = oid(clientId);
+  const match = { clientId: clientOid, houseId: oid(house._id), estateId: oid(house.estateId), status: { $in: ['ACTIVE', 'CLOSED'] }, ...(extra || {}) };
+  const tenantMatch = { $expr: { $and: [{ $eq: ['$_id', '$$tid'] }, { $eq: ['$clientId', clientOid] }] } };
+  if (term) tenantMatch.name = { $regex: escapeRegex(term), $options: 'i' };
+  const lookup = { $lookup: { from: Tenant.collection.name, let: { tid: '$tenantId' }, pipeline: [{ $match: tenantMatch }, { $project: { name: 1 } }], as: '_tenant' } };
+  const pageStages = [
+    { $sort: { startAt: -1, _id: -1 } },
+    { $skip: (pageNo - 1) * pageSize },
+    { $limit: pageSize },
+  ];
+  const pipeline = term
+    ? [{ $match: match }, lookup, { $match: { '_tenant.0': { $exists: true } } }, {
+      $facet: { rows: [...pageStages, { $addFields: { tenantName: { $arrayElemAt: ['$_tenant.name', 0] } } }, { $project: { _tenant: 0 } }], total: [{ $count: 'n' }] },
+    }]
+    : [{ $match: match }, {
+      $facet: { rows: [...pageStages, lookup, { $addFields: { tenantName: { $arrayElemAt: ['$_tenant.name', 0] } } }, { $project: { _tenant: 0 } }], total: [{ $count: 'n' }] },
+    }];
+  const [facet] = await Tenancy.aggregate(pipeline);
+  return { rows: facet?.rows || [], total: facet?.total?.[0]?.n || 0 };
+}
+
 async function resolveEligible(base, period, { tenantId = null, session = null } = {}) {
   const elig = eligibleTenancyFilter(period);
   if (!elig) return { status: TENANCY_RESOLUTION.NONE, tenancy: null };
@@ -43,16 +63,43 @@ export function tenancyContains(tenancy, eventTime) {
   if (!Number.isFinite(t) || !Number.isFinite(start) || t < start) return false;
   if (tenancy.endAt == null) return true;
   const end = new Date(tenancy.endAt).getTime();
-  return Number.isFinite(end) && t < end; // endAt is exclusive
+  return Number.isFinite(end) && t < end;
 }
 
-/** PayBill references are retired (never reassigned) in the same transaction as the tenancy close. */
 async function retireTenancyReferences(clientId, tenancyId, session) {
   await MpesaCollectionReference.updateMany(
     { clientId, tenancyId, status: 'ACTIVE' },
     { $set: { status: 'RETIRED', retiredAt: new Date(), retiredReason: 'TENANCY_CLOSED' } },
     { session },
   );
+}
+
+/**
+ * Tenancies that overlap a Nairobi calendar day window [dayStart, dayEnd].
+ * Used for date-only payment attribution. Multiple overlapping rows are always
+ * ambiguous for a date-only submission (including same-tenant overlaps).
+ */
+async function coveringNairobiDay(clientId, houseId, dayStart, dayEnd, { session = null } = {}) {
+  return Tenancy.find({
+    clientId,
+    houseId,
+    status: { $in: ['ACTIVE', 'CLOSED'] },
+    startAt: { $lte: dayEnd },
+    $or: [{ endAt: null }, { endAt: { $gt: dayStart } }],
+  }).sort({ startAt: -1, _id: -1 }).session(session || null).lean();
+}
+
+async function coveringAt(clientId, houseId, eventTime, { session = null, tenantId = null } = {}) {
+  const at = new Date(eventTime);
+  const filter = {
+    clientId,
+    houseId,
+    status: { $in: ['ACTIVE', 'CLOSED'] },
+    startAt: { $lte: at },
+    $or: [{ endAt: null }, { endAt: { $gt: at } }],
+  };
+  if (tenantId) filter.tenantId = tenantId;
+  return Tenancy.find(filter).sort({ startAt: -1, _id: -1 }).session(session || null).lean();
 }
 
 export const tenancyService = {
@@ -83,104 +130,182 @@ export const tenancyService = {
   },
 
   async findUniqueForHouseAt(clientId, houseId, eventTime, { session } = {}) {
-    const at = new Date(eventTime);
-    const candidates = await Tenancy.find({
-      clientId,
-      houseId,
-      status: { $in: ['ACTIVE', 'CLOSED'] },
-      startAt: { $lte: at },
-      $or: [{ endAt: null }, { endAt: { $gt: at } }],
-    })
-      .session(session || null)
-      .lean();
+    const candidates = await coveringAt(clientId, houseId, eventTime, { session });
     if (candidates.length === 1) return candidates[0];
     return null;
   },
 
   /**
-   * Resolve the single Tenancy a manual payment for (house, period) belongs to.
-   * Explicit tenancyId is validated against client/estate/house/tenant/period;
-   * otherwise exactly one eligible tenancy must exist. Fails closed.
+   * Ordinary manual-payment occupancy.
+   * 1) House must currently be eligible: active, occupied, exactly one ACTIVE
+   *    tenancy matching House.tenantId, tenant in same client+estate.
+   * 2) paymentDate (Nairobi day) must resolve to exactly one historical tenancy
+   *    covering that calendar day (may be CLOSED / former occupant).
+   * Multiple tenancy rows covering the same day are always rejected, even when
+   * they share the same tenantId. Noon is never used as a tie-breaker.
+   *
+   * @param {object} nairobiDay - from dateUtil.parseNairobiDateOnly, or a Date (legacy).
    */
-  async resolveForManualPayment(clientId, house, { period, tenancyId = null, tenantId = null }, { session } = {}) {
+  async resolveOccupancyForManualPayment(clientId, house, nairobiDay, { session } = {}) {
+    if (house.isActive === false) {
+      return { ok: false, reason: 'This house is inactive and cannot receive a payment.', tenancy: null };
+    }
+    if (house.status !== 'occupied' || !house.tenantId) {
+      return { ok: false, reason: 'This house is vacant. Only occupied houses can receive ordinary payments.', tenancy: null };
+    }
+
+    const activeRows = await Tenancy.find({
+      clientId,
+      houseId: house._id,
+      estateId: house.estateId,
+      status: 'ACTIVE',
+    }).limit(2).session(session || null).lean();
+
+    if (activeRows.length === 0) {
+      return {
+        ok: false,
+        reason: 'No active tenancy is recorded for this house. House status and tenancy data disagree.',
+        tenancy: null,
+      };
+    }
+    if (activeRows.length > 1) {
+      return {
+        ok: false,
+        reason: 'Multiple active tenancies exist for this house. Resolve occupancy before recording a payment.',
+        tenancy: null,
+      };
+    }
+
+    const active = activeRows[0];
+    if (String(active.tenantId) !== String(house.tenantId)) {
+      return {
+        ok: false,
+        reason: 'House occupant and active tenancy tenant do not match. Resolve occupancy before recording a payment.',
+        tenancy: null,
+      };
+    }
+
+    const tenant = await Tenant.findOne({
+      _id: active.tenantId,
+      clientId,
+      estateId: house.estateId,
+    }).session(session || null).lean();
+    if (!tenant) {
+      return {
+        ok: false,
+        reason: 'Active tenancy tenant is not in this client and estate.',
+        tenancy: null,
+      };
+    }
+
+    // Nairobi calendar-day coverage for the payment date.
+    let dayStart;
+    let dayEnd;
+    if (nairobiDay && nairobiDay.start && nairobiDay.end) {
+      dayStart = nairobiDay.start;
+      dayEnd = nairobiDay.end;
+    } else {
+      const at = new Date(nairobiDay);
+      dayStart = at;
+      dayEnd = at;
+    }
+
+    const covering = await coveringNairobiDay(clientId, house._id, dayStart, dayEnd, { session });
+    if (covering.length === 0) {
+      return {
+        ok: false,
+        reason: 'No tenancy covered this house on the selected payment date. A backdated payment cannot be attributed.',
+        tenancy: null,
+      };
+    }
+
+    // Date-only payment cannot disambiguate multiple tenancy rows covering the same day,
+    // even when they share the same tenantId. Never use noon as a tie-breaker.
+    if (covering.length > 1) {
+      return {
+        ok: false,
+        reason: 'More than one tenancy record covers the selected payment date for this house. Ownership is ambiguous; a time of day is not collected.',
+        tenancy: null,
+      };
+    }
+
+    const chosen = covering[0];
+    if (String(chosen.estateId) !== String(house.estateId)) {
+      return {
+        ok: false,
+        reason: 'Tenancy estate does not match the house estate.',
+        tenancy: null,
+      };
+    }
+
+    return { ok: true, reason: null, tenancy: chosen, activeTenancy: active };
+  },
+
+  async resolveForManualPayment(clientId, house, { period = null, paymentDate = null, tenancyId = null, tenantId = null } = {}, { session } = {}) {
     const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
+
     if (tenancyId) {
       const t = await Tenancy.findOne({ ...base, _id: tenancyId }).session(session || null).lean();
       if (!t) throw Errors.InvalidRequest('Selected tenancy does not belong to this house');
       if (tenantId && String(t.tenantId) !== String(tenantId)) {
         throw Errors.InvalidRequest('Selected tenancy belongs to a different tenant');
       }
-      const reason = tenancyIneligibleReason(t, period);
-      if (reason) throw Errors.InvalidRequest(`Selected tenancy cannot take a payment for ${period}: ${reason}`);
+      if (period) {
+        const reason = tenancyIneligibleReason(t, period);
+        if (reason) throw Errors.InvalidRequest(`Selected tenancy cannot take a payment for ${period}: ${reason}`);
+      }
+      if (paymentDate && !tenancyContains(t, paymentDate)) {
+        throw Errors.InvalidRequest('Selected tenancy does not cover the payment date');
+      }
       return t;
     }
-    const r = await resolveEligible(base, period, { tenantId, session });
-    if (r.status === TENANCY_RESOLUTION.UNIQUE) return r.tenancy;
-    if (r.status === TENANCY_RESOLUTION.AMBIGUOUS) {
-      throw Errors.Conflict(`More than one tenancy covers ${period} for this house; choose which tenancy this payment is for`);
+
+    if (paymentDate) {
+      const r = await this.resolveOccupancyForManualPayment(clientId, house, paymentDate, { session });
+      if (!r.ok) throw Errors.InvalidRequest(r.reason || 'Cannot resolve occupancy for payment date');
+      if (tenantId && String(r.tenancy.tenantId) !== String(tenantId)) {
+        throw Errors.InvalidRequest('tenantId does not match the tenancy covering the payment date');
+      }
+      return r.tenancy;
     }
-    if (tenantId && (await resolveEligible(base, period, { session })).status !== TENANCY_RESOLUTION.NONE) {
-      throw Errors.InvalidRequest('tenantId does not match any tenancy covering this period for this house');
+
+    if (period) {
+      const r = await resolveEligible(base, period, { tenantId, session });
+      if (r.status === TENANCY_RESOLUTION.UNIQUE) return r.tenancy;
+      if (r.status === TENANCY_RESOLUTION.AMBIGUOUS) {
+        throw Errors.Conflict(`More than one tenancy covers ${period} for this house; choose which tenancy this payment is for`);
+      }
+      if (tenantId && (await resolveEligible(base, period, { session })).status !== TENANCY_RESOLUTION.NONE) {
+        throw Errors.InvalidRequest('tenantId does not match any tenancy covering this period for this house');
+      }
+      throw Errors.InvalidRequest(`No tenancy fully covers ${period} for this house; a payment cannot be attributed to a tenant`);
     }
-    throw Errors.InvalidRequest(`No tenancy fully covers ${period} for this house; a payment cannot be attributed to a tenant`);
+
+    throw Errors.InvalidRequest('paymentDate is required to resolve payment ownership');
   },
 
-  /**
-   * Read model for the manual-payment form: human-readable tenancies for a house + period.
-   * Period resolution uses EVERY tenancy that can cover the period (never a truncated "latest N"),
-   * while the browsable option list is paginated and searchable by tenant name, so older
-   * tenancies are always reachable and nothing unbounded is loaded.
-   */
-  async manualPaymentOptions(clientId, house, period, { page = 1, limit = 20, search = '' } = {}) {
-    const pageSize = Math.min(Math.max(Number(limit) || 20, 1), 50);
-    const pageNo = Math.max(Number(page) || 1, 1);
+  async manualPaymentOptions(clientId, house, period, {
+    page = 1, limit = 20, search = '', eligiblePage = 1, eligibleLimit = 10, eligibleSearch = '',
+  } = {}) {
     const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
-
-    // 1. Resolution and the "who can take this payment" list come from the SAME exact database
-    //    predicate as resolveForManualPayment, so options and resolver cannot disagree and no
-    //    eligible tenancy is ever dropped by a candidate cap.
     const elig = eligibleTenancyFilter(period);
-    const eligibleFilter = elig ? { ...base, ...elig } : null;
-    const [r, eligibleTotal, eligibleRows] = await Promise.all([
-      resolveEligible(base, period),
-      eligibleFilter ? Tenancy.countDocuments(eligibleFilter) : 0,
-      eligibleFilter
-        ? Tenancy.find(eligibleFilter).sort({ startAt: -1, _id: -1 }).limit(ELIGIBLE_OPTIONS_CAP).lean()
-        : [],
+    const r = await resolveEligible(base, period);
+    const ePage = clampPage(eligiblePage);
+    const eSize = clampLimit(eligibleLimit, 10);
+    const eTerm = String(eligibleSearch || '').trim().slice(0, 80);
+    const [eligibleTotal, eligiblePageResult] = await Promise.all([
+      elig ? Tenancy.countDocuments({ ...base, ...elig }) : 0,
+      elig ? tenancyPage({ clientId, house, extra: elig, term: eTerm, pageNo: ePage, pageSize: eSize }) : { rows: [], total: 0 },
     ]);
-
-    // 2. Browsable page, optionally filtered by tenant name. The name filter is joined in the
-    //    database ($lookup) so no tenant-id list is materialised or truncated in memory.
-    const term = String(search || '').trim().slice(0, 80);
-    const matchBase = { clientId: oid(clientId), houseId: oid(house._id), estateId: oid(house.estateId), status: { $in: ['ACTIVE', 'CLOSED'] } };
-    const pipeline = [{ $match: matchBase }];
-    if (term) {
-      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      pipeline.push(
-        { $lookup: { from: Tenant.collection.name, localField: 'tenantId', foreignField: '_id', as: '_tenant' } },
-        { $match: { _tenant: { $elemMatch: { clientId: oid(clientId), name: { $regex: escaped, $options: 'i' } } } } },
-      );
-    }
-    pipeline.push({
-      $facet: {
-        rows: [{ $sort: { startAt: -1, _id: -1 } }, { $skip: (pageNo - 1) * pageSize }, { $limit: pageSize }, { $project: { _tenant: 0 } }],
-        total: [{ $count: 'n' }],
-      },
-    });
-    const [facet] = await Tenancy.aggregate(pipeline);
-    const pageRows = facet?.rows || [];
-    const total = facet?.total?.[0]?.n || 0;
-
-    const wanted = new Map();
-    for (const t of [...pageRows, ...eligibleRows]) wanted.set(String(t._id), t);
-    const tenants = await Tenant.find({ clientId, _id: { $in: [...wanted.values()].map((t) => t.tenantId) } })
-      .select('name').lean();
-    const nameById = new Map(tenants.map((t) => [String(t._id), t.name]));
+    const hPage = clampPage(page);
+    const hSize = clampLimit(limit, 20);
+    const hTerm = String(search || '').trim().slice(0, 80);
+    const history = await tenancyPage({ clientId, house, term: hTerm, pageNo: hPage, pageSize: hSize });
     const toOption = (t) => {
       const reason = tenancyIneligibleReason(t, period);
       return {
         tenancyId: String(t._id),
-        tenantName: nameById.get(String(t.tenantId)) || 'Unknown tenant',
+        tenantName: t.tenantName || 'Unknown tenant',
         startAt: t.startAt,
         endAt: t.endAt || null,
         status: t.status,
@@ -193,14 +318,20 @@ export const tenancyService = {
       period,
       resolution: r.status,
       defaultTenancyId: r.status === TENANCY_RESOLUTION.UNIQUE ? String(r.tenancy._id) : null,
-      // Always present regardless of page/search. Bounded for display; eligibleTotal is exact.
-      eligibleOptions: eligibleRows.map(toOption),
       eligibleTotal,
-      options: pageRows.map(toOption),
-      page: pageNo,
-      limit: pageSize,
-      total,
-      hasMore: pageNo * pageSize < total,
+      eligibleSelection: {
+        items: eligiblePageResult.rows.map(toOption),
+        page: ePage,
+        limit: eSize,
+        total: eligiblePageResult.total,
+        hasMore: ePage * eSize < eligiblePageResult.total,
+        search: eTerm,
+      },
+      options: history.rows.map(toOption),
+      page: hPage,
+      limit: hSize,
+      total: history.total,
+      hasMore: hPage * hSize < history.total,
     };
   },
 
@@ -327,39 +458,33 @@ export const tenancyService = {
           await current.save({ session });
           await retireTenancyReferences(clientId, current._id, session);
           await House.updateOne(
-            { _id: current.houseId, clientId },
+            { _id: current.houseId, clientId, tenantId: tenant._id },
             { tenantId: null, status: 'vacant' },
             { session }
           );
         }
-        try {
-          const [created] = await Tenancy.create(
-            [{
-              clientId,
-              estateId: newHouse.estateId,
-              houseId: newHouse._id,
-              tenantId: tenant._id,
-              startAt: now,
-              endAt: null,
-              status: 'ACTIVE',
-              openedByUserId: actorUserId,
-            }],
-            { session }
-          );
-          newTenancy = created;
-        } catch (err) {
-          if (err?.code === 11000) throw Errors.Conflict('Target house already has an active tenancy');
-          throw err;
-        }
+        const [created] = await Tenancy.create(
+          [{
+            clientId,
+            estateId: newHouse.estateId,
+            houseId: newHouse._id,
+            tenantId: tenant._id,
+            startAt: now,
+            endAt: null,
+            status: 'ACTIVE',
+            openedByUserId: actorUserId,
+          }],
+          { session }
+        );
+        newTenancy = created;
         newHouse.tenantId = tenant._id;
         newHouse.status = 'occupied';
         await newHouse.save({ session });
-        tenant.houseId = newHouse._id;
-        tenant.estateId = newHouse.estateId;
-        tenant.status = 'active';
-        tenant.moveInDate = now;
-        tenant.moveOutDate = null;
-        await tenant.save({ session });
+        await Tenant.updateOne(
+          { _id: tenant._id, clientId },
+          { houseId: newHouse._id, estateId: newHouse.estateId, status: 'active', moveInDate: now, moveOutDate: null },
+          { session }
+        );
       });
       return newTenancy;
     } finally {

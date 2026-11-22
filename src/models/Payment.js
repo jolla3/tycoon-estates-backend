@@ -17,6 +17,9 @@ const PaymentSchema = new Schema(
     bankTransactionId: { type: Schema.Types.ObjectId, ref: 'BankTransaction', unique: true, sparse: true },
     // Internal MpesaTransaction._id (never the external receipt string).
     mpesaReceiptId: { type: Schema.Types.ObjectId, default: null },
+    // Link to canonical ManualReceipt envelope when this is a MANUAL allocation child.
+    // The gross external reference lives on ManualReceipt, not on children.
+    manualReceiptId: { type: Schema.Types.ObjectId, ref: 'ManualReceipt', default: null, index: true },
     // Deterministic identity of a CREDIT-origin application (migration-controlled unique).
     creditApplicationKey: { type: String, default: null },
     tenderMethod: { type: String, enum: TENDER_METHODS, default: null },
@@ -42,14 +45,13 @@ PaymentSchema.path('amountCents').validate(
 
 // MANUAL paymentReference uniqueness is installed by the explicit G3.3 migration,
 // after duplicate preflight. Do not add it to schema auto-index creation.
+// Child MANUAL allocation Payments must NOT set paymentReference; the external
+// reference belongs on ManualReceipt only.
 PaymentSchema.index({ estateId: 1, houseId: 1, period: 1 });
 PaymentSchema.index({ clientId: 1, paymentDate: -1 });
 PaymentSchema.index({ tenancyId: 1, paymentDate: -1 });
-// G5: the former global unique { mpesaReceiptId } index is REPLACED by the
-// migration-controlled compound child identity { mpesaReceiptId, tenancyId }
-// (one child Payment per affected Tenancy). Neither is auto-created here; see
-// scripts/migrations/20261113_g5_payment_receipt_tenancy_index.js.
 PaymentSchema.index({ mpesaReceiptId: 1 }, { sparse: true, name: 'idx_payment_mpesa_receipt' });
+PaymentSchema.index({ manualReceiptId: 1 }, { sparse: true, name: 'idx_payment_manual_receipt' });
 
 export const Payment = mongoose.model('Payment', PaymentSchema);
 export const PAYMENT_ORIGINS_LIST = PAYMENT_ORIGINS;
