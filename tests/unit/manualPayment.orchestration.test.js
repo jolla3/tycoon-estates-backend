@@ -1,110 +1,124 @@
-/**
- * Explicit tenant/house/tenancy/date ownership for manual payments (no database).
- * Collaborators are stubbed so each test asserts WHICH checks run and that the explicit
- * tenant is never silently replaced by the house's current occupant.
- */
 import '../setup.js';
 import { jest } from '@jest/globals';
 import mongoose from 'mongoose';
 
+const calls = [];
+const clientId = 'client-1', estateId = 'estate-1', houseId = 'house-1';
+const tenantId = 'tenant-1', tenancyId = 'tenancy-1';
+const house = { _id: houseId, estateId, houseNumber: '78' };
+const tenant = { _id: tenantId, estateId, name: 'Alice', phone: '+254700000001' };
+let receiptStore = null, settlementFailure = null, session;
+const query = (value) => {
+  const q = { session: jest.fn(() => q), lean: jest.fn(() => q), select: jest.fn(() => q),
+    then: (resolve, reject) => Promise.resolve(value).then(resolve, reject) };
+  return q;
+};
+const House = { findOne: jest.fn(() => query(house)) };
+const Tenant = { findOne: jest.fn(() => query(tenant)) };
+const Payment = { findOne: jest.fn(() => query(null)), find: jest.fn(() => query([])) };
+const PaymentAllocation = { find: jest.fn(() => query([])) };
+const TenantCreditMovement = { find: jest.fn(() => query([])) };
+const ManualReceipt = {
+  findOne: jest.fn(() => query(receiptStore)),
+  create: jest.fn(async ([input], options) => {
+    calls.push(['receipt:create', options?.session]);
+    const doc = { ...input, _id: 'receipt-1',
+      save: jest.fn(async (opts) => calls.push(['receipt:save', opts?.session])) };
+    receiptStore = doc;
+    return [doc];
+  }),
+};
+const audit = jest.fn(async () => calls.push(['audit']));
+const assertManualReceiptIndexesAligned = jest.fn(async () => {});
+const resolveExplicitForManualPayment = jest.fn(async (_client, h, ids) => {
+  calls.push(['resolve', h, ids]);
+  return { tenancy: { _id: ids.tenancyId, tenantId: ids.tenantId, estateId }, tenant };
+});
+const settleTenantAccount = jest.fn(async ({ session: tx, tenantId: targetTenantId, estateId: targetEstateId }) => {
+  calls.push(['settle', tx, targetTenantId, targetEstateId]);
+  if (settlementFailure) throw settlementFailure;
+  return { plan: { creditAppliedCents: 0, receiptAppliedCents: 125000, newCreditCents: 0 },
+    receiptPayments: [{ _id: 'payment-1', amountCents: 125000 }], creditPayments: [], movements: [],
+    allocations: [{ paymentId: 'payment-1', amountCents: 125000 }] };
+});
+const tenantAccountSnapshot = jest.fn(async () => ({ netCents: 0, creditCents: 0, outstandingCents: 0 }));
+const mockTransaction = jest.fn(async (callback) => {
+  calls.push(['transaction:start']);
+  try { await callback(); calls.push(['transaction:commit']); }
+  catch (error) { calls.push(['transaction:abort']); throw error; }
+});
+const mockEndSession = jest.fn(async () => calls.push(['session:end']));
+jest.unstable_mockModule('../../src/models/House.js', () => ({ House }));
+jest.unstable_mockModule('../../src/models/Tenant.js', () => ({ Tenant }));
+jest.unstable_mockModule('../../src/models/Payment.js', () => ({ Payment }));
+jest.unstable_mockModule('../../src/models/PaymentAllocation.js', () => ({ PaymentAllocation }));
+jest.unstable_mockModule('../../src/models/ManualReceipt.js', () => ({ ManualReceipt }));
+jest.unstable_mockModule('../../src/models/TenantCreditMovement.js', () => ({ TenantCreditMovement }));
+jest.unstable_mockModule('../../src/services/audit.service.js', () => ({ audit, auditRequired: jest.fn(), listAuditLogs: jest.fn() }));
+jest.unstable_mockModule('../../src/services/tenancy.service.js', () => ({ tenancyService: { resolveExplicitForManualPayment } }));
+jest.unstable_mockModule('../../src/services/tenantCredit.service.js', () => ({ settleTenantAccount, tenantAccountSnapshot, creditBalanceCents: jest.fn() }));
+jest.unstable_mockModule('../../src/utils/manualReceiptIndexReadiness.js', () => ({ assertManualReceiptIndexesAligned }));
 jest.unstable_mockModule('../../src/config/database.js', () => ({
-  connectDatabase: jest.fn(), disconnectDatabase: jest.fn(), isDatabaseReady: jest.fn(() => true),
-  verifyMongoTransactionSupport: jest.fn(async () => true), supportsMongoTransactions: jest.fn(() => true),
+  supportsMongoTransactions: () => true, connectDatabase: jest.fn(), disconnectDatabase: jest.fn(), isDatabaseReady: () => true,
 }));
-jest.unstable_mockModule('../../src/services/audit.service.js', () => ({
-  audit: jest.fn(async () => {}), auditRequired: jest.fn(), listAuditLogs: jest.fn(),
-}));
+const { paymentService } = await import('../../src/services/payment.service.js');
 
-const { tenancyService } = await import('../../src/services/tenancy.service.js');
-const { Tenancy } = await import('../../src/models/Tenancy.js');
-const { Tenant } = await import('../../src/models/Tenant.js');
-const { dateUtil } = await import('../../src/utils/date.js');
-
-const oid = () => new mongoose.Types.ObjectId();
-const CLIENT = oid(); const ESTATE = oid(); const HOUSE = oid();
-const T_OLD = oid(); const T_NOW = oid();
-const house = { _id: HOUSE, estateId: ESTATE, houseNumber: '78' };
-
-const old = { _id: oid(), clientId: CLIENT, estateId: ESTATE, houseId: HOUSE, tenantId: T_OLD, status: 'CLOSED',
-  startAt: new Date('2026-01-01T00:00:00+03:00'), endAt: new Date('2026-07-01T00:00:00+03:00') };
-const now = { _id: oid(), clientId: CLIENT, estateId: ESTATE, houseId: HOUSE, tenantId: T_NOW, status: 'ACTIVE',
-  startAt: new Date('2026-07-01T00:00:00+03:00'), endAt: null };
-
-const chain = (result) => { const c = { session: () => c, lean: () => c, then: (r, j) => Promise.resolve(result).then(r, j) }; return c; };
-const day = (d) => dateUtil.parseNairobiDateOnly(d);
-
-/** Emulates the DB: findOne filtered by the exact query keys the service sends. */
-function stubTenancies(rows, tenants = [{ _id: T_OLD, clientId: CLIENT, estateId: ESTATE }, { _id: T_NOW, clientId: CLIENT, estateId: ESTATE }]) {
-  const match = (q, r) => Object.entries(q).every(([k, v]) => String(r[k]) === String(v));
-  jest.spyOn(Tenancy, 'findOne').mockImplementation((q) => chain(rows.find((r) => match(q, r)) || null));
-  jest.spyOn(Tenant, 'findOne').mockImplementation((q) => chain(tenants.find((r) => match(q, r)) || null));
-}
+beforeEach(() => {
+  calls.length = 0; receiptStore = null; settlementFailure = null;
+  House.findOne.mockImplementation(() => query(house));
+  Tenant.findOne.mockImplementation(() => query(tenant));
+  ManualReceipt.findOne.mockImplementation(() => query(receiptStore));
+  ManualReceipt.create.mockClear();
+  Payment.findOne.mockImplementation(() => query(null));
+  Payment.find.mockImplementation(() => query([]));
+  PaymentAllocation.find.mockImplementation(() => query([]));
+  TenantCreditMovement.find.mockImplementation(() => query([]));
+  audit.mockClear(); resolveExplicitForManualPayment.mockClear(); settleTenantAccount.mockClear();
+  tenantAccountSnapshot.mockClear(); assertManualReceiptIndexesAligned.mockClear();
+  mockTransaction.mockClear(); mockEndSession.mockClear();
+  session = { withTransaction: mockTransaction, endSession: mockEndSession };
+  jest.spyOn(mongoose, 'startSession').mockResolvedValue(session);
+});
 afterEach(() => jest.restoreAllMocks());
+const body = (overrides = {}) => ({ houseId, tenantId, tenancyId, amountCents: 125000,
+  paymentDate: '2026-08-10', tenderMethod: 'CASH', idempotencyKey: 'manual-attempt-0001', ...overrides });
 
-const resolve = (ids, d) => tenancyService.resolveExplicitForManualPayment(CLIENT, house, ids, day(d));
-
-describe('resolveExplicitForManualPayment', () => {
-  test('backdated payment goes to the FORMER occupant, not the current one', async () => {
-    stubTenancies([old, now]);
-    const r = await resolve({ tenantId: T_OLD, tenancyId: old._id }, '2026-03-10');
-    expect(String(r.tenancy.tenantId)).toBe(String(T_OLD));
-    expect(String(r.tenant._id)).toBe(String(T_OLD));
+describe('paymentService.recordManual orchestration', () => {
+  test('passes explicit tenant and tenancy through settlement with one MongoDB session', async () => {
+    const result = await paymentService.recordManual(clientId, body());
+    expect(result.receipt).toMatchObject({ _id: 'receipt-1', tenantId, occupancyTenancyId: tenancyId });
+    expect(resolveExplicitForManualPayment).toHaveBeenCalledWith(clientId, house, { tenantId, tenancyId }, expect.objectContaining({ dateStr: '2026-08-10' }), { session });
+    expect(settleTenantAccount).toHaveBeenCalledWith(expect.objectContaining({ clientId, estateId, tenantId, session }));
+    expect(ManualReceipt.create).toHaveBeenCalledWith([expect.objectContaining({ clientId, estateId, tenantId, houseId, occupancyTenancyId: tenancyId })], { session });
+    expect(calls).toContainEqual(['receipt:save', session]);
+    expect(mockTransaction).toHaveBeenCalledTimes(1);
+    expect(mockEndSession).toHaveBeenCalledTimes(1);
   });
-
-  test('current occupant on a current date is accepted', async () => {
-    stubTenancies([old, now]);
-    const r = await resolve({ tenantId: T_NOW, tenancyId: now._id }, '2026-08-15');
-    expect(String(r.tenancy._id)).toBe(String(now._id));
+  test('idempotent retry reuses the canonical receipt without another settlement', async () => {
+    const first = await paymentService.recordManual(clientId, body());
+    const createCount = ManualReceipt.create.mock.calls.length;
+    const settlementCount = settleTenantAccount.mock.calls.length;
+    const second = await paymentService.recordManual(clientId, body());
+    expect(second.reused).toBe(true);
+    expect(second.receipt._id).toBe(first.receipt._id);
+    expect(ManualReceipt.create).toHaveBeenCalledTimes(createCount);
+    expect(settleTenantAccount).toHaveBeenCalledTimes(settlementCount);
   });
-
-  test('explicit former tenant is never replaced by the current occupant (contradictory ids rejected)', async () => {
-    stubTenancies([old, now]);
-    await expect(resolve({ tenantId: T_NOW, tenancyId: old._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
-    await expect(resolve({ tenantId: T_OLD, tenancyId: now._id }, '2026-08-15')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+  test('audit logging occurs only after transaction commit and session completion', async () => {
+    await paymentService.recordManual(clientId, body());
+    const commit = calls.findIndex(([name]) => name === 'transaction:commit');
+    const end = calls.findIndex(([name]) => name === 'session:end');
+    const log = calls.findIndex(([name]) => name === 'audit');
+    expect(commit).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(commit);
+    expect(log).toBeGreaterThan(end);
+    expect(audit).toHaveBeenCalledTimes(1);
   });
-
-  test('tenancy that does not cover the payment date is rejected', async () => {
-    stubTenancies([old, now]);
-    // old ended 2026-07-01; now started 2026-07-01
-    await expect(resolve({ tenantId: T_OLD, tenancyId: old._id }, '2026-09-01')).rejects.toMatchObject({ message: expect.stringMatching(/did not cover/) });
-    await expect(resolve({ tenantId: T_NOW, tenancyId: now._id }, '2026-06-30')).rejects.toMatchObject({ message: expect.stringMatching(/did not cover/) });
-  });
-
-  test('tenancy end is exclusive and start day is inclusive (Nairobi days)', async () => {
-    stubTenancies([old, now]);
-    await expect(resolve({ tenantId: T_OLD, tenancyId: old._id }, '2026-06-30')).resolves.toBeDefined();
-    await expect(resolve({ tenantId: T_NOW, tenancyId: now._id }, '2026-07-01')).resolves.toBeDefined();
-    await expect(resolve({ tenantId: T_OLD, tenancyId: old._id }, '2026-07-01')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
-  });
-
-  test('tenancy of another house/estate/client resolves to nothing and is rejected; lookup is scoped', async () => {
-    const spy = jest.spyOn(Tenancy, 'findOne').mockReturnValue(chain(null));
-    jest.spyOn(Tenant, 'findOne').mockReturnValue(chain(null));
-    await expect(resolve({ tenantId: T_OLD, tenancyId: oid() }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
-    expect(spy.mock.calls[0][0]).toMatchObject({ clientId: CLIENT, houseId: HOUSE, estateId: ESTATE });
-  });
-
-  test('tenant outside the client/estate is rejected even with a consistent tenancy', async () => {
-    stubTenancies([old], []); // tenant missing from this client+estate
-    await expect(resolve({ tenantId: T_OLD, tenancyId: old._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
-  });
-
-  test('VOID tenancy is invalid', async () => {
-    stubTenancies([{ ...old, status: 'VOID' }]);
-    await expect(resolve({ tenantId: T_OLD, tenancyId: old._id }, '2026-03-10')).rejects.toMatchObject({ message: expect.stringMatching(/not valid for payments/) });
-  });
-
-  test('missing ids are rejected before any lookup', async () => {
-    const spy = jest.spyOn(Tenancy, 'findOne');
-    await expect(resolve({ tenantId: T_OLD }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
-    await expect(resolve({ tenancyId: old._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  test('identity mismatches share one generic message (ids cannot be probed)', async () => {
-    stubTenancies([old, now]);
-    const e1 = await resolve({ tenantId: T_NOW, tenancyId: old._id }, '2026-03-10').catch((e) => e);
-    const e2 = await resolve({ tenantId: T_OLD, tenancyId: oid() }, '2026-03-10').catch((e) => e);
-    expect(e1.message).toBe(e2.message);
+  test('failed settlement aborts and never audits successful payment', async () => {
+    settlementFailure = new Error('settlement failed');
+    await expect(paymentService.recordManual(clientId, body())).rejects.toThrow('settlement failed');
+    expect(calls).toContainEqual(['transaction:abort']);
+    expect(mockEndSession).toHaveBeenCalledTimes(1);
+    expect(audit).not.toHaveBeenCalled();
   });
 });

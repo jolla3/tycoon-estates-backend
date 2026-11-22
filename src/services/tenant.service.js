@@ -9,12 +9,19 @@ import { Payment } from '../models/Payment.js';
 import { ManualReceipt } from '../models/ManualReceipt.js';
 import { Tenancy } from '../models/Tenancy.js';
 import { TenantCreditMovement } from '../models/TenantCreditMovement.js';
+import { Ledger } from '../models/Ledger.js';
 import { creditBalanceCents } from './tenantCredit.service.js';
 import { Errors } from '../utils/errors.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import { dateUtil } from '../utils/date.js';
 import { ledgerService } from './ledger.service.js';
 import { tenancyService } from './tenancy.service.js';
+import { smsService } from './sms.service.js';
+import { mpesaSubmissionLinkService } from './mpesa/mpesaSubmissionLink.service.js';
+import { aggregateRentCharges } from '../utils/smsBilling.js';
+import { logger } from '../config/logger.js';
+import { money } from '../utils/money.js';
+import { generateBearerToken } from '../utils/g5Token.js';
 import mongoose from 'mongoose';
 import { supportsMongoTransactions } from '../config/database.js';
 
@@ -129,28 +136,94 @@ async function buildAccount(clientId, tenant, charges, tenancyIds) {
 
 export const tenantService = {
   async create(clientId, data, actorUserId = null) {
-    const house = await House.findOne({ _id: data.houseId, clientId });
-    if (!house) throw Errors.HouseNotFound();
     if (supportsMongoTransactions() === false) {
       throw Errors.ServiceUnavailable('MongoDB transactions required for tenant create');
     }
+    const tenantId = new mongoose.Types.ObjectId();
+    const registrationLinkId = new mongoose.Types.ObjectId();
+    const registrationMessageId = new mongoose.Types.ObjectId();
+    const registrationToken = generateBearerToken();
     const session = await mongoose.startSession();
     try {
       let tenant;
       await session.withTransaction(async () => {
+        // House/Estate ownership is checked inside the same transaction as occupancy.
+        const house = await House.findOne({ _id: data.houseId, clientId }).session(session);
+        if (!house || house.isActive === false) throw Errors.HouseNotFound();
+        const estate = await Estate.findOne({ _id: house.estateId, clientId }).session(session).lean();
+        if (!estate?.name) throw Errors.Conflict('House Estate ownership could not be verified');
         const [created] = await Tenant.create(
-          [{ ...data, clientId, estateId: house.estateId, status: 'active' }],
+          [{ ...data, phone: typeof data.phone === 'string' && data.phone.trim() ? data.phone.trim() : null, _id: tenantId, clientId, estateId: house.estateId, status: 'active' }],
           { session }
         );
         tenant = created;
-        await tenancyService.open({
+        const tenancy = await tenancyService.open({
           clientId, estateId: house.estateId, houseId: house._id,
           tenantId: tenant._id, startAt: data.moveInDate || new Date(), actorUserId,
         }, { session });
+
+        // Registration statements are informational snapshots only. Never generate
+        // financial charges here or alter the G3 billing/partial-period policy.
+        const period = dateUtil.currentPeriod();
+        const currentCharges = await RentCharge.find({
+          clientId, estateId: house.estateId, tenancyId: tenancy._id, period,
+        }).session(session).lean();
+        let billText = 'Current billing details are not available yet.';
+        if (currentCharges.length) {
+          try {
+            const totals = aggregateRentCharges(currentCharges);
+            billText = [
+              `Current bill ${period}:`,
+              `Rent ${money.format(totals.rentCents, estate.currency || 'KES')}`,
+              `Water ${money.format(totals.waterCents, estate.currency || 'KES')}`,
+              `Electricity ${money.format(totals.electricityCents, estate.currency || 'KES')}`,
+              `Other ${money.format(totals.otherCents, estate.currency || 'KES')}`,
+              `Paid ${money.format(totals.paidCents, estate.currency || 'KES')}`,
+              `Outstanding ${money.format(totals.totalOutstandingCents, estate.currency || 'KES')}`,
+              totals.dueDates.length ? `Due ${totals.dueDates.map((d) => dateUtil.format(d, 'DD MMM YYYY')).join(', ')}` : null,
+            ].filter(Boolean).join('. ') + '.';
+          } catch (err) {
+            logger.warn({ tenantId: String(tenant._id), estateId: String(house.estateId), code: err.code || 'BILLING_SNAPSHOT_INVALID' }, 'Registration billing snapshot omitted because source data was invalid');
+            billText = 'Current billing details are temporarily unavailable.';
+          }
+        }
+        const registrationText = `Registration confirmed for ${tenant.name}, House ${house.houseNumber}. ${billText}`;
+        const provision = await mpesaSubmissionLinkService.provisionForRegistration({
+          clientId, estateId: house.estateId, tenant, house, estate,
+          registrationText, session, linkId: registrationLinkId,
+          messageId: registrationMessageId, token: registrationToken, actorUserId,
+        });
+
+        // Exactly one welcome path: protected M-PESA onboarding OR ordinary SMS.
+        // No phone means no outbox row, but a valid tenant/tenancy still commits.
+        if (!provision.eligible) {
+          if (tenant.phone) {
+            // BankAccount is a statement-ingestion connection, not an authoritative
+            // rent-receiving destination. Do not expose it as payment instructions.
+            const ordinaryRegistrationText = registrationText + ' For verified bank payment instructions, contact the estate office.';
+            await smsService.queueSms({
+              clientId, estateId: house.estateId, tenantId: tenant._id, houseId: house._id,
+              to: tenant.phone, message: ordinaryRegistrationText,
+              type: 'tenant_registration', priority: 8, period,
+              notificationVersion: 'tenant_registration:v1',
+              idempotencyKey: `registration:${String(tenant._id)}:v1`,
+              session,
+            });
+          } else {
+            await AuditLog.create([{
+              clientId, estateId: house.estateId, userId: actorUserId || undefined,
+              action: 'TENANT_REGISTRATION_SMS_BLOCKED',
+              resource: 'Tenant', resourceId: String(tenant._id),
+              description: 'Registration SMS could not be queued because the tenant phone number is missing',
+              metadata: { reason: 'tenant_phone_missing' },
+            }], { session });
+            logger.warn({ tenantId: String(tenant._id), estateId: String(house.estateId), reason: 'tenant_phone_missing' }, 'Tenant registration SMS was not queued because the tenant has no phone number');
+          }
+        }
       });
       return tenant;
     } finally {
-      session.endSession();
+      await session.endSession();
     }
   },
 
@@ -166,16 +239,19 @@ export const tenantService = {
     if (!tenant) throw Errors.TenantNotFound();
 
     const ownTenancies = await Tenancy.find({
-      clientId, tenantId: tenant._id, estateId: tenant.estateId, status: { $in: ['ACTIVE', 'CLOSED'] },
+      clientId,
+      tenantId: tenant._id,
+      estateId: tenant.estateId,
+      status: { $in: ['ACTIVE', 'CLOSED'] },
     }).select('_id houseId').lean();
-    const tenancyIds = ownTenancies.map((t) => t._id);
+    const tenancyIds = ownTenancies.map((tenancy) => tenancy._id);
 
     const [house, estate, charges, sms, activity, payments] = await Promise.all([
       House.findOne({ _id: tenant.houseId, clientId }).lean(),
       Estate.findOne({ _id: tenant.estateId, clientId }).lean(),
       RentCharge.find({
         clientId,
-        // Only this tenant's own obligations (never another occupant of the same house).
+        estateId: tenant.estateId,
         $or: [
           { tenantId: tenant._id },
           { tenancyId: { $in: tenancyIds } },
@@ -221,26 +297,32 @@ export const tenantService = {
 
     const monthly = [...byPeriod.values()].sort((a, b) => (a.period < b.period ? 1 : -1));
 
-    const activeTenancy = await tenancyService.getActiveForHouse(clientId, tenant.houseId);
-    const ledgerBal = activeTenancy
-      ? await ledgerService.balanceForTenancy(clientId, activeTenancy._id)
-      : tenant.houseId
-        ? await ledgerService.balanceForHouse(clientId, tenant.houseId)
-        : await ledgerService.balanceForTenant(clientId, tenant._id, null);
-    // Authoritative outstanding = Ledger running balance (amount owed)
-    const knownArrearsCents = Number.isSafeInteger(ledgerBal?.knownArrearsCents)
-      ? ledgerBal.knownArrearsCents
+    const tenancyBalances = await Promise.all(
+      ownTenancies.map(async (tenancy) => {
+        const [balance, hasRentLedger] = await Promise.all([
+          ledgerService.balanceForTenancy(clientId, tenancy._id),
+          Ledger.exists({
+            clientId,
+            estateId: tenant.estateId,
+            tenancyId: tenancy._id,
+            accountCategory: 'RENT',
+          }),
+        ]);
+        return hasRentLedger ? balance : null;
+      })
+    );
+    // A zero from balanceForTenancy is meaningful only when RENT ledger rows exist.
+    // Keep each tenancy's arrears separate before summing; never offset one tenancy's
+    // positive ledger balance against another tenancy's arrears.
+    const availableTenancyBalances = tenancyBalances.filter(
+      (balance) => balance && Number.isSafeInteger(balance.knownArrearsCents)
+    );
+    const knownArrearsCents = availableTenancyBalances.length
+      ? availableTenancyBalances.reduce((total, balance) => total + balance.knownArrearsCents, 0)
       : null;
-    const outstandingCents = knownArrearsCents;
-    // Prefer ledger-reported payments when available; fall back to charge cache
-    const paidFromLedger = tenant.houseId
-      ? await ledgerService.totalPaymentsReceived(clientId, { houseId: tenant.houseId })
-      : await ledgerService.totalPaymentsReceived(clientId, { tenantId: tenant._id });
-    // "Paid" = money allocated to this tenant's rent charges. It is NOT money received:
-    // see `account` for gross received, credit and outstanding.
-    void paidFromLedger;
+    const ledgerCoverage = availableTenancyBalances[0] || null;
+    // "Paid" is the amount allocated to this tenant's estate-scoped RentCharges.
     const paidCents = paidFromChargesCents;
-
     const account = await buildAccount(clientId, tenant, charges, tenancyIds);
 
     return {
@@ -257,11 +339,13 @@ export const tenantService = {
       financials: {
         billedCents,
         paidCents,
-        outstandingCents,
+        outstandingCents: account.account.outstandingCents,
         knownArrearsCents,
-        historicalCoverage: ledgerBal?.historicalCoverage ?? 'UNVERIFIED',
-        verifiedFullObligation: ledgerBal?.verifiedFullObligation === true,
-        balanceSource: ledgerBal?.source || 'unavailable',
+        historicalCoverage: ledgerCoverage?.historicalCoverage ?? 'UNVERIFIED',
+        verifiedFullObligation: ownTenancies.length > 0
+          && availableTenancyBalances.length === ownTenancies.length
+          && availableTenancyBalances.every((balance) => balance.verifiedFullObligation === true),
+        balanceSource: availableTenancyBalances.length ? 'ledger_tenancy_sum' : 'unavailable',
         overdueCents: charges
           .filter((c) => Math.max(c.balanceCents || 0, 0) > 0 && c.dueDate && new Date(c.dueDate) < new Date())
           .reduce((s, c) => s + Math.max(c.balanceCents || 0, 0), 0),
@@ -308,7 +392,7 @@ export const tenantService = {
     };
   },
 
-  async update(clientId, tenantId, updates, estateFilter = null) {
+  async update(clientId, tenantId, updates, estateFilter = null, actorUserId = null) {
     const tenant = await Tenant.findOneAndUpdate(
       { _id: tenantId, clientId, ...estateFilterClause(estateFilter) },
       updates,
@@ -319,7 +403,7 @@ export const tenantService = {
     if (updates.status === 'moved_out') {
       const active = await tenancyService.getActiveForHouse(clientId, tenant.houseId);
       if (active && String(active.tenantId) === String(tenant._id)) {
-        await tenancyService.close(clientId, active._id, { reason: 'MOVE_OUT' });
+        await tenancyService.close(clientId, active._id, { reason: 'MOVE_OUT', actorUserId });
       } else {
         await House.updateOne(
           { _id: tenant.houseId, clientId, ...estateFilterClause(estateFilter) },

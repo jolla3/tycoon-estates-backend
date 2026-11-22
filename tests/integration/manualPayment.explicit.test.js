@@ -5,6 +5,7 @@
  * so these have NOT been executed by the author.
  */
 import '../setup.js';
+import { jest } from '@jest/globals';
 import { describeWithMongo, connectTestDb, clearTestDb, disconnectTestDb } from '../helpers/db.js';
 import { prepareG3TestIndexes } from '../helpers/g3Indexes.js';
 import { Client } from '../../src/models/Client.js';
@@ -16,6 +17,7 @@ import { RentCharge } from '../../src/models/RentCharge.js';
 import { Payment } from '../../src/models/Payment.js';
 import { ManualReceipt } from '../../src/models/ManualReceipt.js';
 import { TenantCreditMovement } from '../../src/models/TenantCreditMovement.js';
+import { Ledger } from '../../src/models/Ledger.js';
 import { paymentService } from '../../src/services/payment.service.js';
 import { tenantService } from '../../src/services/tenant.service.js';
 import { tenantAccountSnapshot } from '../../src/services/tenantCredit.service.js';
@@ -25,9 +27,10 @@ describeWithMongo('explicit manual receipts', () => {
   let alice, bob, carol, tenA, tenB, tenC2;
   beforeAll(connectTestDb);
   afterAll(disconnectTestDb);
+  afterEach(() => jest.restoreAllMocks());
 
-  const mkCharge = (tenancy, period, cents) => RentCharge.create({
-    clientId: client._id, estateId: estate._id, houseId: tenancy.houseId, tenantId: tenancy.tenantId,
+  const mkCharge = (tenancy, period, cents, chargeEstate = estate) => RentCharge.create({
+    clientId: client._id, estateId: chargeEstate._id, houseId: tenancy.houseId, tenantId: tenancy.tenantId,
     tenancyId: tenancy._id, period, chargeType: 'RENT', description: 'Rent',
     amountDueCents: cents, amountPaidCents: 0, balanceCents: cents, status: 'UNPAID',
     dueDate: new Date(`${period}-05T12:00:00+03:00`),
@@ -38,6 +41,12 @@ describeWithMongo('explicit manual receipts', () => {
     paymentDate: '2026-08-10', tenderMethod: 'CASH', idempotencyKey: key(), ...o,
   });
   const ids = (tenant, tenancy) => ({ tenantId: String(tenant._id), tenancyId: String(tenancy._id), houseId: String(tenancy.houseId) });
+  const mkLedger = (tenancy, amountCents, entryType) => Ledger.create({
+    clientId: client._id, estateId: tenancy.estateId, houseId: tenancy.houseId,
+    tenantId: tenancy.tenantId, tenancyId: tenancy._id, accountCategory: 'RENT',
+    entryType, amountCents, runningBalanceCents: amountCents,
+    description: 'Tenant account regression fixture',
+  });
 
   beforeEach(async () => {
     await clearTestDb();
@@ -162,6 +171,89 @@ describeWithMongo('explicit manual receipts', () => {
     const t = await tenantService.get(client._id, bob._id);
     expect(t.account.billedCents).toBe(0);
     expect(t.billingHistory).toHaveLength(0);
+  });
+
+  test('former tenant arrears come from their own closed tenancy, not the house current occupant', async () => {
+    await mkCharge(tenA, '2026-02', 700000);
+    await mkCharge(tenB, '2026-08', 1100000);
+    await mkLedger(tenA, -300000, 'CHARGE');
+    await mkLedger(tenB, -1000000, 'CHARGE');
+    const former = await tenantService.get(client._id, alice._id);
+    expect(former.financials.knownArrearsCents).toBe(300000);
+    expect(former.financials.outstandingCents).toBe(700000);
+    expect(former.account.outstandingCents).toBe(700000);
+    expect(former.financials.verifiedFullObligation).toBe(false);
+  });
+
+  test('multiple same-estate tenancies are included without netting credit against arrears', async () => {
+    const aliceSecond = await Tenancy.create({
+      clientId: client._id, estateId: estate._id, houseId: house2._id, tenantId: alice._id,
+      startAt: new Date('2025-01-01T00:00:00+03:00'),
+      endAt: new Date('2025-12-01T00:00:00+03:00'), status: 'CLOSED',
+    });
+    await mkCharge(tenA, '2026-02', 500000);
+    await mkCharge(aliceSecond, '2025-11', 400000);
+    await mkLedger(tenA, -300000, 'CHARGE');
+    await mkLedger(aliceSecond, 600000, 'PAYMENT');
+    const t = await tenantService.get(client._id, alice._id);
+    expect(t.account.billedCents).toBe(900000);
+    expect(t.account.outstandingCents).toBe(900000);
+    expect(t.financials.knownArrearsCents).toBe(300000);
+    expect(t.financials.historicalCoverage).toBe('UNVERIFIED');
+    expect(t.financials.verifiedFullObligation).toBe(false);
+  });
+
+  test('historical RentCharges from another estate are excluded from current-estate projections', async () => {
+    await mkCharge(tenA, '2026-02', 500000);
+    const alicePriorEstateTenancy = await Tenancy.create({
+      clientId: client._id, estateId: otherEstate._id, houseId: otherEstateHouse._id,
+      tenantId: alice._id, startAt: new Date('2025-01-01T00:00:00+03:00'),
+      endAt: new Date('2025-12-01T00:00:00+03:00'), status: 'CLOSED',
+    });
+    await mkCharge(alicePriorEstateTenancy, '2025-12', 900000, otherEstate);
+    const t = await tenantService.get(client._id, alice._id);
+    expect(t.account.billedCents).toBe(500000);
+    expect(t.account.outstandingCents).toBe(500000);
+    expect(t.financials.billedCents).toBe(500000);
+    expect(t.monthly).toHaveLength(1);
+    expect(t.billingHistory).toHaveLength(1);
+    expect(t.billingHistory[0].period).toBe('2026-02');
+  });
+
+  test('known arrears are unavailable when there is no RENT ledger evidence', async () => {
+    const t = await tenantService.get(client._id, alice._id);
+    expect(t.financials.knownArrearsCents).toBeNull();
+    expect(t.financials.historicalCoverage).toBe('UNVERIFIED');
+    expect(t.financials.verifiedFullObligation).toBe(false);
+    expect(t.financials.balanceSource).toBe('unavailable');
+  });
+
+  test('a receipt split across tenancy allocations appears once in canonical tenant history', async () => {
+    const bobFormer = await Tenancy.create({
+      clientId: client._id, estateId: estate._id, houseId: house2._id, tenantId: bob._id,
+      startAt: new Date('2026-01-01T00:00:00+03:00'),
+      endAt: new Date('2026-06-01T00:00:00+03:00'), status: 'CLOSED',
+    });
+    await mkCharge(bobFormer, '2026-03', 300000);
+    await mkCharge(tenB, '2026-08', 400000);
+    const result = await rec({ ...ids(bob, tenB), amountCents: 700000 });
+    expect(result.payments).toHaveLength(2);
+    expect(await Payment.countDocuments({ manualReceiptId: result.receipt._id })).toBe(2);
+    const t = await tenantService.get(client._id, bob._id);
+    expect(t.paymentHistory.filter((row) => row.kind === 'manual_receipt')).toHaveLength(1);
+    expect(t.paymentHistory[0]).toMatchObject({ kind: 'manual_receipt', grossCents: 700000 });
+    const list = await paymentService.list(client._id, null, { page: 1, limit: 20 });
+    expect(list.items.filter((row) => String(row.manualReceiptId) === String(result.receipt._id))).toHaveLength(1);
+  });
+
+  test('settlement failure aborts without persisting a partial receipt or credit movement', async () => {
+    jest.spyOn(TenantCreditMovement, 'create').mockImplementationOnce(async () => {
+      throw new Error('forced settlement failure');
+    });
+    await expect(rec({ ...ids(alice, tenA), amountCents: 500000 })).rejects.toThrow('forced settlement failure');
+    expect(await ManualReceipt.countDocuments({})).toBe(0);
+    expect(await TenantCreditMovement.countDocuments({})).toBe(0);
+    expect(await Payment.countDocuments({})).toBe(0);
   });
 
   test('concurrent receipts cannot spend the same credit twice', async () => {

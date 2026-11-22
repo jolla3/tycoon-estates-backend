@@ -1,4 +1,10 @@
 import '../setup.js';
+import { jest } from '@jest/globals';
+import mongoose from 'mongoose';
+import { tenancyService } from '../../src/services/tenancy.service.js';
+import { Tenancy } from '../../src/models/Tenancy.js';
+import { Tenant } from '../../src/models/Tenant.js';
+import { dateUtil } from '../../src/utils/date.js';
 import { classifyTenanciesForPeriod, tenancyIneligibleReason, TENANCY_RESOLUTION } from '../../src/utils/manualPaymentTenancy.js';
 import { isTenancyEligibleForPeriod } from '../../src/utils/tenancyEligibility.js';
 import { manualPaymentSchema, manualOptionsQuerySchema, tenantContextQuerySchema } from '../../src/routes/payment.routes.js';
@@ -141,5 +147,76 @@ describe('manual-options pagination/search query', () => {
     expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, limit: '500' }).success).toBe(false);
     expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, page: '0' }).success).toBe(false);
     expect(manualOptionsQuerySchema.safeParse({ houseId: oidv, unexpected: 1 }).success).toBe(false);
+  });
+});
+
+const resolveOid = () => new mongoose.Types.ObjectId();
+const resolveClient = resolveOid();
+const resolveEstate = resolveOid();
+const resolveHouseId = resolveOid();
+const resolveOldTenant = resolveOid();
+const resolveCurrentTenant = resolveOid();
+const resolveHouse = { _id: resolveHouseId, estateId: resolveEstate, houseNumber: '78' };
+const resolveOldTenancy = {
+  _id: resolveOid(), clientId: resolveClient, estateId: resolveEstate, houseId: resolveHouseId,
+  tenantId: resolveOldTenant, status: 'CLOSED',
+  startAt: new Date('2026-01-01T00:00:00+03:00'), endAt: new Date('2026-07-01T00:00:00+03:00'),
+};
+const resolveCurrentTenancy = {
+  _id: resolveOid(), clientId: resolveClient, estateId: resolveEstate, houseId: resolveHouseId,
+  tenantId: resolveCurrentTenant, status: 'ACTIVE',
+  startAt: new Date('2026-07-01T00:00:00+03:00'), endAt: null,
+};
+const resolveChain = (result) => {
+  const q = { session: () => q, lean: () => q,
+    then: (resolve, reject) => Promise.resolve(result).then(resolve, reject) };
+  return q;
+};
+function stubResolveRecords(rows, tenants = [
+  { _id: resolveOldTenant, clientId: resolveClient, estateId: resolveEstate },
+  { _id: resolveCurrentTenant, clientId: resolveClient, estateId: resolveEstate },
+]) {
+  const match = (query, row) => Object.entries(query).every(([key, value]) => String(row[key]) === String(value));
+  jest.spyOn(Tenancy, 'findOne').mockImplementation((query) => resolveChain(rows.find((row) => match(query, row)) || null));
+  jest.spyOn(Tenant, 'findOne').mockImplementation((query) => resolveChain(tenants.find((row) => match(query, row)) || null));
+}
+afterEach(() => jest.restoreAllMocks());
+
+describe('resolveExplicitForManualPayment ownership', () => {
+  const resolve = (ids, date) => tenancyService.resolveExplicitForManualPayment(
+    resolveClient, resolveHouse, ids, dateUtil.parseNairobiDateOnly(date),
+  );
+  test('backdated payment goes to the former occupant, never the current one', async () => {
+    stubResolveRecords([resolveOldTenancy, resolveCurrentTenancy]);
+    const result = await resolve({ tenantId: resolveOldTenant, tenancyId: resolveOldTenancy._id }, '2026-03-10');
+    expect(String(result.tenancy.tenantId)).toBe(String(resolveOldTenant));
+    expect(String(result.tenant._id)).toBe(String(resolveOldTenant));
+  });
+  test('contradictory tenant and tenancy ids are rejected', async () => {
+    stubResolveRecords([resolveOldTenancy, resolveCurrentTenancy]);
+    await expect(resolve({ tenantId: resolveCurrentTenant, tenancyId: resolveOldTenancy._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveCurrentTenancy._id }, '2026-08-15')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+  });
+  test('payment date must fall inside exact tenancy bounds', async () => {
+    stubResolveRecords([resolveOldTenancy, resolveCurrentTenancy]);
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveOldTenancy._id }, '2026-06-30')).resolves.toBeDefined();
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveOldTenancy._id }, '2026-07-01')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(resolve({ tenantId: resolveCurrentTenant, tenancyId: resolveCurrentTenancy._id }, '2026-07-01')).resolves.toBeDefined();
+  });
+  test('client, estate and house scope the identity query', async () => {
+    const find = jest.spyOn(Tenancy, 'findOne').mockReturnValue(resolveChain(null));
+    jest.spyOn(Tenant, 'findOne').mockReturnValue(resolveChain(null));
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveOid() }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(find.mock.calls[0][0]).toMatchObject({ clientId: resolveClient, estateId: resolveEstate, houseId: resolveHouseId });
+  });
+  test('a VOID tenancy is not selectable', async () => {
+    stubResolveRecords([{ ...resolveOldTenancy, status: 'VOID' }]);
+    await expect(resolve({ tenantId: resolveOldTenant, tenancyId: resolveOldTenancy._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+  });
+  test('missing explicit ids are rejected before database lookup', async () => {
+    const find = jest.spyOn(Tenancy, 'findOne');
+    await expect(resolve({ tenantId: resolveOldTenant }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(resolve({ tenancyId: resolveOldTenancy._id }, '2026-03-10')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(find).not.toHaveBeenCalled();
   });
 });
