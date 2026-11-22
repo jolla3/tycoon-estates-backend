@@ -50,6 +50,14 @@ const previewSchema = z.object({
   paidCents: z.number().int().optional(),
   totalOutstandingCents: z.number().int().optional(),
   dueDate: z.string().optional(),
+}).superRefine((data, ctx) => {
+  if ((!data.template || data.template === 'billing_notification') && !data.tenantId && !data.houseId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Billing preview requires a tenantId or houseId so the statement is calculated from saved RentCharge data',
+      path: ['tenantId'],
+    });
+  }
 });
 
 router.post(

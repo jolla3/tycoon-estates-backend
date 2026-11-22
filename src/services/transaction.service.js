@@ -11,6 +11,7 @@ import { estateFilterClause } from '../utils/estateFilter.js';
 import mongoose from 'mongoose';
 import { tenancyService } from './tenancy.service.js';
 import { toBankTransactionDTO } from '../utils/bankTransactionDto.js';
+import { logger } from '../config/logger.js';
 
 export const transactionService = {
   async list(clientId, estateFilter, query) {
@@ -134,12 +135,28 @@ export const transactionService = {
       await session.endSession();
     }
     if (tenant?.phone) {
-      await smsService.sendPaymentConfirmation({
-        clientId, estateId: house.estateId, tenantId: tenant._id, houseId: house._id,
-        phone: tenant.phone, tenantName: tenant.name, houseNumber: house.houseNumber,
-        amountCents: bankTransaction.amountCents,
-        balanceCents: Math.max(remainingBalanceCents, 0),
-      });
+      try {
+        await smsService.sendPaymentConfirmation({
+          clientId, estateId: bankTransaction.estateId, tenantId: tenant._id, houseId: house._id,
+          phone: tenant.phone, tenantName: tenant.name, houseNumber: house.houseNumber,
+          amountCents: bankTransaction.amountCents,
+          balanceCents: Math.max(remainingBalanceCents, 0),
+          currency: bankTransaction.currency || 'KES',
+          period,
+          notificationVersion: 'payment_confirmation:v1',
+          idempotencyKey: 'bank-payment-confirmation:' + String(bankTransaction._id) + ':' + String(tenant._id),
+        });
+      } catch (smsError) {
+        logger.warn(
+          { bankTransactionId: String(bankTransaction._id), estateId: String(bankTransaction.estateId), code: smsError.code || 'PAYMENT_SMS_QUEUE_FAILED' },
+          'Bank payment posted but confirmation SMS was not queued'
+        );
+      }
+    } else {
+      logger.warn(
+        { bankTransactionId: String(bankTransaction._id), estateId: String(bankTransaction.estateId), tenantId: String(tenant._id), reason: 'tenant_phone_missing' },
+        'Bank payment posted but confirmation SMS was skipped because tenant phone is missing'
+      );
     }
     return toBankTransactionDTO(bankTransaction);
   },

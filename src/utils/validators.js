@@ -91,7 +91,7 @@ export const schemas = {
 
   createTenant: z.object({
     name: z.string().min(1),
-    phone: z.string().min(7),
+    phone: z.union([z.string().trim().min(7), z.string().trim().length(0), z.null()]).optional(),
     houseId: z.string().min(1),
     moveInDate: z.string().optional(),
   }),

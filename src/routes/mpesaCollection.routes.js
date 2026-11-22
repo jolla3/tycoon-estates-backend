@@ -21,6 +21,8 @@ router.get('/tenants/:tenantId/references', ...base, validate(referencesQuerySch
 router.post('/tenants/:tenantId/references', ...base, admin, validate(issueTenantReferenceSchema), c.issueReference);
 router.get('/tenants/:tenantId/link', ...base, admin, c.inspectLink);
 router.post('/tenants/:tenantId/link', ...base, admin, c.issueLink);
+router.post('/tenants/:tenantId/link/resend', ...base, admin, c.resendLink);
+router.post('/tenants/:tenantId/link/rotate', ...base, admin, validate(z.object({ expectedLinkVersion: z.number().int().min(1) }).strict()), c.rotateLink);
 router.post('/tenants/:tenantId/link/revoke', ...base, admin, c.revokeLink);
 router.get('/submissions', ...base, admin, c.listSubmissions);
 router.post('/submissions/:id/resolve', ...base, admin, c.resolveSubmission);

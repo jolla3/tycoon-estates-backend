@@ -311,9 +311,6 @@ export const tenantService = {
         return hasRentLedger ? balance : null;
       })
     );
-    // A zero from balanceForTenancy is meaningful only when RENT ledger rows exist.
-    // Keep each tenancy's arrears separate before summing; never offset one tenancy's
-    // positive ledger balance against another tenancy's arrears.
     const availableTenancyBalances = tenancyBalances.filter(
       (balance) => balance && Number.isSafeInteger(balance.knownArrearsCents)
     );
@@ -321,7 +318,6 @@ export const tenantService = {
       ? availableTenancyBalances.reduce((total, balance) => total + balance.knownArrearsCents, 0)
       : null;
     const ledgerCoverage = availableTenancyBalances[0] || null;
-    // "Paid" is the amount allocated to this tenant's estate-scoped RentCharges.
     const paidCents = paidFromChargesCents;
     const account = await buildAccount(clientId, tenant, charges, tenancyIds);
 

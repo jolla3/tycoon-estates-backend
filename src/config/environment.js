@@ -46,6 +46,37 @@ function optional(name) {
   return value || undefined;
 }
 
+function optionalHttpsOrigin(name) {
+  const value = optional(name);
+  if (!value) return undefined;
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      `[config] ${name} must be one HTTPS origin, for example https://tycoon-frontend.vercel.app`
+    );
+  }
+
+  if (
+    value.includes(',') ||
+    parsed.protocol !== 'https:' ||
+    parsed.origin !== value ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    parsed.username !== '' ||
+    parsed.password !== ''
+  ) {
+    throw new Error(
+      `[config] ${name} must be one HTTPS origin without a path, query, fragment, credentials, or comma-separated hosts`
+    );
+  }
+
+  return parsed.origin;
+}
+
 function requiredEncryptionKey() {
   const key = required('ENCRYPTION_KEY');
   if (!/^[0-9a-fA-F]{64}$/.test(key)) {
@@ -61,6 +92,8 @@ export const env = {
   NODE_ENV,
   PORT: parseInt(process.env.PORT || '4000', 10),
   FRONTEND_URL: (optional('FRONTEND_URL') || 'http://localhost:5173').replace(/\/+$/, ''),
+  // One customer-facing payment origin. Keep FRONTEND_URL as the multi-origin CORS allowlist.
+  G5_PUBLIC_PAYMENT_URL: optionalHttpsOrigin('G5_PUBLIC_PAYMENT_URL'),
   TRUST_PROXY_HOPS: parseInt(process.env.TRUST_PROXY_HOPS || '1', 10),
 
   MONGODB_URI: isTest
@@ -108,6 +141,30 @@ export const env = {
   G5_PROTECTED_SMS_ENABLED: optional('G5_PROTECTED_SMS_ENABLED') === '1' ? '1' : '',
   DARAJA_PULL_RECONCILIATION_ENABLED: optional('DARAJA_PULL_RECONCILIATION_ENABLED') === '1' ? '1' : '',
 };
+
+
+function validateG5EnvelopeKeyring() {
+  const raw = optional('G5_ENVELOPE_KEYS');
+  if (!raw) {
+    if (!isTest && env.G5_PROTECTED_SMS_ENABLED === '1') {
+      throw new Error('[config] G5_ENVELOPE_KEYS is required when G5_PROTECTED_SMS_ENABLED=1');
+    }
+    return;
+  }
+  const seen = new Set();
+  for (const part of raw.split(',').map((value) => value.trim()).filter(Boolean)) {
+    const pieces = part.split(':');
+    const [id, hex] = pieces;
+    if (pieces.length !== 2 || !/^[A-Za-z0-9_-]{1,16}$/.test(id || '') || !/^[0-9a-fA-F]{64}$/.test(hex || '') || seen.has(id)) {
+      throw new Error('[config] G5_ENVELOPE_KEYS entries must be unique id:64hex values');
+    }
+    seen.add(id);
+  }
+  if (seen.size === 0) throw new Error('[config] G5_ENVELOPE_KEYS contains no usable key');
+}
+
+// Validate at boot, before a tenant registration or dispatcher first touches the keyring.
+validateG5EnvelopeKeyring();
 
 export function isCrossSiteFrontend() {
   const raw = String(env.FRONTEND_URL || '');

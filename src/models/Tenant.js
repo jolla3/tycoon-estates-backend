@@ -8,7 +8,7 @@ const TenantSchema = new Schema(
     estateId: { type: Schema.Types.ObjectId, ref: 'Estate', required: true, index: true },
     houseId: { type: Schema.Types.ObjectId, ref: 'House', required: true },
     name: { type: String, required: true },
-    phone: { type: String, required: true },
+    phone: { type: String, default: null, trim: true },
     status: { type: String, enum: ['active', 'moved_out'], default: 'active' },
     moveInDate: Date,
     moveOutDate: Date,
