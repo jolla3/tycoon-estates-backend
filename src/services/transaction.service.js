@@ -79,6 +79,7 @@ export const transactionService = {
     // historical Tenancy after a transfer. Trust the Tenancy's immutable scope.
     const tenant = await Tenant.findOne({ _id: tenancy.tenantId, clientId });
     if (!tenant) throw Errors.TenantNotFound();
+    await reconciliationService.assertSettlementReady();
     const session = await mongoose.startSession();
     let remainingBalanceCents = 0;
     try {
@@ -128,6 +129,7 @@ export const transactionService = {
 
         const result = await reconciliationService.applyPayment({
           bankTransaction, house, tenant, period, session, tenancyId: tenancy._id,
+          manualAssignment: true,
         });
         remainingBalanceCents = result.remainingBalanceCents ?? 0;
       });

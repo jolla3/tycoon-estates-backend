@@ -14,7 +14,9 @@ const PaymentSchema = new Schema(
     tenantId: { type: Schema.Types.ObjectId, ref: 'Tenant' },
     tenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null, index: true },
     origin: { type: String, enum: PAYMENT_ORIGINS, required: true },
-    bankTransactionId: { type: Schema.Types.ObjectId, ref: 'BankTransaction', unique: true, sparse: true },
+    // Canonical Bank receipt envelope link. One receipt may have one child per destination Tenancy.
+    // The partial { bankTransactionId, tenancyId } unique index is installed by a guarded migration.
+    bankTransactionId: { type: Schema.Types.ObjectId, ref: 'BankTransaction' },
     // Internal MpesaTransaction._id (never the external receipt string).
     mpesaReceiptId: { type: Schema.Types.ObjectId, default: null },
     // Link to canonical ManualReceipt envelope when this is a MANUAL allocation child.

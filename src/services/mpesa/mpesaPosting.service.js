@@ -245,6 +245,7 @@ export async function executeFencedPosting({ txn, clientId, estateId, tenantId, 
       const settled = await settleTenantAccount({
         clientId, estateId, tenantId,
         receipt: {
+          source: 'MPESA',
           transactionId: txn._id, receiptNumber: txn.receiptNumber,
           amountCents: txn.amountCents, transactionAt: txn.transactionAt,
         },

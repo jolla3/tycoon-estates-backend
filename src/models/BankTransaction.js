@@ -49,6 +49,19 @@ const BankTransactionSchema = new Schema(
     matchedHouseId: { type: Schema.Types.ObjectId, ref: 'House', default: null },
     matchedTenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', default: null },
     matchedTenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null },
+    // Canonical Bank receipt settlement envelope. Payment children are allocation destinations;
+    // these references are empty for a fully-surplus receipt.
+    paymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
+    creditPaymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
+    creditMovementIds: { type: [{ type: Schema.Types.ObjectId, ref: 'TenantCreditMovement' }], default: [] },
+    receiptAppliedCents: { type: Number, default: null },
+    creditAppliedCents: { type: Number, default: null },
+    newCreditCents: { type: Number, default: null },
+    creditBeforeCents: { type: Number, default: null },
+    creditRemainingCents: { type: Number, default: null },
+    creditAfterCents: { type: Number, default: null },
+    settlementVersion: { type: Number, default: null },
+    postedAt: { type: Date, default: null },
     matchStatus: {
       type: String,
       enum: ['MATCHED', 'UNMATCHED', 'PARTIAL', 'MANUAL_REVIEW'],
