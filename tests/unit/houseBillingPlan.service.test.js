@@ -70,6 +70,7 @@ function makeHouse(overrides = {}) {
 }
 
 beforeEach(() => {
+  jest.clearAllMocks();
   estateDoc = { _id: estateId, clientId, name: 'Test Estate', currency: 'KES', defaultDueDay: 18 };
   houseTypeDoc = {
     _id: houseTypeId,
