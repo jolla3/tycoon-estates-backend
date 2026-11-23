@@ -7,7 +7,7 @@ import { Tenant } from '../models/Tenant.js';
 import { House } from '../models/House.js';
 import { smsService, previewSms } from '../services/sms.service.js';
 import { dateUtil } from '../utils/date.js';
-import { aggregateRentCharges, sumOutstandingCents } from '../utils/smsBilling.js';
+import { projectOutstandingChargeLines, sumOutstandingCents } from '../utils/smsBilling.js';
 import { logger } from '../config/logger.js';
 
 export async function smsReminderJob() {
@@ -124,7 +124,7 @@ export async function smsReminderJob() {
       }
 
       try {
-        const current = aggregateRentCharges(group.charges);
+        const chargeLines = projectOutstandingChargeLines(group.charges);
         const previousRows = await RentCharge.find({
           clientId: estate.clientId,
           estateId: estate._id,
@@ -134,7 +134,8 @@ export async function smsReminderJob() {
           balanceCents: { $gt: 0 },
         }).lean();
         const previousArrearsCents = sumOutstandingCents(previousRows);
-        const totalOutstandingCents = current.totalOutstandingCents + previousArrearsCents;
+        const currentOutstandingCents = chargeLines.reduce((sum, line) => sum + line.outstandingCents, 0);
+        const totalOutstandingCents = currentOutstandingCents + previousArrearsCents;
         if (!Number.isSafeInteger(totalOutstandingCents) || totalOutstandingCents <= 0) {
           skipped += 1;
           continue;
@@ -143,15 +144,15 @@ export async function smsReminderJob() {
         const houseNumbers = [...group.houseIds]
           .map((id) => houseById.get(id)?.houseNumber)
           .filter(Boolean);
+        // Line-level projection preserves each charge description and outstanding balance.
+        // Do not silently truncate financial lines. Queue/provider failures surface via
+        // the existing outbox error path; no multipart SMS subsystem is introduced here.
         const message = previewSms('rent_reminder_d5', {
           tenantName: tenant.name,
           houseNumber: houseNumbers.join(', ') || 'your registered house',
           period: group.period,
           dueDate: dateUtil.format(group.dueDate, 'DD MMM YYYY'),
-          rentOutstandingCents: current.rentOutstandingCents,
-          waterOutstandingCents: current.waterOutstandingCents,
-          electricityOutstandingCents: current.electricityOutstandingCents,
-          otherOutstandingCents: current.otherOutstandingCents,
+          chargeLines,
           previousArrearsCents,
           totalOutstandingCents,
           currency: estate.currency || 'KES',
