@@ -50,7 +50,7 @@ jest.unstable_mockModule('../../src/models/HouseTypePlanVersion.js', () => ({
   },
 }));
 
-const { resolveRegistrationBillingPlan } = await import('../../src/services/houseBillingPlan.service.js');
+const { resolveHouseBillingPlan, resolveRegistrationBillingPlan } = await import('../../src/services/houseBillingPlan.service.js');
 
 const houseTypeId = '64a000000000000000000001';
 const estateId = '64a000000000000000000002';
@@ -185,17 +185,30 @@ describe('HouseType registration billing snapshot', () => {
     });
   });
 
-  test('passes the caller session to House, Estate, HouseType, and plan-history reads', async () => {
+  test('passes the caller session to every registration billing read', async () => {
     const session = { id: 'shared-session' };
 
     await resolveRegistrationBillingPlan(makeHouse(), registrationAt, { session });
 
-    // Query spies are reached through the mocked model factories above.
     const { Estate } = await import('../../src/models/Estate.js');
     const { HouseType } = await import('../../src/models/HouseType.js');
     const { HouseTypePlanVersion } = await import('../../src/models/HouseTypePlanVersion.js');
+
     expect(Estate.findOne).toHaveBeenCalledWith({ _id: estateId, clientId });
     expect(HouseType.findOne).toHaveBeenCalledWith({ _id: houseTypeId, clientId, estateId });
-    expect(HouseTypePlanVersion.findOne).toHaveBeenCalled();
+    expect(Estate.findOne.mock.results[0].value.session).toHaveBeenCalledWith(session);
+    expect(HouseType.findOne.mock.results[0].value.session).toHaveBeenCalledWith(session);
+    const planHistoryQueries = HouseTypePlanVersion.findOne.mock.results.map((result) => result.value);
+    expect(planHistoryQueries).toHaveLength(2);
+    for (const planHistoryQuery of planHistoryQueries) {
+      expect(planHistoryQuery.session).toHaveBeenCalledWith(session);
+    }
+  });
+
+  test('does not apply registration compatibility to monthly charge generation', async () => {
+    await expect(resolveHouseBillingPlan(
+      makeHouse({ billingSource: 'LEGACY_UNCLASSIFIED' }),
+      { kind: 'CHARGE_PERIOD', period: '2026-11' }
+    )).rejects.toThrow('unclassified legacy billing source');
   });
 });
