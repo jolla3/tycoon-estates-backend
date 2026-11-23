@@ -16,9 +16,9 @@
 - Registration SMS is an informational snapshot of the exact House billing source. Never generate RentCharges for messaging and never infer invoice/Paid/Outstanding values.
 - Capture one registrationAt instant before the retryable transaction; do not substitute moveInDate.
 - HOUSE_CONFIG is timestamp-effective at registrationAt (inclusive start, exclusive end). Monthly RentCharge generation keeps period-start evaluation.
-- HOUSE_TYPE is only effectiveFromPeriod based. Registration uses latest version effective for the registration YYYY-MM under existing semantics; a current-period version appended mid-month may apply to the whole period. Do not claim day-level effective dating. Changing this needs a separate design.
+- HOUSE_TYPE version history remains period-effective. Registration uses the latest version effective for the registration YYYY-MM when history exists. For legacy HouseTypes with no version-history records, registration uses canonical `defaultBilling`; a future-only history is not bypassed. This does not invent effective dates or change charge generation.
 - MONTHLY_RENT snapshots current House fields. Due day remains line → House → Estate default → day 5, with existing month-end clamping for generated due dates.
-- Distinguish explicit UNCONFIGURED/LEGACY_UNCLASSIFIED from a configured source with no effective plan or a valid empty/zero plan.
+- Distinguish explicit UNCONFIGURED, unresolved legacy Houses, linked legacy HouseTypes resolved from `defaultBilling`, future-only plan history, and valid empty/zero plans.
 - D-5 stays five Nairobi calendar days before saved RentCharge.dueDate. Scheduler stays daily 09:00 Nairobi; ordinary SMS dispatch stays independently every 60 seconds.
 - Reminder text must preserve named selected-period RentCharge lines and their outstanding balances. Previous-period arrears remain a separate aggregate. No silent truncation.
 - Receipt source Tenancy and allocation destination Tenancies are distinct. A verified receipt may settle older eligible obligations across tenancies within the same {clientId, estateId, tenantId} account; never cross estates.

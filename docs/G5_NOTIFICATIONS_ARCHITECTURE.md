@@ -11,12 +11,13 @@
 - Tenant registration and occupancy: `Tenant` plus exact `Tenancy` rows; mutable `Tenant.houseId` is only a compatibility pointer and is not authoritative where multiple active tenancies are permitted.
 - M-PESA eligibility: `checkEntitlement(clientId, 'MPESA')` plus exactly one `BUY_GOODS_TILL` profile in ACTIVE operational state with an ACTIVE `MpesaMerchantProfileEstate` mapping for the same client and estate. The legacy `MpesaMerchantProfile.estateId` field is not authoritative.
 - M-PESA link identity: existing unique `{clientId, estateId, tenantId}` `MpesaSubmissionLink`; it is not house- or tenancy-scoped.
-- Billing: `RentCharge` and G3 Ledger/PaymentAllocation/TenantCreditMovement. Use saved `dueDate`; do not calculate a second due-date policy in SMS code.
+- Configured registration plan: the shared House billing resolver; HOUSE_TYPE uses the effective period version or, only when no plan-version history exists, the linked type's canonical `defaultBilling`. Registration does not read or create RentCharges.
+- Generated obligations and settlement: `RentCharge`, G3 Ledger/PaymentAllocation and TenantCreditMovement. Use saved `dueDate` for reminders; do not calculate a second due-date policy in SMS code.
 - Outbound standard SMS: existing `SmsMessage` STANDARD queue + Celcom adapter. Protected link/receipt SMS: same `SmsMessage` collection with encrypted `G5_PROTECTED` outbox and existing G5 dispatcher.
 
 ## Registration transaction
 
-The existing `tenantService.create()` owns one MongoDB transaction and `tenancyService.open()` already accepts the caller's session. Re-read the House and Estate inside that session; create Tenant and Tenancy; derive current bill text only from valid matching charge records; then evaluate M-PESA entitlement and estate Till mapping in the same scope.
+The existing `tenantService.create()` owns one MongoDB transaction and `tenancyService.open()` already accepts the caller's session. Re-read the House and Estate inside that session; create Tenant and Tenancy; resolve the exact House's configured billing plan through the shared House resolver; then evaluate M-PESA entitlement and estate Till mapping in the same scope. Registration must not read generated RentCharge rows or require charge generation to have run.
 
 - Bank-only or non-eligible estate: queue exactly one ordinary `tenant_registration` SMS in the caller's session. No link is created.
 - Eligible M-PESA estate: create the link and one encrypted protected onboarding outbox row in the same session. Include registration details and any available bill breakdown in that protected message. Do not also queue a duplicate ordinary welcome SMS.
@@ -61,7 +62,7 @@ Ordinary bank confirmation calls already carry transaction `estateId`; the stand
 4. **Old tokens are digest-only:** impossible to reverse mathematically. Recover only from a matching historical protected outbox envelope and verify HMAC. If not recoverable, fail visibly; never silently invalidate a live URL.
 5. **AES-GCM nonce reuse:** generate a fresh nonce for every encryption invocation, including transaction callback retry; AAD includes immutable owner and version identity.
 6. **Unknown provider result:** do not automatically resend an ambiguous Celcom attempt. A user-requested separate delivery attempt is allowed only when an operator explicitly requests it; preserve the unknown attempt and reuse the same token.
-7. **No bill yet:** partial-period tenancy policy remains unchanged. Registration says the statement is not yet available; do not prorate or invent zero.
+7. **No generated charges yet:** registration still displays the configured House plan; absence of RentCharge rows is irrelevant to the welcome message. Do not create charges, report a statement balance, prorate, or invent zero. If the selected House source genuinely has no applicable plan, render that source-specific unavailable state.
 8. **Reminder spam:** remove the 15-minute reminder cadence and 24-hour cooldown; use exact due-date D-5 selection and idempotency. Queue draining becomes independent.
 9. **Historical G4 scope:** root G4 docs remain unchanged; this dedicated G5 contract is additive.
 10. **Overengineering:** no new provider, database engine, scheduler dependency, shortener service, wallet, or duplicate financial model. Reuse the current queue, models, keyring, locks and G3 billing.
