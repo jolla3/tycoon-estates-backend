@@ -66,10 +66,28 @@ async function preflight(db) {
     origin: 'BANK',
     $or: [{ bankTransactionId: null }, { bankTransactionId: { $exists: false } }],
   }, { _id: 1, clientId: 1, estateId: 1, tenantId: 1, tenancyId: 1 });
+  // MongoDB $ne also matches missing fields. Treat absent/null origin as a
+  // legacy state and report it separately; only an explicitly different
+  // origin blocks the Bank identity migration.
   const nonBankRowsWithBankReceiptLink = await rows(COLLECTION, {
     bankTransactionId: { $type: 'objectId' },
-    origin: { $ne: 'BANK' },
+    origin: { $exists: true, $nin: ['BANK', null] },
   }, { _id: 1, origin: 1, bankTransactionId: 1 });
+  const legacyMissingOriginFilter = {
+    bankTransactionId: { $type: 'objectId' },
+    origin: null,
+  };
+  const legacyMissingOriginCount = await payments.countDocuments(legacyMissingOriginFilter);
+  const legacyMissingOriginRows = await rows(COLLECTION, legacyMissingOriginFilter, {
+    _id: 1, origin: 1, bankTransactionId: 1, status: 1, amountCents: 1, tenancyId: 1,
+  });
+  // A missing-origin row with destination tenancy identity could collide
+  // semantically with a new Bank child while remaining outside the partial
+  // replacement index. Keep that case blocking for explicit reconciliation.
+  const legacyMissingOriginWithTenancy = await rows(COLLECTION, {
+    ...legacyMissingOriginFilter,
+    tenancyId: { $type: 'objectId' },
+  }, { _id: 1, bankTransactionId: 1, tenancyId: 1, amountCents: 1 });
   const missingDestination = await rows(COLLECTION, {
     origin: 'BANK',
     bankTransactionId: { $type: 'objectId' },
@@ -146,6 +164,16 @@ async function preflight(db) {
   return [
     { check: 'bank_payment_missing_canonical_receipt', samples: bankChildrenMissingReceipt },
     { check: 'non_bank_payment_with_bank_receipt_link', samples: nonBankRowsWithBankReceiptLink },
+    {
+      check: 'legacy_payment_missing_origin_with_bank_receipt_link',
+      blocking: false,
+      count: legacyMissingOriginCount,
+      samples: legacyMissingOriginRows,
+    },
+    {
+      check: 'legacy_payment_missing_origin_with_destination_tenancy',
+      samples: legacyMissingOriginWithTenancy,
+    },
     { check: 'missing_destination_tenancy', samples: missingDestination },
     { check: 'duplicate_receipt_destination_child', samples: duplicateChildren },
     { check: 'orphan_bank_receipt_reference', samples: orphanReceipts },
@@ -162,7 +190,7 @@ export async function runBankPaymentChildIdentityMigration({ argv = process.argv
   try {
     const db = mongoose.connection.db;
     const checks = await preflight(db);
-    const blocking = checks.filter((check) => check.samples.length > 0);
+    const blocking = checks.filter((check) => check.blocking !== false && check.samples.length > 0);
     if (blocking.length) {
       console.error(JSON.stringify({ status: 'blocked', checks: blocking }));
       process.exitCode = 2;
@@ -202,6 +230,9 @@ export async function runBankPaymentChildIdentityMigration({ argv = process.argv
     console.log(JSON.stringify({
       plan,
       mode: execute ? 'execute' : 'dry_run',
+      advisories: checks
+        .filter((check) => check.blocking === false && check.count > 0)
+        .map(({ check, count, samples }) => ({ check, count, samples })),
       rollback: 'forward_only_after_multi_tenancy_bank_receipt; do_not_restore_legacy_unique_bankTransactionId_index',
     }));
     if (!execute) return { status: 'dry_run', plan, checks };
