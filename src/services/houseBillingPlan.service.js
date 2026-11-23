@@ -120,7 +120,10 @@ async function resolveHouseBillingPlan(house, context, { session } = {}) {
       const hasAnyHistory = await historyQuery.lean();
 
       if (!hasAnyHistory) {
-        const lines = (Array.isArray(type.defaultBilling) ? type.defaultBilling : []).map((line) => {
+        if (!Array.isArray(type.defaultBilling)) {
+          throw Errors.Conflict('HouseType default billing is missing');
+        }
+        const lines = type.defaultBilling.map((line) => {
           if (!['RENT', 'WATER', 'ELECTRICITY', 'OTHER'].includes(line.chargeType)
             || !Number.isSafeInteger(line.amountCents)
             || line.amountCents < 0) {

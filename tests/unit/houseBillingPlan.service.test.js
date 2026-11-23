@@ -173,7 +173,7 @@ describe('HouseType registration billing snapshot', () => {
     });
   });
 
-  test('keeps a valid empty defaultBilling plan distinct from missing version history', async () => {
+  test('keeps a valid empty defaultBilling array distinct from a missing field', async () => {
     houseTypeDoc = { ...houseTypeDoc, defaultBilling: [] };
 
     const result = await resolveRegistrationBillingPlan(makeHouse(), registrationAt);
@@ -183,6 +183,14 @@ describe('HouseType registration billing snapshot', () => {
       outcome: 'VALID_EMPTY_HOUSE_TYPE_PLAN',
       lines: [],
     });
+  });
+
+  test('fails closed when a legacy HouseType has no canonical defaultBilling field', async () => {
+    houseTypeDoc = { ...houseTypeDoc };
+    delete houseTypeDoc.defaultBilling;
+
+    await expect(resolveRegistrationBillingPlan(makeHouse(), registrationAt))
+      .rejects.toThrow('HouseType default billing is missing');
   });
 
   test('passes the caller session to every registration billing read', async () => {
