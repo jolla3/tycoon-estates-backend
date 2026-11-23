@@ -18,6 +18,7 @@ import { BankAccount } from '../models/BankAccount.js';
 import { MpesaMerchantProfile } from '../models/MpesaMerchantProfile.js';
 import { MpesaIngestionEvent } from '../models/MpesaIngestionEvent.js';
 import { PULL_REGISTRATION_ELIGIBILITY } from './mpesa/daraja.constants.js';
+import { c2bReadinessBlockers, pullAdvisories, lifecycleAvailability } from './mpesa/mpesaReadiness.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 export const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -112,6 +113,17 @@ export function safeMerchantProfile(p, evidence, mappings) {
     pullRegistrationState: p.pullRegistrationState,
     c2bRegistration: reg(p.c2bRegistration),
     pullRegistration: reg(p.pullRegistration),
+    lifecycleRevision: p.lifecycleRevision ?? 0,
+    lifecycle: {
+      activatedAt: p.lifecycle?.activatedAt || null,
+      suspendedAt: p.lifecycle?.suspendedAt || null,
+      suspensionReason: p.lifecycle?.suspensionReason || null,
+      resumedAt: p.lifecycle?.resumedAt || null,
+    },
+    // C2B/callback readiness and Pull are reported separately; Pull never blocks C2B.
+    readinessBlockers: c2bReadinessBlockers(p, mappings ? { activeEstateCount: mappings.filter((m) => m.status === 'ACTIVE').length } : {}),
+    pullAdvisories: pullAdvisories(p),
+    ...(mappings ? { lifecycleAvailability: lifecycleAvailability(p, { activeEstateCount: mappings.filter((m) => m.status === 'ACTIVE').length }) } : {}),
     pullNominatedNumber: { captured: Boolean(p.pullNominatedMsisdnMasked), masked: p.pullNominatedMsisdnMasked || null },
     lastPullRegisteredAt: p.lastPullRegisteredAt || null,
     // Registration is blocked until provider evidence exists for this merchant type (fail closed).
@@ -345,15 +357,14 @@ export async function listBankingIntegrations(q = {}) {
   };
 }
 
-/** Known blockers derived ONLY from stored states (never from guesses). */
-export function mpesaBlockers(p) {
+/**
+ * Known C2B blockers derived ONLY from stored states (never from guesses). Pull state is NOT a
+ * blocker: Pull is optional and reported separately via pullAdvisories().
+ */
+export function mpesaBlockers(p, ctx = {}) {
   const b = [];
   if (p.operationalState !== 'ACTIVE') b.push(`OPERATIONAL_STATE_${p.operationalState}`);
-  if (p.callbackCapability !== 'VERIFIED') b.push(`CALLBACK_${p.callbackCapability}`);
-  if (p.pullCapability !== 'VERIFIED') b.push(`PULL_${p.pullCapability}`);
-  if (!['ACCEPTED', 'ALREADY_REGISTERED'].includes(p.c2bRegistrationState)) b.push(`C2B_REGISTRATION_${p.c2bRegistrationState}`);
-  if (!['ACCEPTED', 'ALREADY_REGISTERED'].includes(p.pullRegistrationState)) b.push(`PULL_REGISTRATION_${p.pullRegistrationState}`);
-  return b;
+  return [...b, ...c2bReadinessBlockers(p, ctx)];
 }
 
 /** Platform-wide M-PESA merchant profiles with independent callback/Pull state. */

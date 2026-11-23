@@ -5,6 +5,7 @@
 import { platformService } from '../services/platform.service.js';
 import { platformMpesaProfileService } from '../services/platformMpesaProfile.service.js';
 import { mpesaRegistrationService } from '../services/mpesa/mpesaRegistration.service.js';
+import { mpesaLifecycleService } from '../services/mpesa/mpesaLifecycle.service.js';
 import { mpesaReferenceService } from '../services/mpesa/mpesaReference.service.js';
 import { apiResponse } from '../utils/apiResponse.js';
 
@@ -215,6 +216,31 @@ export const platformController = {
       apiResponse.success(res, await mpesaRegistrationService.reconcile({
         clientId: req.params.clientId, profileId: req.params.profileId, kind: req.params.kind,
         outcome: req.body.outcome, actor: req.currentUser, reqMeta: meta(req) }));
+    } catch (err) { next(err); }
+  },
+
+  // Explicit Superadmin lifecycle. Route-level authorize('SUPER_ADMIN') applies; state is never taken from the body.
+  async activateMpesaProfile(req, res, next) {
+    try {
+      apiResponse.success(res, await mpesaLifecycleService.activate({
+        clientId: req.params.clientId, profileId: req.params.profileId, expectedRevision: req.body.expectedRevision,
+        reason: req.body.reason, actor: req.currentUser, reqMeta: meta(req) }), 'M-PESA merchant profile activated');
+    } catch (err) { next(err); }
+  },
+
+  async suspendMpesaProfile(req, res, next) {
+    try {
+      apiResponse.success(res, await mpesaLifecycleService.suspend({
+        clientId: req.params.clientId, profileId: req.params.profileId, expectedRevision: req.body.expectedRevision,
+        reason: req.body.reason, actor: req.currentUser, reqMeta: meta(req) }), 'M-PESA merchant profile suspended');
+    } catch (err) { next(err); }
+  },
+
+  async resumeMpesaProfile(req, res, next) {
+    try {
+      apiResponse.success(res, await mpesaLifecycleService.resume({
+        clientId: req.params.clientId, profileId: req.params.profileId, expectedRevision: req.body.expectedRevision,
+        reason: req.body.reason, actor: req.currentUser, reqMeta: meta(req) }), 'M-PESA merchant profile resumed');
     } catch (err) { next(err); }
   },
 

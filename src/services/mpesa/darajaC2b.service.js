@@ -172,29 +172,40 @@ export async function handleC2bConfirmation(body) {
 }
 
 /**
- * External validation is optional, needs Safaricom enablement and is NOT enabled for any Tycoon
- * merchant. If it is ever invoked this handler is read-only and fails closed: it accepts only an
- * exactly-resolved eligible merchant (and, for PayBill, an exactly-resolved ACTIVE reference).
- * The shortcode in the body is a lookup key, not authentication; callback authenticity remains
- * unproven, which is why this never mutates anything and never creates a receipt.
- * Result codes follow the Daraja C2B error table (C2B00012 invalid account, C2B00016 other).
+ * External C2B validation is optional, requires Safaricom enablement, and is NOT enabled for any
+ * Tycoon merchant. Until that enablement AND a safe validation behaviour are established, this
+ * handler is hard-disabled and FAILS CLOSED: every request is rejected without touching the
+ * database or persisting anything. (It previously accepted any request that resolved to an ACTIVE
+ * merchant.) Rejection here cannot affect durable confirmation ingestion, which is a separate
+ * handler (handleC2bConfirmation) that is not gated by this flag.
+ *
+ * The gated logic below stays read-only and stricter than before (ACTIVE + VERIFIED callback
+ * capability + exactly-resolved merchant, and for PayBill an exactly-resolved ACTIVE reference);
+ * it is unreachable until the constant is changed in a reviewed change that cites provider
+ * evidence. The shortcode in the body is a lookup key, not authentication; callback authenticity
+ * remains unproven. Result codes follow the Daraja C2B error table
+ * (C2B00012 invalid account, C2B00016 other).
  */
+export const C2B_EXTERNAL_VALIDATION_ENABLED = false;
+
+const VALIDATION_REJECT = Object.freeze({ ResultCode: 'C2B00016', ResultDesc: 'Rejected' });
+
 export async function handleC2bValidation(body) {
-  const accept = { ResultCode: '0', ResultDesc: 'Accepted' };
+  if (C2B_EXTERNAL_VALIDATION_ENABLED !== true) return { ...VALIDATION_REJECT };
   try {
     const payload = body && typeof body === 'object' ? body : {};
     const shortCode = payload.BusinessShortCode != null ? String(payload.BusinessShortCode).trim() : '';
     const resolution = await resolveMerchantProfilesByShortCode(shortCode);
-    if (resolution.status !== 'exact') return { ResultCode: 'C2B00016', ResultDesc: 'Rejected' };
+    if (resolution.status !== 'exact') return { ...VALIDATION_REJECT };
     const profile = resolution.profile;
-    if (profile.operationalState !== 'ACTIVE') return { ResultCode: 'C2B00016', ResultDesc: 'Rejected' };
+    if (profile.operationalState !== 'ACTIVE' || profile.callbackCapability !== 'VERIFIED') return { ...VALIDATION_REJECT };
     if (profile.merchantType === 'PAYBILL') {
       const r = await resolveReference({ profile, billRefNumber: payload.BillRefNumber });
       if (r.state !== 'ok') return { ResultCode: 'C2B00012', ResultDesc: 'Rejected' };
     }
-    return accept;
+    return { ResultCode: '0', ResultDesc: 'Accepted' };
   } catch (err) {
     logger.error({ err: err.message }, 'C2B validation failed closed');
-    return { ResultCode: 'C2B00016', ResultDesc: 'Rejected' };
+    return { ...VALIDATION_REJECT };
   }
 }
