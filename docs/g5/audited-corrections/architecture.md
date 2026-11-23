@@ -1,5 +1,5 @@
 # G5 Collection and Rent-Lifecycle Corrections
-**Status:** Audited target architecture; implementation not started  
+**Status:** Stress-tested target architecture; design contracts expanded; implementation not started  
 **Repository baseline:** main at 2a291df091d35172f75b067acfca94179a3ebb36  
 **Workspace:** docs/g5-audited-corrections-readiness
 
@@ -65,14 +65,30 @@ This is the wrong source for the registration plan. It also risks implying that 
 ### 4.3 Resolver extraction constraints
 
 planLinesForHouse is currently private to rent.service.js. It is the best existing source-resolution implementation, but it is not automatically safe to call as-is from registration:
-- HOUSE_CONFIG currently selects configuration using the start of the requested month. Registration snapshot semantics require the configuration effective on registration day.
-- HOUSE_TYPE plan versions are period-effective and must continue using their YYYY-MM version rules.
+- HOUSE_CONFIG currently selects configuration using the start of the requested month. Registration snapshots instead evaluate effective-dated rows at one captured registrationAt instant.
+- HOUSE_TYPE plan versions are period-effective only (effectiveFromPeriod); they cannot answer a day-level historical question. Registration uses the latest version effective for the registration YYYY-MM under the existing period rule. A current-period version appended mid-month can therefore apply to that whole period; changing that requires a separate date-effective HouseType design.
 - The resolver has HouseType/billingPlanRev concurrency/write behaviour. A shared pure resolver extraction must not accidentally remove or bypass required write fencing.
 - The registration transaction must pass its existing Mongo session through every read/write.
 - Preserve explicit billingSource semantics; never fall through from HOUSE_TYPE to HOUSE_CONFIG or MONTHLY_RENT.
 - Preserve LEGACY_UNCLASSIFIED fail-closed behaviour.
 
-Recommended design: separate the shared source-resolution core from charge-generation side effects. Expose explicit resolution context (registration as-of date versus charge period) and keep all existing period-based charge generation semantics unchanged. Do not make registration invoke ensureChargesForHouse or generateChargesForEstate.
+Recommended design: separate the shared source-resolution core from charge-generation side effects. Expose an explicit discriminated context: {kind: REGISTRATION, registrationAt} or {kind: CHARGE_PERIOD, period}. Do not overload a string period to mean both instants and months. Registration captures registrationAt once before the retryable transaction and passes the same instant/session through each read. HOUSE_CONFIG uses its current timestamp interval semantics; HOUSE_TYPE remains YYYY-MM period-effective; MONTHLY_RENT snapshots current House fields. No source fallback is permitted.
+
+Return an explicit resolution outcome, not only lines: []. Distinguish UNCONFIGURED, LEGACY_UNCLASSIFIED, NO_EFFECTIVE_HOUSE_TYPE_VERSION, HOUSE_CONFIG_NO_EFFECTIVE_ROWS (and future-only rows where present), a valid HouseType version with an empty lines array, zero-value HouseBillingConfig lines, and MONTHLY_RENT with a zero amount. HouseBillingConfig is line-per-row and has no parent empty-plan record; do not invent one. Do not silently translate these states into explicit UNCONFIGURED. Resolve due day per line using line → House → Estate default → 5, preserving month-end clamping for actual generated due dates. A registration plan message can describe this policy but cannot assert a RentCharge due date.
+
+Keep all current period charge generation semantics, HouseType billingPlanRev write point, readiness gates and session requirements unchanged. Registration must never call ensureChargesForHouse or generateChargesForEstate.
+
+
+### 4.4 Snapshot resolution contract
+
+- Capture registrationAt = new Date() once for the registration request before session.withTransaction(). The transaction callback may retry; it must not acquire a later timestamp on retry. Do not substitute data.moveInDate, which may be historical or future.
+- Pass the exact House, Estate, client scope and current Mongo session into every source read. The registration SMS remains in the same caller-owned transaction/outbox lifecycle.
+- HOUSE_CONFIG: evaluate rows at registrationAt, preserving inclusive effectiveFrom, exclusive effectiveTo, and the resolver's active/retired history semantics. The monthly charge-generation context remains period-start based. A config entered after the registration event is not retroactively inserted into the snapshot.
+- HOUSE_TYPE: resolve latest effectiveFromPeriod <= dateUtil.periodOf(registrationAt). The model cannot distinguish two dates inside one period. Explicitly accept the existing period-level rule for this correction; do not claim timestamp-effective behaviour or backdate a line independently of that period. A product change to prohibit mid-period effectiveness requires a separately designed schema/UX/migration.
+- MONTHLY_RENT: snapshot current House.monthlyRent. No history model is present in the audited source.
+- Line due-day display uses existing resolveDueDay(line.dueDay, house.dueDay, estate.defaultDueDay, 5). The actual RentCharge.dueDate is only materialized by normal charge generation and applies existing month-end clamping.
+- Render configured line descriptions, type and amount as an informational plan. A zero-value HouseBillingConfig line must not be mistaken for a missing configuration; render it as a configured zero/no-charge line. HouseTypePlanVersion can have a valid empty lines array, while HouseBillingConfig has no parent empty-plan record. Never add configured values into a paid/outstanding total.
+- No applicable HouseType version and no effective HouseBillingConfig rows are explicit no-effective-plan outcomes, not a different-source fallback and not necessarily explicit UNCONFIGURED.
 
 ## 5. Rent generation and reminder architecture
 
@@ -100,9 +116,14 @@ Do not move the trigger to the due date. Do not add a second reminder-day settin
 
 ### 5.3 Description preservation
 
-The current aggregate helper is suitable for numeric totals but not sufficient as the only rendering representation when distinct custom descriptions matter. Preserve individual charge lines for reminder text. Numeric summaries may still be grouped by charge type, but custom labels such as Security must remain visible and traceable to their RentCharge rows.
+The current aggregate helper is suitable for numeric totals but not sufficient as the only rendering representation when distinct custom descriptions matter. Introduce a line-level rendering projection from selected RentCharges with {rentChargeId, chargeType, description, outstandingCents}. outstandingCents is the positive saved balanceCents, not amountDueCents, original plan amount or amount paid. Retain the association to the exact source RentCharge for audit/debugging.
 
-Reminder amounts must be derived from positive outstanding balances on the selected RentCharges, never from House plan amounts.
+Keep numeric type totals only as optional secondary summaries; they cannot replace named line entries. Distinct OTHER descriptions (e.g. Security, Refuse, Parking) render as distinct labels. Use a deterministic sort: existing charge-type priority, normalized description, then charge ID. Do not merge by type or silently collapse repeated labels. The model's charge identity already prevents duplicate same-type/same-description lines for a single tenancy-period; still handle legacy duplicates deterministically rather than losing money.
+
+The D-5 message's selected-period lines are named. Prior-period arrears remain one separate aggregate under the existing policy and must not be presented as if each old charge were in the current due-date group. If the complete line-level message exceeds an enforced queue/provider limit, fail visibly with an operational reason; no silent truncation or incomplete financial statement. Do not introduce a new multipart-SMS subsystem in this correction.
+
+Reminder amounts are derived only from positive outstanding balances on selected RentCharges, never from House plan amounts.
+
 
 ## 6. Shared settlement architecture
 
@@ -145,6 +166,29 @@ Do not simply remove the unique index or make it non-unique without proving ever
 
 Bank processing claim tokens, provider+providerTransactionId identity, transactionDate/valueDate distinction and reconciliation audit states must remain intact.
 
+### 6.4 Required BANK source contract and receipt envelope
+
+The current settleTenantAccount source switch supports MANUAL and otherwise assumes MPESA. Bank cannot call it safely by passing a generic receipt today. Extend the shared service with an explicit source discriminator (MANUAL | MPESA | BANK) and source-specific validation/provenance. Do not weaken existing Manual/M-PESA contracts.
+
+Source attribution and allocation are different identities. BankTransaction.matchedTenancyId (plus matched Tenant/House, client and estate) identifies the tenancy that covers transactionDate. Revalidate this exact source tenancy and use transactionDate, never valueDate, for date coverage. Once proven, settleTenantAccount may allocate receipt money across eligible charges in other tenancies of the same {clientId, estateId, tenantId} account, including closed historical tenancies. The credit account is estate-scoped; it must never cross estates. Each child Payment retains the destination tenancy/House of the obligation it settles.
+
+Target envelope contract: BankTransaction remains the canonical gross receipt. It must persist or deterministically reconstruct:
+- receipt-origin child paymentIds (zero, one or many);
+- credit-application child creditPaymentIds;
+- creditMovementIds associated with this settlement attempt;
+- receiptAppliedCents, creditAppliedCents, and newCreditCents;
+- stable posted-at/result identity sufficient for idempotent replay.
+
+Payment.bankTransactionId currently has a unique sparse index, which conflicts with multiple receipt-origin children. The target must permit one child per destination Tenancy for one Bank receipt, with a deterministic identity (candidate: unique {bankTransactionId, tenancyId} for receipt-origin BANK children, or a dedicated receipt-allocation key). Validate this candidate against historical data and every reader before migration; do not simply drop uniqueness. Credit-application Payment rows are origin=CREDIT, not additional Bank receipts, and should not be counted among paymentIds for gross receipt allocations.
+
+Add Bank source provenance to TenantCreditMovement. For RECEIPT_SURPLUS, it identifies the new money's originating Bank receipt. For CREDIT_APPLIED, the same receipt ID may record which settlement operation triggered consumption of pre-existing credit, but it must remain explicitly classified as old credit, not receipt-origin money. Keep deterministic idempotency keys unique under {clientId, estateId, tenantId}.
+
+Atomic claim protocol: retain the current Bank claim token/expiry and provider+providerTransactionId uniqueness. In one Mongo transaction: re-read exact transaction and source tenancy; verify transactionDate; run shared settlement; write child/movement references and the three settlement totals to the envelope; conditionally consume/finalize the exact still-unexpired claim token as POSTED. A stale token must abort the whole financial transaction. A replay of POSTED returns the persisted result; a valid expired claim may be reclaimed only through the existing claim rules. Never trust an in-memory prior response as proof of posting.
+
+No-charge/advance receipt: if there are no eligible RentCharges, all gross money becomes estate-scoped tenant credit. Do not call ensureChargesForHouse to manufacture the current period's charge merely to accept the receipt. Do not create a fake Payment marker for a surplus-only Bank receipt.
+
+Migration gate: preflight existing Bank Payment rows for duplicate receipt links and candidate receipt+destination-tenancy identities; backfill envelope references only where source ownership and amounts reconcile. Review legacy unapplied amounts/OVERPAID balances separately. No historical reallocation or credit creation is authorized by this documentation. Migration needs dry-run evidence, old-reader compatibility, guarded rollout and rollback/recovery before any index change.
+
 ## 7. M-PESA tenancy coverage
 
 ### 7.1 Required invariant
@@ -164,15 +208,32 @@ evaluateReferenceEvidence currently checks:
 - exact tenancy identity;
 - current tenancy status ACTIVE.
 
-It does not establish that txn.transactionAt falls within tenancy.startAt/endAt. Add transaction-time coverage validation.
+It does not establish that txn.transactionAt falls within tenancy.startAt/endAt. The reference already pins the exact tenancy, so validate that interval and all ownership fields. Persist that reference tenancy as canonical MpesaTransaction.attributedTenancyId during fenced posting. The reference lifecycle retires a reference on tenancy closure; a retired reference remains tied to its original tenancy and cannot be reassigned.
 
-Do not blindly replace current status validation with date validation and auto-post every closed-tenancy receipt. A retired reference, closed tenancy, delayed callback and current posting policy interact. Preserve the receipt and evidence; when safe attribution is proven but automatic posting is not authorized, route to review rather than reassigning or posting by guess.
+Do not replace current status validation with date validation and auto-post every closed-tenancy receipt. A retired reference, closed tenancy, delayed callback and current posting policy interact. Preserve the canonical receipt and reference evidence. Historical closed-tenancy receipts go to review unless a separately approved G3 historical-posting policy authorizes posting. That policy is not created by this correction.
+
 
 ### 7.3 Till/link path
 
-The Till evidence path validates the link/submission/merchant/mapping/receipt and timestamp agreement, but the exact tenancy date interval must also be loaded and checked before posting. The same interval invariant applies to PayBill and Till.
+The Till evidence path's MpesaSubmissionLink and MpesaSmsSubmission are tenant+estate scoped and contain no tenancy/house identity. Therefore do not load a tenancy by guessing from the link. Resolve candidates from {clientId, estateId, tenantId} and txn.transactionAt over historical Tenancy rows in ACTIVE or CLOSED state, excluding VOID:
+- exactly one row whose interval satisfies startAt <= transactionAt < endAt (or has null endAt) is required;
+- zero candidates or multiple candidates (including overlapping historical data) are a review outcome, never an automatic rejection followed by reassignment to another Tenant;
+- validate the source House via the selected Tenancy and persist attributedTenancyId on the canonical MpesaTransaction under its first-valid attribution/posting fence.
 
-Keep existing posting lease/fencing, immutable attribution, merchant verification, receipt matching and transaction atomicity. Do not let a link rotation/revocation race create a second attribution path.
+The interval query alone is not enough. Re-read and write-fence the selected Tenancy in the final posting transaction so a concurrent close/transfer cannot change the attribution between resolution and commit. Preserve the M-PESA receipt lease token; final receipt update must match the same token and valid lease. Attribution is immutable once committed.
+
+A submission with valid acceptedAt/acceptedLinkVersion proof remains processable after link rotation/revocation under the existing link rules. This proof establishes the accepted submission/link version only; it does not establish that the provider transaction time belongs to a tenancy. Both gates must pass independently.
+
+A transaction time covered by a now-closed tenancy is historically attributable but is review-only unless a separate approved historical-posting policy authorizes automatic posting. A provider timestamp before start, at/after exclusive end, invalid, or covered by overlapping tenancies never auto-posts.
+
+
+### 7.4 Receipt attribution versus allocation Tenancy
+
+Persist the distinction explicitly:
+- Source/attribution Tenancy: the exact historical tenancy whose interval proves the receipt belongs to this tenant, estate and house at provider transactionAt. For PayBill it comes from the immutable collection reference and is copied to MpesaTransaction.attributedTenancyId; for Till it is uniquely resolved by timestamp and persisted to that same canonical field. This new canonical field is required for both posting paths.
+- Allocation destination Tenancies: any eligible obligations returned by the estate-scoped shared account allocator. They may include older closed tenancies and may differ from the source Tenancy. The corresponding child Payment and PaymentAllocation retain each destination Tenancy's own House/period/charge identity.
+
+Do not force all child allocations onto the source Tenancy. Do not use an allocation child as the authority for which Tenant/estate received the provider receipt. M-PESA posting must retain attributed Tenant/Estate/Tenancy independently of paymentIds, including when the receipt is fully surplus and has no child Payments.
 
 ## 8. Canonical Payments overview
 
@@ -206,11 +267,39 @@ Preserve estateFilterClause/client authorization and historical receipt ownershi
 
 The list endpoint needs validated pagination/filter query inputs and stable sorting. Keep source-envelope aggregation bounded and indexed; avoid N+1 per-row lookups. Query design and index requirements must be profiled before implementation.
 
+### 8.3 Envelope eligibility, historical ownership and current balance
+
+The receipt overview is not a provider-ingestion or reconciliation queue. Include only:
+- ManualReceipt with its confirmed status;
+- MpesaTransaction whose postingState is POSTED and whose exact attributed client/estate/tenant context is present;
+- BankTransaction whose processingState is POSTED and whose matched source Tenancy/tenant/house context was verified.
+
+Do not include unallocated M-PESA receipts, unmatched Bank rows, Bank debits, or M-PESA/Bank records in processing, failed or review states as tenant receipts. They remain in their existing provider/reconciliation review surfaces. A fully-surplus POSTED receipt still appears once without any Payment child.
+
+A CREDIT-origin Payment is not an incoming receipt and must not produce a second receipt row. It may remain visible in account/allocation detail. For each canonical receipt, join only receipt-origin child Payments and associated movements; use the receipt envelope as row identity.
+
+At envelope level use the historical source House/attribution Tenancy. ManualReceipt already has houseId and occupancyTenancyId; Bank uses its matched source House/Tenancy; M-PESA derives source House from the persisted attributed Tenancy. Allocation details may list other destination Houses/Tenancies.
+
+Calculate independently:
+- receiptAppliedCents: sum of receipt-origin allocations for this envelope;
+- newCreditCents: surplus movement created by this envelope;
+- creditAppliedCents: existing tenant credit consumed during this settlement attempt, not new receipt money.
+Assert gross = receiptApplied + newCredit and creditBefore = creditApplied + creditRemaining. Do not use a child Payment amount as gross receipt authority.
+
+Remaining account position is current {clientId, estateId, tenantId} credit/outstanding position at query time. Label it as current. Do not call it the balance immediately after this historical receipt unless a posting-time snapshot is persisted.
+
+### 8.4 Query, pagination and index contract
+
+Validate IDs, dates, status/method filters and pagination before building aggregation pipelines. Reject malformed ObjectIds and invalid date ranges with the normal request-validation response. Normalize source-specific timestamp fields to one read-model receivedAt, sort by receivedAt DESC, envelopeId DESC, and apply pagination after all canonical envelope sources are unioned so totals and page boundaries are consistent.
+
+Every branch of the union must apply client scope and authorized estate scope before producing rows. Use the envelope's estateId and source-tenancy relationship for historical ownership; do not query Tenant.current house/estate as a fallback. Batch relationship loading for the page, not N+1 queries. Profile actual query plans and add only justified compound indexes (especially client+estate+received-time on each source). Existing M-PESA indexes on allocation fields may not cover new attributed fields; prove index readiness before relying on them.
+
 ## 9. Staff mobile UI
 
-The Staff page backend already has update/deactivate/activate operations with client scope and self-deactivation protection. The missing controls are in the mobile frontend card rendering.
+The backend source has update/activate/deactivate operations with client scope and self-deactivation protection. The claim that the separate frontend mobile card omits controls has not been independently reverified in this stress-test pass: the frontend repository, branch, exact component path and test harness were not retrieved.
 
-Implementation belongs in the separate tycoon-frontend repository. Add the same permitted actions available in the desktop table to the mobile card layout, preserving responsive layout and existing action confirmation/feedback. Do not duplicate authorization rules in the frontend or add unnecessary backend endpoints.
+Before implementation, record the exact tycoon-frontend GitHub repository, baseline commit, file path and desktop/mobile render branches. Then add the same permitted Edit and Activate/Deactivate actions to the mobile card layout, preserving responsive layout and existing action confirmation/feedback. Do not duplicate authorization rules in the frontend or add backend endpoints. Frontend acceptance is not complete until the actual mobile viewport/component interaction tests run in that repository.
+
 
 ## 10. Data flow summary
 
@@ -250,7 +339,12 @@ Canonical Manual/Bank/M-PESA receipt
 | Custom descriptions lost in numeric aggregation | Keep line-level descriptions alongside totals. |
 | Bank receipt splits into multiple child Payments | Define canonical receipt-to-many child identity before index changes. |
 | Entire Bank/M-PESA receipt becomes credit and has no Payment child | List the canonical receipt envelope independently of child Payment presence. |
-| Closed tenancy callback arrives late | Validate transaction date and preserve attribution evidence; route unsafe automatic posting to review. |
+| Till link does not identify a tenancy | Resolve exactly one timestamp-covering tenancy for tenant+estate; zero/multiple candidates go to review; persist immutable attributedTenancyId. |
+| Receipt source tenancy differs from allocation Tenancy | Store source attribution on the canonical envelope; allow shared allocator to settle eligible same-estate obligations across other tenancies. |
+| Closed tenancy callback arrives late | Validate transaction date and preserve attribution evidence; closed historical receipts stay review-only absent a separately approved G3 historical-posting policy. |
+| HouseType current-period version is created mid-month | Preserve existing period-effective rule; do not claim day-level effectiveness. A day-level product change is separate. |
+| Receipt list exposes unallocated or unmatched provider rows | Restrict tenant receipt view to confirmed/posted envelopes with verified tenant/estate attribution. |
+| Current balance is mistaken for historical receipt balance | Label it as current-at-query-time unless a posting-time snapshot is persisted. |
 | Existing credit is reported as new money | Separate gross receipt, credit consumed and credit earned. |
 | Payments query widens estate scope | Retain server-side client/estate filters and test forbidden cross-estate reads. |
 | Frontend hides actions at narrow breakpoints | Add mobile viewport component tests and preserve backend permissions. |
@@ -267,15 +361,17 @@ Canonical Manual/Bank/M-PESA receipt
 
 ## 12. Implementation sequence
 
-1. Reconfirm exact source baseline and current branch diff before coding.
-2. Extract/reuse House billing source resolution with explicit registration-date and charge-period contexts; add registration SMS tests.
-3. Preserve D-5 selector and add line-description and Nairobi boundary tests.
-4. Design Bank receipt identity/provenance and migration/index compatibility before changing settlement.
-5. Route Bank settlement through settleTenantAccount with advance-credit, replay, concurrency and rollback tests.
-6. Add M-PESA transaction-time tenancy coverage for PayBill and Till, including delayed historical receipt tests.
-7. Build canonical receipt-level Payments read model and validated filters.
-8. Update tycoon-frontend mobile staff actions in its own repository/workspace.
-9. Run focused tests, existing G3/G4 regressions and replica-set integration tests where disposable infrastructure already exists.
+1. Reconfirm exact backend and frontend repository baselines and current diffs before coding.
+2. Lock and test the source-specific House snapshot contract (HOUSE_CONFIG instant; HOUSE_TYPE period; MONTHLY_RENT current fields), registration timestamp capture, due-day fallback and no-effective-plan states.
+3. Extract/reuse House resolution without changing RentCharge generation semantics; add registration SMS/outbox transaction tests.
+4. Define the named line-rendering input and D-5 job-selection/line-rendering tests. Preserve D-5 scheduler, grouping and idempotency.
+5. Design the explicit BANK source contract, Bank envelope summary/provenance, child Payment identity, movement idempotency and migration/index compatibility. Complete duplicate preflight before any schema migration.
+6. Implement Bank shared settlement only after the contract is approved; test advance credit, same-estate cross-tenancy allocation, full surplus, replay, fencing, abort and legacy repair.
+7. Define and implement PayBill exact-reference validation and Till timestamp-based unique tenancy resolution; persist source attributedTenancyId and test zero/ambiguous/closed cases under the existing posting/link fences.
+8. Build the receipt-envelope Payments read model with state eligibility, historical ownership, current-balance semantics, validated query inputs and index/query-plan proof.
+9. Verify the separate frontend repository and implement/test mobile staff actions there.
+10. Run focused suites, G3/G4 regressions and required replica-set integrations in an already provisioned disposable environment. Report any unavailable integrations as not run.
+
 
 Each step should be independently reviewable. Do not combine schema migrations, payment posting enablement and UI changes into one unreviewable patch.
 
@@ -284,3 +380,20 @@ Each step should be independently reviewable. Do not combine schema migrations, 
 The audit was source-level. It did not execute production transactions, live SMS, live Daraja callbacks, production migrations or real Bank settlement. Do not describe these behaviours as runtime-proven.
 
 Tests that require MongoDB replica-set transactions must use an existing disposable replica-set environment. If unavailable, report them as not run. No database server installation is authorized by this work.
+
+## 14. Existing notification-document reconciliation
+
+docs/G5_NOTIFICATIONS_PRD.md, docs/G5_NOTIFICATIONS_ARCHITECTURE.md and docs/G5_NOTIFICATIONS_SUMMARY.md remain the source for unaffected notification/link/outbox mechanics. Their statements that registration bill text comes only from existing RentCharge rows are superseded by docs/g5/audited-corrections/PRD.md PR-01 and Architecture §4. The correction uses the exact House configuration; it does not create charges. Those old statements must be synchronized in a dedicated documentation change before implementation merges.
+
+Retain all unrelated notification requirements: server-side Estate name, one ordinary/protected welcome path, protected token encryption and versioning, stable resend/rotation/revocation, multi-tenancy link lifecycle, caller-owned Mongo transaction, outbox-only enqueue, post-commit provider dispatch, missing-phone behaviour, payment confirmations, Bank instruction restrictions, unknown-provider-result handling, and D-5 schedule/grouping/idempotency. D-5 is not superseded.
+
+## 15. Implementation acceptance traceability
+
+PRD §6.1 is the authoritative minimum test matrix. In particular:
+- existing tests/unit/d5RentReminder.test.js proves template rendering/date utility behaviour only; it does not prove smsReminderJob selection;
+- new registration resolver and message tests must prove source-specific effective dates, due-day fallback and transaction retry stability;
+- Bank and M-PESA posting/replay/fence cases require replica-set integration tests;
+- the Payments read model must be tested with posted, unallocated, unmatched, review, split and full-surplus source envelopes;
+- frontend mobile acceptance must be proved in the independently verified frontend repository.
+
+No source-level design statement in this document is runtime evidence. The source baseline, exact tests executed, environment and results must be recorded in the implementation PR/verification report.
