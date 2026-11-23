@@ -19,8 +19,9 @@
 
 The existing `tenantService.create()` owns one MongoDB transaction and `tenancyService.open()` already accepts the caller's session. Re-read the House and Estate inside that session; create Tenant and Tenancy; resolve the exact House's configured billing plan through the shared House resolver; then evaluate M-PESA entitlement and estate Till mapping in the same scope. Registration must not read generated RentCharge rows or require charge generation to have run.
 
-- Bank-only or non-eligible estate: queue exactly one ordinary `tenant_registration` SMS in the caller's session. No link is created.
+- Bank-only or non-eligible estate: queue exactly one ordinary `tenant_registration` SMS in the caller's session. No link is created. Record the non-eligibility reason in structured application logs; never log a bearer token or full submission URL.
 - Eligible M-PESA estate: create the link and one encrypted protected onboarding outbox row in the same session. Include registration details and any available bill breakdown in that protected message. Do not also queue a duplicate ordinary welcome SMS.
+- Registration SMS rendering uses readable display labels and one configured billing line per line. It omits internal billing-source enums and due-day values; due-day resolution for normal RentCharge generation is unchanged.
 - Never call Celcom during the transaction. Dispatch only after commit. If a secure REQUIRED M-PESA link/outbox write fails, abort the registration transaction; if the estate is not M-PESA eligible, ordinary registration proceeds without that dependency.
 - Use stable Tenant/link/message IDs across transaction callback retries; create a fresh AES-GCM nonce each callback attempt.
 

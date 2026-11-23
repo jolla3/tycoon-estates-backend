@@ -17,49 +17,13 @@ import { dateUtil } from '../utils/date.js';
 import { ledgerService } from './ledger.service.js';
 import { tenancyService } from './tenancy.service.js';
 import { smsService } from './sms.service.js';
+import { formatRegistrationPlanText, formatSmsDisplayLabel } from './smsTemplates.js';
 import { mpesaSubmissionLinkService } from './mpesa/mpesaSubmissionLink.service.js';
 import { resolveRegistrationBillingPlan } from './rent.service.js';
 import { logger } from '../config/logger.js';
-import { money } from '../utils/money.js';
 import { generateBearerToken } from '../utils/g5Token.js';
 import mongoose from 'mongoose';
 import { supportsMongoTransactions } from '../config/database.js';
-
-/**
- * Informational House billing-plan text for registration SMS.
- * Never claims Paid, Outstanding, invoice, or that RentCharges exist.
- */
-function formatRegistrationPlanText(snapshot, currency = 'KES') {
-  const { outcome, source, lines } = snapshot;
-  if (outcome === 'UNCONFIGURED') {
-    return 'This house has no configured billing plan.';
-  }
-  if (outcome === 'LEGACY_UNCLASSIFIED') {
-    return 'The billing plan for this house cannot currently be determined.';
-  }
-  if (outcome === 'NO_EFFECTIVE_HOUSE_TYPE_VERSION') {
-    return 'No applicable HouseType billing plan is currently effective for this house.';
-  }
-  if (outcome === 'HOUSE_CONFIG_NO_EFFECTIVE_ROWS') {
-    return 'No effective house billing configuration lines apply at registration.';
-  }
-  if (outcome === 'HOUSE_CONFIG_FUTURE_ONLY') {
-    return 'House billing configuration exists only for a future effective date; none applies at registration.';
-  }
-  if (outcome === 'VALID_EMPTY_HOUSE_TYPE_PLAN') {
-    return 'The effective HouseType plan has no billing lines configured.';
-  }
-  if (!lines?.length) {
-    return 'No applicable billing plan lines are available for this house at registration.';
-  }
-
-  const lineParts = lines.map((line) => {
-    const amount = money.format(line.amountCents, currency);
-    const due = line.dueDay != null ? ` (due day ${line.dueDay})` : '';
-    return `${line.description || line.chargeType} ${amount}${due}`;
-  });
-  return `Configured plan (${source}): ${lineParts.join('; ')}.`;
-}
 
 /**
  * Four distinct concepts (never interchangeable):
@@ -210,7 +174,7 @@ export const tenantService = {
           );
           billText = 'The configured billing plan could not be verified at registration.';
         }
-        const registrationText = `Registration confirmed for ${tenant.name}, House ${house.houseNumber}. ${billText}`;
+        const registrationText = `Registration confirmed for ${formatSmsDisplayLabel(tenant.name)}, House ${house.houseNumber}. ${billText}`;
         const provision = await mpesaSubmissionLinkService.provisionForRegistration({
           clientId, estateId: house.estateId, tenant, house, estate,
           registrationText, session, linkId: registrationLinkId,
@@ -218,8 +182,12 @@ export const tenantService = {
         });
 
         if (!provision.eligible) {
+          logger.info(
+            { tenantId: String(tenant._id), estateId: String(house.estateId), reason: provision.reason || 'unknown' },
+            'M-PESA registration link not provisioned; using ordinary registration SMS'
+          );
           if (tenant.phone) {
-            const ordinaryRegistrationText = registrationText + ' For verified bank payment instructions, contact the estate office.';
+            const ordinaryRegistrationText = `${registrationText}\n\nFor verified bank payment instructions, contact the estate office.`;
             await smsService.queueSms({
               clientId, estateId: house.estateId, tenantId: tenant._id, houseId: house._id,
               to: tenant.phone, message: ordinaryRegistrationText,

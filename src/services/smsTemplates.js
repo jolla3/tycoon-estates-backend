@@ -4,6 +4,51 @@
 import { money } from '../utils/money.js';
 import { Errors } from '../utils/errors.js';
 
+export function formatSmsDisplayLabel(value) {
+  const label = String(value ?? '').trim();
+  if (!label || label !== label.toLocaleLowerCase('en-KE')) return label;
+  return label.replace(/(^|[\s-])(\p{L})/gu, (_, separator, letter) =>
+    separator + letter.toLocaleUpperCase('en-KE')
+  );
+}
+
+export function formatRegistrationPlanText(snapshot, currency = 'KES') {
+  if (!snapshot || typeof snapshot !== 'object') {
+    throw Errors.InvalidRequest('Cannot render registration SMS without a billing snapshot');
+  }
+
+  const { outcome, lines } = snapshot;
+  if (outcome === 'UNCONFIGURED') {
+    return 'This house has no configured billing plan.';
+  }
+  if (outcome === 'LEGACY_UNCLASSIFIED') {
+    return 'The billing plan for this house cannot currently be determined.';
+  }
+  if (outcome === 'NO_EFFECTIVE_HOUSE_TYPE_VERSION') {
+    return 'No applicable house-type billing plan is currently effective for this house.';
+  }
+  if (outcome === 'HOUSE_CONFIG_NO_EFFECTIVE_ROWS') {
+    return 'No effective house billing configuration lines apply at registration.';
+  }
+  if (outcome === 'HOUSE_CONFIG_FUTURE_ONLY') {
+    return 'House billing configuration exists only for a future effective date; none applies at registration.';
+  }
+  if (outcome === 'VALID_EMPTY_HOUSE_TYPE_PLAN') {
+    return 'The effective house-type plan has no billing lines configured.';
+  }
+  if (!lines?.length) {
+    return 'No applicable billing plan lines are available for this house at registration.';
+  }
+
+  const lineParts = lines.map((line) => {
+    const rawLabel = line.description || String(line.chargeType || 'other').replace(/[_-]+/g, ' ').toLowerCase();
+    const label = formatSmsDisplayLabel(rawLabel);
+    return `${label}: ${money.format(line.amountCents, currency)}`;
+  });
+
+  return `Your configured charges:\n${lineParts.join('\n')}.`;
+}
+
 const TEMPLATES = {
   rent_reminder: ({ tenantName, houseNumber, balanceCents, currency }) =>
     'Dear ' + tenantName + ', House ' + houseNumber + ' has an outstanding rent balance of ' +
@@ -93,8 +138,14 @@ function prefixEstate(estateName, message) {
   if (!name || !body) {
     throw Errors.InvalidRequest('Estate name and SMS body are required');
   }
-  const prefix = name + ':';
-  return body.startsWith(prefix) ? body : prefix + ' ' + body;
+
+  const displayName = formatSmsDisplayLabel(name);
+  const colonAt = body.indexOf(':');
+  const existingPrefix = colonAt >= 0 ? body.slice(0, colonAt).trim() : '';
+  if (existingPrefix.toLocaleLowerCase('en-KE') === name.toLocaleLowerCase('en-KE')) {
+    return `${displayName}:${body.slice(colonAt + 1)}`;
+  }
+  return `${displayName}: ${body}`;
 }
 
 function previewSms(type, templateData) {
