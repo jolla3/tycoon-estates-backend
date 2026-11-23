@@ -1,7 +1,7 @@
 // src/models/MpesaTransaction.js
 //
-// G5.3 — Canonical merchant-side M-PESA receipt.
-// Provider ingestion only — no G3 Payment posting in this slice.
+// G5.3/G5 — Canonical merchant-side M-PESA receipt and provider verification envelope.
+// G3 posting is fenced separately; attributedTenancyId records the exact source tenancy.
 // Explicit collection: mpesatransactions
 // autoIndex: false — provisional unique index is migration-controlled only.
 
@@ -66,10 +66,11 @@ const MpesaTransactionSchema = new Schema(
     allocatedEstateId: { type: Schema.Types.ObjectId, ref: 'Estate', default: null },
     allocatedTenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', default: null },
     allocatedTenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null },
-    // G5 attribution: first successful conditional claim wins; never reassigned.
+    // G5 attribution: first successful conditional claim pins client/estate/tenant/source tenancy; never reassigned.
     attributedClientId: { type: Schema.Types.ObjectId, ref: 'Client', default: null },
     attributedEstateId: { type: Schema.Types.ObjectId, ref: 'Estate', default: null },
     attributedTenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', default: null },
+    attributedTenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null },
     attributedSubmissionId: { type: Schema.Types.ObjectId, ref: 'MpesaSmsSubmission', default: null },
     // G5 receipt-level fencing for posting (attempt-specific random token + expiry).
     postingLeaseToken: { type: String, default: null, select: false },
@@ -78,7 +79,17 @@ const MpesaTransactionSchema = new Schema(
     postingFailureCode: { type: String, default: null },
     postedAt: { type: Date, default: null },
     creditEarnedCents: { type: Number, default: 0 },
-    /** Future multi-tenancy child Payments (G5.1) — no G3 writes in this slice. */
+    // G5 canonical settlement snapshot. Null preserves historical rows whose values were never stored.
+    creditPaymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
+    creditMovementIds: { type: [{ type: Schema.Types.ObjectId, ref: 'TenantCreditMovement' }], default: [] },
+    receiptAppliedCents: { type: Number, default: null },
+    creditAppliedCents: { type: Number, default: null },
+    newCreditCents: { type: Number, default: null },
+    creditBeforeCents: { type: Number, default: null },
+    creditRemainingCents: { type: Number, default: null },
+    creditAfterCents: { type: Number, default: null },
+    settlementVersion: { type: Number, default: null },
+    /** Receipt-origin Payment children created by the G3 shared Tenant-account allocator. */
     paymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
   },
   { timestamps: true, collection: 'mpesatransactions', autoIndex: false }

@@ -23,98 +23,14 @@ import { logger } from '../config/logger.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import { audit } from './audit.service.js';
 
-const TEMPLATES = {
-  rent_reminder: ({ tenantName, houseNumber, balanceCents, currency }) =>
-    'Dear ' + tenantName + ', House ' + houseNumber + ' has an outstanding rent balance of ' +
-      money.format(balanceCents, currency) + '. Kindly settle it at your earliest convenience.',
-  rent_reminder_d5: ({
-    tenantName, houseNumber, period, dueDate,
-    rentOutstandingCents, waterOutstandingCents,
-    electricityOutstandingCents, otherOutstandingCents,
-    previousArrearsCents, totalOutstandingCents, currency = 'KES',
-  }) => {
-    for (const [field, value] of Object.entries({
-      rentOutstandingCents, waterOutstandingCents,
-      electricityOutstandingCents, otherOutstandingCents,
-      previousArrearsCents, totalOutstandingCents,
-    })) {
-      requireTemplateCents(value, field);
-    }
-    for (const [field, value] of Object.entries({ tenantName, houseNumber, period, dueDate })) {
-      if (typeof value !== 'string' || !value.trim()) {
-        throw Errors.InvalidRequest('Cannot render D-5 reminder without ' + field);
-      }
-    }
-    return [
-      'Rent due in five days on ' + dueDate + ' for ' + tenantName +
-        ', House ' + houseNumber + ' (' + period + ').',
-      rentOutstandingCents ? 'Rent outstanding: ' + money.format(rentOutstandingCents, currency) + '.' : null,
-      waterOutstandingCents ? 'Water outstanding: ' + money.format(waterOutstandingCents, currency) + '.' : null,
-      electricityOutstandingCents ? 'Electricity outstanding: ' + money.format(electricityOutstandingCents, currency) + '.' : null,
-      otherOutstandingCents ? 'Other outstanding: ' + money.format(otherOutstandingCents, currency) + '.' : null,
-      previousArrearsCents ? 'Previous arrears: ' + money.format(previousArrearsCents, currency) + '.' : null,
-      'Total outstanding: ' + money.format(totalOutstandingCents, currency) + '.',
-    ].filter(Boolean).join(' ');
-  },
-  payment_confirmation: ({ tenantName, houseNumber, amountCents, balanceCents, currency }) =>
-    `Dear ${tenantName}, we have received your payment of ${money.format(amountCents, currency)} for House ${houseNumber}. Remaining balance: ${money.format(Math.max(balanceCents, 0), currency)}. Thank you.`,
-  arrears_notice: ({ tenantName, houseNumber, monthsOverdue, balanceCents, currency }) =>
-    `Dear ${tenantName}, House ${houseNumber} is ${monthsOverdue} month(s) in arrears, totaling ${money.format(balanceCents, currency)}. Please contact the estate office urgently.`,
-  billing_notification: ({
-    tenantName, houseNumber, period,
-    rentOutstandingCents, waterOutstandingCents,
-    electricityOutstandingCents, otherOutstandingCents,
-    previousArrearsCents, paidCents, totalOutstandingCents,
-    dueDate, currency = 'KES',
-  }) => {
-    for (const [field, value] of Object.entries({
-      rentOutstandingCents, waterOutstandingCents,
-      electricityOutstandingCents, otherOutstandingCents,
-      previousArrearsCents, paidCents, totalOutstandingCents,
-    })) {
-      requireTemplateCents(value, field);
-    }
-    const lines = [
-      'Billing statement ' + period + ' for ' + tenantName + ', House' +
-        (String(houseNumber).includes(',') ? 's' : '') + ' ' + houseNumber + '.',
-      rentOutstandingCents ? 'Rent outstanding: ' + money.format(rentOutstandingCents, currency) + '.' : null,
-      waterOutstandingCents ? 'Water outstanding: ' + money.format(waterOutstandingCents, currency) + '.' : null,
-      electricityOutstandingCents ? 'Electricity outstanding: ' + money.format(electricityOutstandingCents, currency) + '.' : null,
-      otherOutstandingCents ? 'Other outstanding: ' + money.format(otherOutstandingCents, currency) + '.' : null,
-      previousArrearsCents ? 'Previous arrears: ' + money.format(previousArrearsCents, currency) + '.' : null,
-      paidCents ? 'Paid this period: ' + money.format(paidCents, currency) + '.' : null,
-      'Total outstanding: ' + money.format(totalOutstandingCents, currency) + '.',
-      dueDate ? 'Due: ' + dueDate + '.' : null,
-    ].filter(Boolean);
-    return lines.join(' ');
-  },
-};
+import {
+  TEMPLATES,
+  previewSms,
+  requireTemplateCents,
+  prefixEstate,
+} from './smsTemplates.js';
 
-
-function requireTemplateCents(value, field) {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    const err = Errors.InvalidRequest('Cannot render billing SMS: ' + field + ' must be a verified non-negative integer-cent value');
-    err.code = 'SMS_TEMPLATE_AMOUNT_INVALID';
-    throw err;
-  }
-  return value;
-}
-
-function prefixEstate(estateName, message) {
-  const name = String(estateName || '').trim();
-  const body = String(message || '').trim();
-  if (!name || !body) {
-    throw Errors.InvalidRequest('Estate name and SMS body are required');
-  }
-  const prefix = name + ':';
-  return body.startsWith(prefix) ? body : prefix + ' ' + body;
-}
-
-export function previewSms(type, templateData) {
-  const render = TEMPLATES[type];
-  if (!render) throw Errors.InvalidRequest(`Unknown SMS template: ${type}`);
-  return render({ currency: 'KES', ...templateData });
-}
+export { previewSms };
 
 function buildIdempotencyKey({
   clientId,
@@ -639,8 +555,7 @@ export const smsService = {
           })
             .select('balanceCents')
             .lean();
-          const sum = open.reduce((s, c) => s + Math.max(c.balanceCents || 0, 0), 0);
-          if (sum > 0) withBalance.push(tenant);
+          const sum = open.reduce((s, c) => s + Math.max(c.balanceCents || 0, 0), 0);        if (sum > 0) withBalance.push(tenant);
         }
       }
       tenants = withBalance;

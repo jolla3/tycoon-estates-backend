@@ -5,7 +5,10 @@ const ALLOWED = [
   '_id', 'clientId', 'estateId', 'bankAccountId', 'provider', 'providerTransactionId',
   'amountCents', 'currency', 'transactionDate', 'valueDate', 'paymentReference', 'narration',
   'eventType', 'matchedHouseId', 'matchedTenantId', 'matchedTenancyId', 'matchStatus',
-  'processingState', 'createdAt', 'updatedAt',
+  'processingState', 'paymentIds', 'creditPaymentIds', 'creditMovementIds',
+  'receiptAppliedCents', 'creditAppliedCents', 'newCreditCents',
+  'creditBeforeCents', 'creditRemainingCents', 'creditAfterCents',
+  'settlementVersion', 'postedAt', 'createdAt', 'updatedAt',
 ];
 
 export function toBankTransactionDTO(doc) {

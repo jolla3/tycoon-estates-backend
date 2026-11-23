@@ -16,6 +16,7 @@ import { audit } from './audit.service.js';
 import { tenancyService } from './tenancy.service.js';
 import { settleTenantAccount, tenantAccountSnapshot } from './tenantCredit.service.js';
 import { assertManualReceiptIndexesAligned } from '../utils/manualReceiptIndexReadiness.js';
+import { paymentReceiptReadModelService } from './paymentReceiptReadModel.service.js';
 
 function normalizeReference(value) {
   const s = value == null ? '' : String(value).trim();
@@ -121,108 +122,13 @@ async function reconstructSettlementFromReceipt(existing, { session = null } = {
 
 export const paymentService = {
   /**
-   * Operator-facing payment history.
-   * - Each ManualReceipt appears once at its gross amount (origin MANUAL).
-   * - MANUAL Payment children linked via manualReceiptId are excluded.
-   * - M-PESA, BANK, CREDIT, and legacy MANUAL rows without manualReceiptId are unchanged.
+   * Operator-facing canonical receipt history.
+   * - One row per confirmed ManualReceipt or posted Bank/M-PESA envelope.
+   * - Allocation child Payments and CREDIT-origin applications are joined as detail, never listed as receipts.
+   * - Unlinked legacy MANUAL Payment rows remain visible but explicitly unverified.
    */
-  async list(clientId, estateFilter, query) {
-    const { page, limit, skip } = paginationParams(query);
-    const scope = { clientId, ...estateFilterClause(estateFilter) };
-    if (query.houseId) scope.houseId = new mongoose.Types.ObjectId(String(query.houseId));
-    if (query.tenantId) scope.tenantId = new mongoose.Types.ObjectId(String(query.tenantId));
-    if (query.estateId) scope.estateId = new mongoose.Types.ObjectId(String(query.estateId));
-    // Ensure clientId is ObjectId for aggregation match against stored ObjectIds.
-    if (scope.clientId && !(scope.clientId instanceof mongoose.Types.ObjectId)) {
-      scope.clientId = new mongoose.Types.ObjectId(String(scope.clientId));
-    }
-
-    // Non-child payment rows: everything except MANUAL allocation children of a ManualReceipt.
-    const paymentMatch = {
-      ...scope,
-      $or: [
-        { origin: { $ne: 'MANUAL' } },
-        { origin: 'MANUAL', manualReceiptId: null },
-        { origin: 'MANUAL', manualReceiptId: { $exists: false } },
-      ],
-    };
-
-    const receiptMatch = { ...scope };
-
-    const [facet] = await Payment.aggregate([
-      { $match: paymentMatch },
-      {
-        $project: {
-          clientId: 1,
-          estateId: 1,
-          houseId: 1,
-          tenantId: 1,
-          tenancyId: 1,
-          origin: 1,
-          amountCents: 1,
-          paymentDate: 1,
-          paymentReference: 1,
-          period: 1,
-          status: 1,
-          tenderMethod: 1,
-          listKind: { $literal: 'payment' },
-        },
-      },
-      {
-        $unionWith: {
-          coll: 'manualreceipts',
-          pipeline: [
-            { $match: receiptMatch },
-            {
-              $project: {
-                clientId: 1,
-                estateId: 1,
-                houseId: 1,
-                tenantId: 1,
-                tenancyId: '$occupancyTenancyId',
-                origin: { $literal: 'MANUAL' },
-                amountCents: 1,
-                paymentDate: 1,
-                paymentReference: 1,
-                period: 1,
-                status: 1,
-                tenderMethod: 1,
-                listKind: { $literal: 'manual_receipt' },
-                manualReceiptId: '$_id',
-              },
-            },
-          ],
-        },
-      },
-      { $sort: { paymentDate: -1, _id: -1 } },
-      {
-        $facet: {
-          items: [{ $skip: skip }, { $limit: limit }],
-          total: [{ $count: 'n' }],
-        },
-      },
-    ]);
-
-    const rawItems = facet?.items || [];
-    const total = facet?.total?.[0]?.n || 0;
-
-    // Resolve real relationships for display (scoped to client; no raw ids needed in the UI).
-    // Missing/deleted relations degrade to null rather than failing the page.
-    const ids = (k) => [...new Set(rawItems.map((r) => r[k]).filter(Boolean).map(String))];
-    const [tenants, houses] = await Promise.all([
-      Tenant.find({ _id: { $in: ids('tenantId') }, clientId: scope.clientId }).select('name phone').lean(),
-      House.find({ _id: { $in: ids('houseId') }, clientId: scope.clientId }).select('houseNumber').lean(),
-    ]);
-    const tenantById = new Map(tenants.map((t) => [String(t._id), t]));
-    const houseById = new Map(houses.map((h) => [String(h._id), h]));
-    const items = rawItems.map((r) => ({
-      ...r,
-      tenantName: tenantById.get(String(r.tenantId))?.name ?? null,
-      houseNumber: houseById.get(String(r.houseId))?.houseNumber ?? null,
-      // CREDIT-origin rows apply existing credit; they are not money received.
-      isMoneyReceived: r.origin !== 'CREDIT',
-    }));
-    return paginatedResponse(items, total, { page, limit });
+  async list(clientId, estateFilter, query = {}) {
+    return paymentReceiptReadModelService.list(clientId, estateFilter, query);
   },
 
   /**
@@ -425,6 +331,10 @@ export const paymentService = {
         createdReceipt.creditAppliedCents = settled.plan?.creditAppliedCents || 0;
         createdReceipt.receiptAppliedCents = settled.plan?.receiptAppliedCents || 0;
         createdReceipt.newCreditCents = settled.plan?.newCreditCents || 0;
+        createdReceipt.creditBeforeCents = settled.creditBeforeCents;
+        createdReceipt.creditRemainingCents = settled.plan?.creditRemainingCents ?? null;
+        createdReceipt.creditAfterCents = settled.creditAfterCents;
+        createdReceipt.settlementVersion = 1;
         createdReceipt.paymentIds = (settled.receiptPayments || []).map((p) => p._id);
         createdReceipt.creditPaymentIds = (settled.creditPayments || []).map((p) => p._id);
         createdReceipt.creditMovementIds = (settled.movements || []).map((m) => m._id);

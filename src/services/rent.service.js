@@ -7,8 +7,6 @@ import { House } from '../models/House.js';
 import { Estate } from '../models/Estate.js';
 import { RentCharge } from '../models/RentCharge.js';
 import { HouseBillingConfig } from '../models/HouseBillingConfig.js';
-import { HouseType, assertUniquePlanLines } from '../models/HouseType.js';
-import { resolveHouseTypePlanVersion } from './houseTypePlanVersion.service.js';
 import { Tenancy } from '../models/Tenancy.js';
 import { dateUtil } from '../utils/date.js';
 import { money } from '../utils/money.js';
@@ -20,6 +18,14 @@ import { supportsMongoTransactions } from '../config/database.js';
 import { Errors } from '../utils/errors.js';
 import { logger } from '../config/logger.js';
 import { isTenancyEligibleForPeriod } from '../utils/tenancyEligibility.js';
+
+// Billing-plan resolution lives in houseBillingPlan.service.js (shared REGISTRATION /
+// CHARGE_PERIOD contexts). Charge generation keeps the prior planLinesForHouse contract.
+import {
+  planLinesForHouse,
+  resolveHouseBillingPlan,
+  resolveRegistrationBillingPlan,
+} from './houseBillingPlan.service.js';
 
 function resolveDueDay(house, estate, configDueDay) {
   if (configDueDay != null) return configDueDay;
@@ -92,84 +98,6 @@ function periodBounds(period) {
   return { periodStart, nextPeriodStart };
 }
 
-/**
- * Resolve one explicit billing source. No implicit HouseType -> HouseBillingConfig
- * -> monthlyRent fallback is permitted.
- */
-async function planLinesForHouse(house, period, { session } = {}) {
-  const estateQuery = Estate.findOne({ _id: house.estateId, clientId: house.clientId });
-  if (session) estateQuery.session(session);
-  const estate = await estateQuery.lean();
-  if (!estate) throw Errors.Conflict('House Estate ownership could not be verified for billing');
-  const source = house.billingSource || 'LEGACY_UNCLASSIFIED';
-  const emptyMeta = { planId: null, planVersionId: null, planVersion: null };
-
-  if (source === 'UNCONFIGURED') return { lines: [], planMeta: emptyMeta, estate, source };
-  if (source === 'LEGACY_UNCLASSIFIED') {
-    throw Errors.Conflict(`House ${house._id} has unclassified legacy billing source; generation is blocked.`);
-  }
-
-  if (source === 'HOUSE_TYPE') {
-    if (!house.houseTypeId) throw Errors.Conflict('HOUSE_TYPE billing requires houseTypeId');
-    const typeQuery = HouseType.findOne({ _id: house.houseTypeId, clientId: house.clientId, estateId: house.estateId });
-    if (session) typeQuery.session(session);
-    const type = await typeQuery.lean();
-    if (!type) throw Errors.Conflict('HouseType does not belong to this House Estate');
-    const version = await resolveHouseTypePlanVersion({
-      clientId: house.clientId, estateId: house.estateId, houseTypeId: type._id, period, session,
-    });
-    if (!version) return { lines: [], planMeta: { ...emptyMeta, planId: type._id }, estate, source };
-    const lines = (version.lines || []).map((line) => ({
-      chargeType: line.chargeType,
-      description: String(line.description || line.chargeType || '').trim(),
-      amountCents: line.amountCents,
-      dueDay: line.dueDay,
-      planLineId: line.lineId,
-    }));
-    assertUniquePlanLines(lines);
-    return {
-      lines,
-      planMeta: { planId: type._id, planVersionId: version._id, planVersion: version.version },
-      estate,
-      source,
-    };
-  }
-
-  if (source === 'HOUSE_CONFIG') {
-    const at = dateUtil.startOfMonth(period).toDate();
-    const configQuery = HouseBillingConfig.find({
-      clientId: house.clientId, estateId: house.estateId, houseId: house._id,
-      effectiveFrom: { $lte: at },
-      $or: [
-        { isActive: true, $or: [{ effectiveTo: null }, { effectiveTo: { $gt: at } }] },
-        { isActive: false, effectiveTo: { $gt: at } },
-      ],
-    });
-    if (session) configQuery.session(session);
-    const configs = await configQuery.lean();
-    const lines = configs.map((config) => ({
-      chargeType: config.chargeType,
-      description: String(config.description || config.chargeType || '').trim(),
-      amountCents: config.amountCents,
-      dueDay: config.dueDay,
-      planLineId: `HOUSE_CONFIG:${config._id}`,
-      billingConfigId: config._id,
-    }));
-    assertUniquePlanLines(lines);
-    return { lines, planMeta: emptyMeta, estate, source };
-  }
-
-  if (source === 'MONTHLY_RENT') {
-    const amountCents = money.toCents(house.monthlyRent);
-    const lines = amountCents > 0 ? [{
-      chargeType: 'RENT', description: 'Rent', amountCents,
-      dueDay: house.dueDay, planLineId: `MONTHLY_RENT:${house._id}`,
-    }] : [];
-    return { lines, planMeta: emptyMeta, estate, source };
-  }
-  throw Errors.InvalidRequest(`Unsupported House billing source: ${source}`);
-}
-
 async function ensureChargeAndLedger({
   clientId,
   estateId,
@@ -216,8 +144,6 @@ async function ensureChargeAndLedger({
   let created = false;
 
   if (charge) {
-    // A matching identity key is not permission to reuse a row owned by
-    // a different client, estate, House or Tenant.
     assertExistingChargeIdentity(charge, expectedIdentity);
   } else {
     try {
@@ -245,9 +171,6 @@ async function ensureChargeAndLedger({
       charge = doc;
       created = true;
     } catch (error) {
-      // A duplicate-key write inside a transaction must not be followed by
-      // another query using that same session. The transaction owner must
-      // abort and, where supported, retry the complete unit in a fresh session.
       if (isRentChargeIdentityDuplicate(error)) {
         error.g3RentChargeIdentityConflict = true;
       }
@@ -255,7 +178,6 @@ async function ensureChargeAndLedger({
     }
   }
 
-  // Ensure CHARGE Ledger exists (insert or repair) — never swallow errors
   const { ledgerService } = await import('./ledger.service.js');
   await ledgerService.postEntry(
     {
@@ -278,14 +200,13 @@ async function ensureChargeAndLedger({
   return { charge, created };
 }
 
-export { isTenancyEligibleForPeriod };
+export { isTenancyEligibleForPeriod, resolveHouseBillingPlan, resolveRegistrationBillingPlan };
 
 export const rentService = {
   isTenancyEligibleForPeriod,
+  resolveHouseBillingPlan,
+  resolveRegistrationBillingPlan,
 
-  /**
-   * Generate period charges for every full-period eligible Tenancy under an estate.
-   */
   async generateChargesForEstate(clientId, estateId, period = dateUtil.currentPeriod()) {
     await assertBillingIndexesAligned();
     if (supportsMongoTransactions() !== true) {
@@ -299,7 +220,6 @@ export const rentService = {
 
     const { periodStart, nextPeriodStart } = periodBounds(period);
 
-    // Eligible tenancies: full period coverage (interim G3 rule)
     const tenancies = await Tenancy.find({
       clientId,
       estateId,
@@ -308,7 +228,6 @@ export const rentService = {
       $or: [{ endAt: null }, { endAt: { $gte: nextPeriodStart } }],
     }).lean();
 
-    // Partial-period tenancies (reported, not billed)
     const partial = await Tenancy.find({
       clientId,
       estateId,
@@ -327,8 +246,6 @@ export const rentService = {
       for (const candidateTenancy of tenancies) {
         let committedCreated = 0;
         await session.withTransaction(async () => {
-          // Re-read current ownership inside the transaction; a move/close racing
-          // with scheduled billing must not use a stale Tenancy or House snapshot.
           const tenancy = await Tenancy.findOne({
             _id: candidateTenancy._id, clientId, estateId,
             status: { $in: ['ACTIVE', 'CLOSED'] },
@@ -372,7 +289,6 @@ export const rentService = {
             });
             if (result.created) attemptCreated += 1;
           }
-          // withTransaction may replay its callback; overwrite rather than += outside it.
           committedCreated = attemptCreated;
         });
         created += committedCreated;
@@ -397,10 +313,6 @@ export const rentService = {
       });
     }
 
-    // G5: existing Tenant credit settles newly eligible obligations oldest-first. Runs
-    // regardless of `created` (credit may also settle older open charges). Each Tenant is
-    // its own transaction; a failure never fails billing (credit simply stays unapplied
-    // and is retried on the next run).
     let creditApplied = 0;
     const creditApplyFailedTenantIds = [];
     for (const tenantId of new Set(tenancies.filter((t) => t.tenantId).map((t) => String(t.tenantId)))) {
@@ -424,10 +336,6 @@ export const rentService = {
     };
   },
 
-  /**
-   * Ensures charges exist for a specific tenancy in a period (all plan lines).
-   * Used by reconciliation before allocation. Requires explicit tenancyId.
-   */
   async ensureChargesForTenancy(clientId, tenancy, house, period, { session } = {}) {
     await assertBillingIndexesAligned();
     if (!tenancy?._id) throw Errors.InvalidRequest('tenancy is required');
@@ -495,10 +403,6 @@ export const rentService = {
     }
   },
 
-  /**
-   * House-oriented ensure: resolve exactly one eligible tenancy or require tenancyId.
-   * @deprecated Prefer ensureChargesForTenancy.
-   */
   async ensureChargesForHouse(clientId, house, tenant, period, { session, tenancyId = null } = {}) {
     await assertBillingIndexesAligned();
     let tenancy = null;
@@ -526,7 +430,6 @@ export const rentService = {
     return this.ensureChargesForTenancy(clientId, tenancy, house, period, { session });
   },
 
-  /** @deprecated — hard-fail path that forces tenancy resolution */
   async getOrCreateChargeForHouse(clientId, house, tenant, period, { session, tenancyId = null } = {}) {
     const charges = await this.ensureChargesForHouse(clientId, house, tenant, period, {
       session,
@@ -604,10 +507,6 @@ export const rentService = {
     return { period: p, created, estates: results };
   },
 
-  /**
-   * House billing account. Groups charges/payments by tenancy so successive
-   * occupants are not merged into one implied current liability.
-   */
   async houseAccount(clientId, houseId, estateFilter = null) {
     const house = await House.findOne({
       _id: houseId,

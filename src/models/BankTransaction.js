@@ -49,6 +49,19 @@ const BankTransactionSchema = new Schema(
     matchedHouseId: { type: Schema.Types.ObjectId, ref: 'House', default: null },
     matchedTenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', default: null },
     matchedTenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null },
+    // Canonical Bank receipt settlement envelope. Payment children are allocation destinations;
+    // these references are empty for a fully-surplus receipt.
+    paymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
+    creditPaymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
+    creditMovementIds: { type: [{ type: Schema.Types.ObjectId, ref: 'TenantCreditMovement' }], default: [] },
+    receiptAppliedCents: { type: Number, default: null },
+    creditAppliedCents: { type: Number, default: null },
+    newCreditCents: { type: Number, default: null },
+    creditBeforeCents: { type: Number, default: null },
+    creditRemainingCents: { type: Number, default: null },
+    creditAfterCents: { type: Number, default: null },
+    settlementVersion: { type: Number, default: null },
+    postedAt: { type: Date, default: null },
     matchStatus: {
       type: String,
       enum: ['MATCHED', 'UNMATCHED', 'PARTIAL', 'MANUAL_REVIEW'],
@@ -75,6 +88,10 @@ BankTransactionSchema.index({ provider: 1, providerTransactionId: 1 }, { unique:
 BankTransactionSchema.index({ estateId: 1, paymentReference: 1 });
 BankTransactionSchema.index({ estateId: 1, matchStatus: 1 });
 BankTransactionSchema.index({ clientId: 1, transactionDate: -1 });
+BankTransactionSchema.index(
+  { clientId: 1, estateId: 1, processingState: 1, eventType: 1, matchStatus: 1, transactionDate: -1 },
+  { name: 'idx_bank_posted_receipts' }
+);
 BankTransactionSchema.index({ clientId: 1, matchStatus: 1 });
 BankTransactionSchema.index({ processingState: 1, updatedAt: 1 });
 BankTransactionSchema.index({ processingState: 1, processingClaimExpiresAt: 1 });

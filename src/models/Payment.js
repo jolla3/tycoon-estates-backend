@@ -14,7 +14,9 @@ const PaymentSchema = new Schema(
     tenantId: { type: Schema.Types.ObjectId, ref: 'Tenant' },
     tenancyId: { type: Schema.Types.ObjectId, ref: 'Tenancy', default: null, index: true },
     origin: { type: String, enum: PAYMENT_ORIGINS, required: true },
-    bankTransactionId: { type: Schema.Types.ObjectId, ref: 'BankTransaction', unique: true, sparse: true },
+    // Canonical Bank receipt envelope link. One receipt may have one child per destination Tenancy.
+    // The partial { bankTransactionId, tenancyId } unique index is installed by a guarded migration.
+    bankTransactionId: { type: Schema.Types.ObjectId, ref: 'BankTransaction' },
     // Internal MpesaTransaction._id (never the external receipt string).
     mpesaReceiptId: { type: Schema.Types.ObjectId, default: null },
     // Link to canonical ManualReceipt envelope when this is a MANUAL allocation child.
@@ -49,6 +51,10 @@ PaymentSchema.path('amountCents').validate(
 // reference belongs on ManualReceipt only.
 PaymentSchema.index({ estateId: 1, houseId: 1, period: 1 });
 PaymentSchema.index({ clientId: 1, paymentDate: -1 });
+PaymentSchema.index(
+  { clientId: 1, estateId: 1, origin: 1, paymentDate: -1 },
+  { name: 'idx_payment_legacy_manual_list' }
+);
 PaymentSchema.index({ tenancyId: 1, paymentDate: -1 });
 PaymentSchema.index({ mpesaReceiptId: 1 }, { sparse: true, name: 'idx_payment_mpesa_receipt' });
 PaymentSchema.index({ manualReceiptId: 1 }, { sparse: true, name: 'idx_payment_manual_receipt' });

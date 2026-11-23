@@ -23,6 +23,7 @@ import { requirePositiveSafeCents } from '../utils/moneyInt.js';
 import { Errors } from '../utils/errors.js';
 
 const idStr = (v) => String(v);
+const sameId = (a, b) => a != null && b != null && String(a) === String(b);
 
 function requireSession(session) {
   if (!session) throw Errors.ServiceUnavailable('Tenant credit operations require a MongoDB transaction');
@@ -104,9 +105,13 @@ async function projectCharge(chargeId, scope, session) {
  *  - any receipt remainder becomes new Tenant credit.
  * Never allocates beyond a charge balance; never creates charges.
  *
- * receipt shapes:
- *   MPESA (default when source omitted):
- *     { transactionId, amountCents, receiptNumber?, transactionAt? }
+ * receipt shapes (source is mandatory; an unknown/missing source is rejected):
+ *   MPESA:
+ *     { source:'MPESA', transactionId, amountCents, receiptNumber?, transactionAt? }
+ *     A sourceTenancyCheck is required for exact transaction-time attribution.
+ *   BANK:
+ *     { source:'BANK', bankTransactionId, amountCents, paymentDate? }
+ *     A sourceTenancyCheck is required for exact transaction-time attribution.
  *   MANUAL:
  *     { source:'MANUAL', identityKey, amountCents, tenderMethod,
  *       manualReceiptId?, recordedByUserId?, paymentDate? }
@@ -114,18 +119,26 @@ async function projectCharge(chargeId, scope, session) {
  *
  * Full-surplus receipts (no allocation slices):
  *   - MPESA: only TenantCreditMovement RECEIPT_SURPLUS (no marker Payment).
+ *   - BANK: only BankTransaction envelope + linked RECEIPT_SURPLUS movement.
  *   - MANUAL: same; canonical identity is the caller's ManualReceipt envelope.
  */
 export async function settleTenantAccount({
-  clientId, estateId, tenantId, receipt = null, paymentDate = null, session,
+  clientId,
+  estateId,
+  tenantId,
+  receipt = null,
+  paymentDate = null,
+  session,
+  sourceTenancyCheck = null,
 }) {
   requireSession(session);
 
-  const source = receipt
-    ? (receipt.source === 'MANUAL' ? 'MANUAL' : 'MPESA')
-    : null;
+  const source = receipt ? receipt.source : null;
 
   if (receipt) {
+    if (!['MANUAL', 'MPESA', 'BANK'].includes(source)) {
+      throw Errors.InvalidRequest('Receipt source must be explicitly MANUAL, MPESA, or BANK');
+    }
     requirePositiveSafeCents(receipt.amountCents);
     if (source === 'MPESA' && !receipt.transactionId) {
       throw Errors.InvalidRequest('receipt.transactionId required');
@@ -133,23 +146,82 @@ export async function settleTenantAccount({
     if (source === 'MANUAL' && !receipt.identityKey) {
       throw Errors.InvalidRequest('receipt.identityKey required for manual receipts');
     }
+    if (source === 'BANK' && !receipt.bankTransactionId) {
+      throw Errors.InvalidRequest('receipt.bankTransactionId required for Bank receipts');
+    }
+    if (['BANK', 'MPESA'].includes(source) && (!sourceTenancyCheck?.tenancyId
+      || !sourceTenancyCheck?.houseId || !sourceTenancyCheck?.transactionAt)) {
+      throw Errors.InvalidRequest('M-PESA/Bank receipts require exact source-tenancy transaction-time validation');
+    }
+    if (['BANK', 'MPESA'].includes(source)) {
+      const receiptDate = receipt.paymentDate || paymentDate || receipt.transactionAt;
+      const receiptTime = receiptDate instanceof Date ? receiptDate.getTime() : NaN;
+      const sourceTime = new Date(sourceTenancyCheck.transactionAt).getTime();
+      if (!Number.isFinite(receiptTime) || !Number.isFinite(sourceTime) || receiptTime !== sourceTime) {
+        throw Errors.InvalidRequest('Receipt Payment date must equal its provider transaction timestamp exactly');
+      }
+      const allowedStatuses = sourceTenancyCheck.allowedStatuses || ['ACTIVE', 'CLOSED'];
+      if (!Array.isArray(allowedStatuses) || !allowedStatuses.length
+        || allowedStatuses.some((status) => !['ACTIVE', 'CLOSED'].includes(status))) {
+        throw Errors.InvalidRequest('Source tenancy allowedStatuses must be a non-empty ACTIVE/CLOSED list');
+      }
+    }
   }
 
   // 1. serialization point for this Tenant's credit account
+  // Tenant.estateId/houseId are current location pointers and may have moved
+  // after a historical Tenancy closed. Lock the Tenant identity by client;
+  // all financial reads/writes below remain scoped to the supplied historical
+  // { clientId, estateId, tenantId } account and cannot cross estates.
   const lock = await Tenant.findOneAndUpdate(
-    { _id: tenantId, clientId, estateId },
+    { _id: tenantId, clientId },
     { $inc: { creditRev: 1 } },
     { session, new: true }
   );
-  if (!lock) throw Errors.Conflict('Tenant not found in Client/Estate scope');
+  if (!lock) throw Errors.Conflict('Tenant not found in Client scope');
   const creditRev = lock.creditRev;
 
   // 2. lock Tenancies in sorted order, then read obligations
   const { tenancies, charges } = await listObligations({ clientId, estateId, tenantId }, { session });
   for (const t of tenancies) {
-    const r = await Tenancy.updateOne({ _id: t._id, clientId, estateId, tenantId }, { $inc: { ledgerRev: 1 } }, { session });
+    const r = await Tenancy.updateOne(
+      { _id: t._id, clientId, estateId, tenantId },
+      { $inc: { ledgerRev: 1 } },
+      { session }
+    );
     if (r.matchedCount !== 1) throw Errors.Conflict('Tenancy left scope');
   }
+
+  // Optional provider-source attribution fence. This is deliberately checked
+  // AFTER the shared Tenant.creditRev and sorted Tenancy.ledgerRev locks, so
+  // Bank/M-PESA cannot invert the allocator's established lock order.
+  if (sourceTenancyCheck) {
+    const {
+      tenancyId,
+      houseId,
+      transactionAt,
+      allowedStatuses = ['ACTIVE', 'CLOSED'],
+    } = sourceTenancyCheck;
+    const eventMs = new Date(transactionAt).getTime();
+    const source = await Tenancy.findOne({
+      _id: tenancyId,
+      clientId,
+      estateId,
+      tenantId,
+      status: { $in: allowedStatuses },
+    }).session(session).lean();
+    const startMs = source ? new Date(source.startAt).getTime() : NaN;
+    const endMs = source?.endAt == null ? null : new Date(source.endAt).getTime();
+    if (!source || !sameId(source.houseId, houseId)
+      || !Number.isFinite(eventMs) || !Number.isFinite(startMs)
+      || eventMs < startMs
+      || (endMs != null && (!Number.isFinite(endMs) || eventMs >= endMs))) {
+      const error = Errors.Conflict('Receipt transaction timestamp or source Tenancy status changed before settlement');
+      error.code = 'SOURCE_TENANCY_REQUIRES_REVIEW';
+      throw error;
+    }
+  }
+
   const byId = new Map(tenancies.map((t) => [idStr(t._id), t]));
   const tenancyStartMs = new Map(tenancies.map((t) => [idStr(t._id), t.startAt]));
   const creditBefore = await creditBalanceCents({ clientId, estateId, tenantId }, { session });
@@ -185,6 +257,7 @@ export async function settleTenantAccount({
 
       const isMpesaReceipt = origin === 'MPESA';
       const isManualReceipt = origin === 'MANUAL';
+      const isBankReceipt = origin === 'BANK';
 
       const [payment] = await Payment.create([{
         clientId,
@@ -195,6 +268,7 @@ export async function settleTenantAccount({
         tenancyId: tenancy._id,
         origin,
         mpesaReceiptId: isMpesaReceipt ? receipt.transactionId : null,
+        ...(isBankReceipt ? { bankTransactionId: receipt.bankTransactionId } : {}),
         manualReceiptId: (isManualReceipt || origin === 'CREDIT') && manualReceiptId ? manualReceiptId : null,
         creditApplicationKey: origin === 'CREDIT' ? key : null,
         tenderMethod: isManualReceipt ? (receipt.tenderMethod || null) : (isMpesaReceipt ? 'MPESA' : null),
@@ -205,7 +279,9 @@ export async function settleTenantAccount({
         paymentDate: when,
         // MANUAL children must NOT carry the external paymentReference — it lives on ManualReceipt.
         // Putting the same reference on multiple children collides with uniq_client_manual_payment_reference.
-        paymentReference: isMpesaReceipt ? (receipt.receiptNumber || null) : null,
+        paymentReference: isMpesaReceipt
+          ? (receipt.receiptNumber || null)
+          : (isBankReceipt ? (receipt.paymentReference || null) : null),
         period: tSlices[0].charge.period,
         status: 'CONFIRMED',
         allocatedCents: 0,
@@ -221,7 +297,7 @@ export async function settleTenantAccount({
         referenceId: payment._id,
         description: origin === 'CREDIT'
           ? 'Tenant credit applied'
-          : (origin === 'MANUAL' ? 'Manual receipt payment' : 'MPESA receipt payment'),
+          : (origin === 'MANUAL' ? 'Manual receipt payment' : (origin === 'BANK' ? 'Bank receipt payment' : 'MPESA receipt payment')),
         period: tSlices[0].charge.period,
       }, { session });
 
@@ -252,6 +328,7 @@ export async function settleTenantAccount({
             movementType: CREDIT_MOVEMENT_TYPE.CREDIT_APPLIED,
             amountCents: -s.amountCents,
             mpesaTransactionId: source === 'MPESA' && receipt ? receipt.transactionId : null,
+            bankTransactionId: source === 'BANK' && receipt ? receipt.bankTransactionId : null,
             manualReceiptId: manualReceiptId || null,
             paymentId: payment._id, tenancyId: tenancy._id, rentChargeId: s.charge._id,
             idempotencyKey: `${key}:${idStr(s.charge._id)}`,
@@ -270,15 +347,19 @@ export async function settleTenantAccount({
   const creditKeyBase = receipt
     ? (source === 'MANUAL'
       ? `manual:${receipt.identityKey}`
-      : `receipt:${idStr(receipt.transactionId)}`)
+      : (source === 'BANK'
+        ? `bank:${idStr(receipt.bankTransactionId)}`
+        : `receipt:${idStr(receipt.transactionId)}`))
     : `auto:${creditRev}`;
   created.creditPayments = await post({ slices: plan.creditSlices, origin: 'CREDIT', keyBase: creditKeyBase });
 
   if (receipt) {
-    const receiptOrigin = source === 'MANUAL' ? 'MANUAL' : 'MPESA';
+    const receiptOrigin = source;
     const receiptKeyBase = source === 'MANUAL'
       ? `manual:${receipt.identityKey}`
-      : `receipt:${idStr(receipt.transactionId)}`;
+      : (source === 'BANK'
+        ? `bank:${idStr(receipt.bankTransactionId)}`
+        : `receipt:${idStr(receipt.transactionId)}`);
 
     // Only create child Payments for actual allocation slices.
     // Full surplus: no Payment marker (preserves M-PESA behaviour; MANUAL uses ManualReceipt).
@@ -291,14 +372,17 @@ export async function settleTenantAccount({
     if (plan.newCreditCents > 0) {
       const surplusKey = source === 'MANUAL'
         ? `manual:${receipt.identityKey}:surplus`
-        : `receipt:${idStr(receipt.transactionId)}:surplus`;
+        : (source === 'BANK'
+          ? `bank:${idStr(receipt.bankTransactionId)}:surplus`
+          : `receipt:${idStr(receipt.transactionId)}:surplus`);
       const [mv] = await TenantCreditMovement.create([{
         clientId, estateId, tenantId,
         movementType: CREDIT_MOVEMENT_TYPE.RECEIPT_SURPLUS,
         amountCents: plan.newCreditCents,
         mpesaTransactionId: source === 'MPESA' ? receipt.transactionId : null,
+        bankTransactionId: source === 'BANK' ? receipt.bankTransactionId : null,
         manualReceiptId: manualReceiptId || null,
-        paymentId: created.receiptPayments[0]?._id || null,
+        paymentId: source === 'BANK' ? null : (created.receiptPayments[0]?._id || null),
         idempotencyKey: surplusKey,
         creditRevAtWrite: creditRev,
         description: 'verified receipt surplus carried forward',
@@ -322,6 +406,7 @@ export async function settleTenantAccount({
   return {
     plan: {
       creditAppliedCents: plan.creditAppliedCents,
+      creditRemainingCents: plan.creditRemainingCents,
       receiptAppliedCents: plan.receiptAppliedCents,
       newCreditCents: plan.newCreditCents,
     },

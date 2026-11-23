@@ -1,6 +1,9 @@
 // Explicit index fixture for G3 integration tests.
 // This is intentionally limited to a validated disposable test database.
 import { BankTransaction } from '../../src/models/BankTransaction.js';
+import { ManualReceipt } from '../../src/models/ManualReceipt.js';
+import { MpesaTransaction } from '../../src/models/MpesaTransaction.js';
+import { TenantCreditMovement, CREDIT_MOVEMENT_INDEXES } from '../../src/models/TenantCreditMovement.js';
 import { DepositMovement } from '../../src/models/DepositMovement.js';
 import { Subscription } from '../../src/models/Subscription.js';
 import { inspectDepositMovementIndex } from '../../src/utils/depositMovementIndexReadiness.js';
@@ -15,6 +18,8 @@ import { _setFinancialIndexesReadyForTests } from '../../src/utils/ensureIndexes
 import { inspectRentChargeIndexes, _setBillingIndexReportForTests } from '../../src/utils/billingIndexReadiness.js';
 import { inspectHouseTypeIndexes } from '../../src/utils/houseTypeIndexReadiness.js';
 import { inspectManualPaymentReferenceIndex } from '../../src/utils/manualPaymentIndexReadiness.js';
+import { inspectMpesaIndexes } from '../../src/utils/mpesaIndexReadiness.js';
+import { inspectPaymentReceiptReadModelIndexes } from '../../src/utils/paymentReceiptReadModelIndexReadiness.js';
 
 let preparedConnectionId = null;
 
@@ -75,18 +80,62 @@ export async function prepareG3TestIndexes() {
     ),
   ]);
 
-  const [billing, houseTypes, manualPayments, depositMovementIndex] = await Promise.all([
+  // autoIndex:false models and read-model gates are prepared explicitly here,
+  // only for the already validated disposable replica-set database.
+  await Promise.all([
+    TenantCreditMovement.collection.createIndex(
+      CREDIT_MOVEMENT_INDEXES.IDEMPOTENCY.key,
+      { name: CREDIT_MOVEMENT_INDEXES.IDEMPOTENCY.name, unique: true }
+    ),
+    ManualReceipt.collection.createIndex(
+      { clientId: 1, estateId: 1, paymentDate: -1 },
+      { name: 'clientId_1_estateId_1_paymentDate_-1' }
+    ),
+    MpesaTransaction.collection.createIndex(
+      { verificationState: 1, transactionAt: -1 },
+      { name: 'idx_mpesa_txn_verification' }
+    ),
+    MpesaTransaction.collection.createIndex(
+      { clientId: 1, transactionAt: -1 },
+      { name: 'idx_mpesa_txn_client_time' }
+    ),
+    MpesaTransaction.collection.createIndex(
+      { attributedClientId: 1, attributedEstateId: 1, postingState: 1, transactionAt: -1 },
+      { name: 'idx_mpesa_attributed_posted_receipts' }
+    ),
+    TenantCreditMovement.collection.createIndex(
+      { clientId: 1, estateId: 1, tenantId: 1, createdAt: 1 },
+      { name: 'clientId_1_estateId_1_tenantId_1_createdAt_1' }
+    ),
+    TenantCreditMovement.collection.createIndex(
+      { mpesaTransactionId: 1 },
+      { name: 'idx_tenant_credit_mpesa_receipt', partialFilterExpression: { mpesaTransactionId: { $type: 'objectId' } } }
+    ),
+    TenantCreditMovement.collection.createIndex(
+      { manualReceiptId: 1 },
+      { name: 'idx_tenant_credit_manual_receipt', partialFilterExpression: { manualReceiptId: { $type: 'objectId' } } }
+    ),
+    TenantCreditMovement.collection.createIndex(
+      { bankTransactionId: 1 },
+      { name: 'idx_tenant_credit_bank_receipt', partialFilterExpression: { bankTransactionId: { $type: 'objectId' } } }
+    ),
+  ]);
+
+  const [billing, houseTypes, manualPayments, depositMovementIndex, receiptReadModelIndexes, mpesaIndexes] = await Promise.all([
     inspectRentChargeIndexes(),
     inspectHouseTypeIndexes(),
     inspectManualPaymentReferenceIndex(),
     inspectDepositMovementIndex(),
+    inspectPaymentReceiptReadModelIndexes(),
+    inspectMpesaIndexes(),
   ]);
-  if (!billing.aligned || !houseTypes.aligned || !manualPayments.aligned || !depositMovementIndex.aligned) {
-    throw new Error(`G3 test indexes failed live readiness checks: ${JSON.stringify({ billing, houseTypes, manualPayments, depositMovementIndex })}`);
+  if (!billing.aligned || !houseTypes.aligned || !manualPayments.aligned || !depositMovementIndex.aligned
+    || !receiptReadModelIndexes.aligned || mpesaIndexes?.gates?.canonicalQueryIndexes !== true) {
+    throw new Error(`G3 test indexes failed live readiness checks: ${JSON.stringify({ billing, houseTypes, manualPayments, depositMovementIndex, receiptReadModelIndexes, mpesaIndexes })}`);
   }
 
   _setBillingIndexReportForTests(billing);
   _setFinancialIndexesReadyForTests(true);
   preparedConnectionId = connection.id;
-  return { billing, houseTypes, manualPayments, depositMovementIndex, connectionId: preparedConnectionId };
+  return { billing, houseTypes, manualPayments, depositMovementIndex, receiptReadModelIndexes, mpesaIndexes, connectionId: preparedConnectionId };
 }

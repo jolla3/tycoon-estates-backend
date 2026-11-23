@@ -18,13 +18,48 @@ import { ledgerService } from './ledger.service.js';
 import { tenancyService } from './tenancy.service.js';
 import { smsService } from './sms.service.js';
 import { mpesaSubmissionLinkService } from './mpesa/mpesaSubmissionLink.service.js';
-import { aggregateRentCharges } from '../utils/smsBilling.js';
+import { resolveRegistrationBillingPlan } from './rent.service.js';
 import { logger } from '../config/logger.js';
 import { money } from '../utils/money.js';
 import { generateBearerToken } from '../utils/g5Token.js';
 import mongoose from 'mongoose';
 import { supportsMongoTransactions } from '../config/database.js';
 
+/**
+ * Informational House billing-plan text for registration SMS.
+ * Never claims Paid, Outstanding, invoice, or that RentCharges exist.
+ */
+function formatRegistrationPlanText(snapshot, currency = 'KES') {
+  const { outcome, source, lines } = snapshot;
+  if (outcome === 'UNCONFIGURED') {
+    return 'This house has no configured billing plan.';
+  }
+  if (outcome === 'LEGACY_UNCLASSIFIED') {
+    return 'The billing plan for this house cannot currently be determined.';
+  }
+  if (outcome === 'NO_EFFECTIVE_HOUSE_TYPE_VERSION') {
+    return 'No applicable HouseType billing plan is currently effective for this house.';
+  }
+  if (outcome === 'HOUSE_CONFIG_NO_EFFECTIVE_ROWS') {
+    return 'No effective house billing configuration lines apply at registration.';
+  }
+  if (outcome === 'HOUSE_CONFIG_FUTURE_ONLY') {
+    return 'House billing configuration exists only for a future effective date; none applies at registration.';
+  }
+  if (outcome === 'VALID_EMPTY_HOUSE_TYPE_PLAN') {
+    return 'The effective HouseType plan has no billing lines configured.';
+  }
+  if (!lines?.length) {
+    return 'No applicable billing plan lines are available for this house at registration.';
+  }
+
+  const lineParts = lines.map((line) => {
+    const amount = money.format(line.amountCents, currency);
+    const due = line.dueDay != null ? ` (due day ${line.dueDay})` : '';
+    return `${line.description || line.chargeType} ${amount}${due}`;
+  });
+  return `Configured plan (${source}): ${lineParts.join('; ')}.`;
+}
 
 /**
  * Four distinct concepts (never interchangeable):
@@ -96,8 +131,6 @@ async function buildAccount(clientId, tenant, charges, tenancyIds) {
       newCreditCents: 0,
     });
   }
-  // M-PESA surplus is money received that carries no allocation Payment; manual surplus is
-  // already inside its ManualReceipt, so only movements without a manualReceiptId count.
   const mpesaSurplus = movements.filter(
     (m) => m.movementType === 'RECEIPT_SURPLUS' && !m.manualReceiptId
   );
@@ -143,11 +176,13 @@ export const tenantService = {
     const registrationLinkId = new mongoose.Types.ObjectId();
     const registrationMessageId = new mongoose.Types.ObjectId();
     const registrationToken = generateBearerToken();
+    // Capture once before the retryable transaction; reuse on callback retries.
+    // Do not substitute moveInDate.
+    const registrationAt = new Date();
     const session = await mongoose.startSession();
     try {
       let tenant;
       await session.withTransaction(async () => {
-        // House/Estate ownership is checked inside the same transaction as occupancy.
         const house = await House.findOne({ _id: data.houseId, clientId }).session(session);
         if (!house || house.isActive === false) throw Errors.HouseNotFound();
         const estate = await Estate.findOne({ _id: house.estateId, clientId }).session(session).lean();
@@ -162,30 +197,18 @@ export const tenantService = {
           tenantId: tenant._id, startAt: data.moveInDate || new Date(), actorUserId,
         }, { session });
 
-        // Registration statements are informational snapshots only. Never generate
-        // financial charges here or alter the G3 billing/partial-period policy.
-        const period = dateUtil.currentPeriod();
-        const currentCharges = await RentCharge.find({
-          clientId, estateId: house.estateId, tenancyId: tenancy._id, period,
-        }).session(session).lean();
-        let billText = 'Current billing details are not available yet.';
-        if (currentCharges.length) {
-          try {
-            const totals = aggregateRentCharges(currentCharges);
-            billText = [
-              `Current bill ${period}:`,
-              `Rent ${money.format(totals.rentCents, estate.currency || 'KES')}`,
-              `Water ${money.format(totals.waterCents, estate.currency || 'KES')}`,
-              `Electricity ${money.format(totals.electricityCents, estate.currency || 'KES')}`,
-              `Other ${money.format(totals.otherCents, estate.currency || 'KES')}`,
-              `Paid ${money.format(totals.paidCents, estate.currency || 'KES')}`,
-              `Outstanding ${money.format(totals.totalOutstandingCents, estate.currency || 'KES')}`,
-              totals.dueDates.length ? `Due ${totals.dueDates.map((d) => dateUtil.format(d, 'DD MMM YYYY')).join(', ')}` : null,
-            ].filter(Boolean).join('. ') + '.';
-          } catch (err) {
-            logger.warn({ tenantId: String(tenant._id), estateId: String(house.estateId), code: err.code || 'BILLING_SNAPSHOT_INVALID' }, 'Registration billing snapshot omitted because source data was invalid');
-            billText = 'Current billing details are temporarily unavailable.';
-          }
+        // Registration SMS describes the House configured billing plan at registrationAt.
+        // Never generate RentCharges or claim Paid/Outstanding/invoice status.
+        let billText;
+        try {
+          const snapshot = await resolveRegistrationBillingPlan(house, registrationAt, { session });
+          billText = formatRegistrationPlanText(snapshot, estate.currency || 'KES');
+        } catch (err) {
+          logger.warn(
+            { tenantId: String(tenant._id), estateId: String(house.estateId), code: err.code || 'BILLING_SNAPSHOT_INVALID' },
+            'Registration billing snapshot omitted because plan resolution failed'
+          );
+          billText = 'The configured billing plan could not be verified at registration.';
         }
         const registrationText = `Registration confirmed for ${tenant.name}, House ${house.houseNumber}. ${billText}`;
         const provision = await mpesaSubmissionLinkService.provisionForRegistration({
@@ -194,17 +217,13 @@ export const tenantService = {
           messageId: registrationMessageId, token: registrationToken, actorUserId,
         });
 
-        // Exactly one welcome path: protected M-PESA onboarding OR ordinary SMS.
-        // No phone means no outbox row, but a valid tenant/tenancy still commits.
         if (!provision.eligible) {
           if (tenant.phone) {
-            // BankAccount is a statement-ingestion connection, not an authoritative
-            // rent-receiving destination. Do not expose it as payment instructions.
             const ordinaryRegistrationText = registrationText + ' For verified bank payment instructions, contact the estate office.';
             await smsService.queueSms({
               clientId, estateId: house.estateId, tenantId: tenant._id, houseId: house._id,
               to: tenant.phone, message: ordinaryRegistrationText,
-              type: 'tenant_registration', priority: 8, period,
+              type: 'tenant_registration', priority: 8, period: dateUtil.periodOf(registrationAt),
               notificationVersion: 'tenant_registration:v1',
               idempotencyKey: `registration:${String(tenant._id)}:v1`,
               session,
@@ -274,7 +293,6 @@ export const tenantService = {
         .lean(),
     ]);
 
-    // Billing metrics from RentCharge; account balance from Ledger (source of truth)
     let billedCents = 0;
     let paidFromChargesCents = 0;
     const byPeriod = new Map();

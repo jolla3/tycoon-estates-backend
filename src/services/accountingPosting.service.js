@@ -102,12 +102,6 @@ async function inspectExistingPayment(payment, expected, { session }) {
   if (!expected.origin || payment.origin !== expected.origin) {
     throw Errors.Conflict('Existing Payment origin mismatch or missing');
   }
-  if (expected.origin === 'BANK') {
-    if (!expected.bankTransactionId || !payment.bankTransactionId
-      || !sameId(payment.bankTransactionId, expected.bankTransactionId)) {
-      throw Errors.Conflict('Existing BANK Payment linkage mismatch');
-    }
-  }
   if (payment.amountCents !== expected.amountCents) {
     throw Errors.Conflict('Existing Payment amountCents mismatch');
   }
@@ -229,6 +223,9 @@ async function inspectExistingPayment(payment, expected, { session }) {
  * Post a confirmed payment with allocations and PAYMENT ledger in one transaction.
  */
 async function postConfirmedPayment(input, { session: outerSession } = {}) {
+  if (input?.origin === 'BANK') {
+    throw Errors.InvalidRequest('BANK receipts must use settleTenantAccount; the legacy per-Tenancy allocator is disabled');
+  }
   requireTxSupport();
   await requireIndexes(input?.origin);
 
@@ -244,7 +241,6 @@ async function postConfirmedPayment(input, { session: outerSession } = {}) {
     paymentReference = null,
     period = null,
     origin,
-    bankTransactionId = null,
     tenderMethod = null,
     recordedByUserId = null,
     evidenceReference = null,
@@ -260,15 +256,12 @@ async function postConfirmedPayment(input, { session: outerSession } = {}) {
     // Canonical idempotency lookup for both origins. MANUAL references are
     // protected by the explicit partial unique index installed by G3.3 migration.
     let existing = null;
-    if (origin === 'BANK' && bankTransactionId) {
-      existing = await Payment.findOne({ clientId, origin: 'BANK', bankTransactionId }).session(session);
-    } else if (origin === 'MANUAL' && paymentReference) {
+    if (origin === 'MANUAL' && paymentReference) {
       existing = await Payment.findOne({ clientId, origin: 'MANUAL', paymentReference }).session(session);
     }
     if (existing) {
       return inspectExistingPayment(existing, {
         origin,
-        bankTransactionId,
         paymentReference,
         amountCents: amount,
         paymentDate,
@@ -341,7 +334,6 @@ async function postConfirmedPayment(input, { session: outerSession } = {}) {
       tenantId: tenantId || null,
       tenancyId,
       origin,
-      bankTransactionId: bankTransactionId || undefined,
       tenderMethod: tenderMethod || null,
       recordedByUserId: recordedByUserId || null,
       recordedAt: origin === 'MANUAL' ? new Date() : null,

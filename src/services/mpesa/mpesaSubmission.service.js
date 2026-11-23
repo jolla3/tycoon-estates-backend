@@ -10,7 +10,12 @@ import { MpesaSmsSubmission, SUBMISSION_STATE } from '../../models/MpesaSmsSubmi
 import { MpesaTransaction } from '../../models/MpesaTransaction.js';
 import { parseMpesaSms } from './mpesaSmsParser.js';
 import { resolveOperationalMerchant } from './mpesaSubmissionLink.service.js';
-import { evaluateEvidence, postVerifiedReceipt, postingGate } from './mpesaPosting.service.js';
+import {
+  evaluateEvidence,
+  postVerifiedReceipt,
+  postingGate,
+  resolveTillSourceTenancy,
+} from './mpesaPosting.service.js';
 import { DARAJA_PROVIDER } from './daraja.constants.js';
 import { isWellFormedToken, digestToken } from '../../utils/g5Token.js';
 import { sealEnvelope, envelopeKeyId, evidenceDigest } from '../../utils/g5Envelope.js';
@@ -40,6 +45,18 @@ export async function matchSubmission(submissionId) {
     provider: DARAJA_PROVIDER, businessShortCode: merchant.businessShortCode, receiptNumber: sub.receiptNumber,
   });
   if (!txn) return setState(sub, SUBMISSION_STATE.UNMATCHED, 'RECEIPT_NOT_YET_RECEIVED');
+  const sourceTenancyEvidence = await resolveTillSourceTenancy({
+    clientId: sub.clientId,
+    estateId: sub.estateId,
+    tenantId: sub.tenantId,
+    txn,
+  });
+  if (!sourceTenancyEvidence.ok) {
+    const state = sourceTenancyEvidence.reason === 'COMPETING_CLAIM'
+      ? SUBMISSION_STATE.CONFLICTING
+      : SUBMISSION_STATE.MANUAL_REVIEW;
+    return setState(sub, state, sourceTenancyEvidence.reason, txn._id);
+  }
   const verdict = evaluateEvidence({ submission: sub, link, txn, profile: merchant, mappingActive: true });
   if (!verdict.ok) {
     const s = verdict.reason === 'COMPETING_CLAIM' ? SUBMISSION_STATE.CONFLICTING
@@ -53,6 +70,8 @@ export async function matchSubmission(submissionId) {
       return SUBMISSION_STATE.POSTED;
     } catch (err) {
       logger.warn({ code: err.code, submissionId: String(sub._id) }, 'G5 posting attempt did not complete');
+      const latest = await MpesaSmsSubmission.findById(sub._id).select('state').lean();
+      return latest?.state || SUBMISSION_STATE.MATCHED;
     }
   }
   return SUBMISSION_STATE.MATCHED;
