@@ -387,3 +387,24 @@ No source code, index, migration, provider configuration, key or test environmen
 The owner explicitly authorized a narrow code correction for the already-published G5.3 Daraja adapter. Authorized scope: (1) use the owner-confirmed C2B v2 registration/simulation paths; (2) canonicalize C2B `Buy Goods` to `CustomerBuyGoodsOnline` and keep PayBill outside G5; (3) parse the owner-supplied TransactionPull registration response status, POST query envelope, nested `Response` rows, lower-case fields and timezone-explicit ISO timestamps; (4) pass the queried merchant profile shortcode as context when Pull rows omit it; and (5) add focused fixture/request-contract tests and update the provider evidence record.
 
 This authorization does **not** authorize callback exposure, C2B simulation, Pull registration/query against the live Render/MongoDB environment, migrations, canonical receipt-index activation, merchant operational-state changes, G3 posting, production API requests or any G5 feature-flag changes. Unknown Pull transaction types, shortcode conflicts and ambiguous empty/error responses must remain quarantined or fail closed. Callback security and merchant/product identity remain release gates.
+
+
+## 24. G5.5 C2B-first readiness and activation guardrails (23 November 2026)
+
+- Treat C2B confirmation as the primary collection capability. Pull is optional recovery; never make pullCapability=VERIFIED or Pull registration acceptance a universal prerequisite for a C2B merchant to become ACTIVE.
+- Keep four axes separate: operational state, C2B registration state, callback capability/trust evidence, and Pull registration/capability. Registration acceptance is not capability verification; capability verification is not G3 posting authorization.
+- Profile creation is configuration-only and starts DRAFT. Do not register, activate, or change capabilities on profile creation.
+- No browser or generic profile PATCH may set operationalState, callbackCapability or pullCapability. Add explicit SUPER_ADMIN server-side activation/suspension/resume operations with audit, reason, exact profile/environment/config-version checks and atomic compare-and-set conditions.
+- Activation requires exact merchant identity/ownership, active same-client estate mappings, accepted/reconciled C2B v2 registration for the current callback-config version, controlled callback delivery to the exact endpoint, durable inbox persistence, correct normalization, duplicate/replay/conflict tests and an approved callback trust/abuse-control design.
+- An accepted C2B Register URL response without an observed callback remains callbackCapability=UNKNOWN; it cannot activate the merchant.
+- C2B activation must work with Pull UNKNOWN or NOT_ENABLED. Pull VERIFIED alone must never make the C2B channel operational.
+- Do not enable Pull registration while PULL_REGISTRATION_ELIGIBILITY is false. Capturing a nominated MSISDN is encrypted configuration data only. No real registration request should be sent until merchant-type and environment eligibility, KYC details, request/response, query, actual Buy Goods fixture and pagination contract are verified.
+- Do not expose C2B validation or treat it as implemented: current handleC2bValidation() accepts every request, while Safaricom enablement and safe validation behaviour are unproven. External validation is optional, separate from confirmation ingress, and must fail closed until approved.
+- Keep callback exposure, receipt ingestion, merchant activation and G3 posting as separate release controls. Never turn on production flags to make a status widget green.
+- Never let sandbox/simulator receipts reach production or a real Tenant account. Use a disposable replica-set database, test-only client/estate/Tenant fixtures and provider HTTP fakes or the isolated Daraja sandbox endpoint.
+- Canonical receipt identity remains blocked until provider identity scope/convergence evidence and migration duplicate preflight are complete. Do not choose a unique key by intuition.
+- Tests must prove: C2B-only activation; Pull absence not blocking; Pull-only proof not activating C2B; stale config version rejection; activation/suspension audit; callback replay idempotency; ambiguous shortcode quarantine; callback trust failure blocking posting; no G3 financial effect while identity gate is false.
+
+Owner-visible profile evidence on 22 November 2026: mamba Till 8965322 and Safaricom Sandbox Till 600995 report C2B registration accepted under daraja-sandbox configuration d3c06c1df7e7, but both still have callback/Pull capability UNKNOWN and Pull not registered. This is not callback delivery or operational proof. The earlier 600987/174379 evidence is a separate historical observation; do not equate the shortcodes.
+
+This is a documentation guardrail only. It does not authorize profile activation, provider calls, callback exposure, Pull registration, migrations, feature-flag changes or G3 posting.

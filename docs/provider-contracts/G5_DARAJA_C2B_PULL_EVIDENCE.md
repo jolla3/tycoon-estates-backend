@@ -133,3 +133,41 @@ The shared-shortcode redesign makes `{provider, businessShortCode, receiptNumber
 | E5 | A migration-controlled unique index, its dry-run duplicate inventory on real data, and readiness verified on a replica set | Database constraint is the final authority |
 
 When E1–E5 exist: implement the migration (duplicate preflight blocking `--execute`), add the exact spec to `mpesaIndexReadiness.js`, derive the gate from it, and add conflict handling for duplicate-key on first insert. Do not remove the hard-coded blocker before then. PayBill allocation (reference routing) and Till evidence checks are implemented and tested, but they route/verify payments; they do not settle them while this gate is closed.
+
+
+## 8. Owner-reported merchant profile status — 22 November 2026
+
+**Evidence class:** OWNER-REPORTED screenshot/state supplied by the owner. These observations are not independently fetched from the authenticated Safaricom portal and do not constitute callback-delivery or payment-processing proof.
+
+Both profiles are displayed as Buy Goods Till profiles and show the shared platform callback configuration:
+- environment/config ID: daraja-sandbox
+- configuration version: d3c06c1df7e7
+- platform-hosted callback URLs are shared across merchants; clients do not host callback endpoints.
+
+| Profile display name | Merchant type | Shortcode | C2B URL registration | Attempt shown | Success shown | Callback capability | Pull capability | Pull registration | Nominated number |
+|---|---|---:|---|---|---|---|---|---|---|
+| mamba | Buy Goods Till | 8965322 | Registered (confirmed by provider) | 22 Nov 2026, 14:21:22 | 22 Nov 2026, 14:21:24 | UNKNOWN | UNKNOWN | Not registered | Masked value captured; never reproduce plaintext |
+| Safaricom Sandbox Till | Buy Goods Till | 600995 | Registered (confirmed by provider) | 22 Nov 2026, 14:55:21 | 22 Nov 2026, 14:55:23 | UNKNOWN | UNKNOWN | Not registered | Not captured |
+
+Interpretation:
+- Provider acceptance confirms that the C2B URL-registration request was accepted for the displayed shortcode/configuration. It does **not** prove a C2B confirmation was delivered to the endpoint, persisted, normalized, authenticated, reconciled or posted.
+- The profiles correctly remain DRAFT while C2B callback capability and the callback trust boundary remain unverified.
+- Pull is not registered for either profile. The Mamba nominated number being stored does not establish merchant eligibility, provider acceptance or Pull capability. A saved number is not a registration request.
+- Both profiles are currently shown against daraja-sandbox; do not describe either as production-ready or infer a production shortcode mapping.
+- These shortcodes are distinct from historical sandbox evidence for 600987 and the separately displayed app-card shortcode 174379. Their relationship is not established. Do not merge records, reuse evidence, or infer a shared merchant identity from similar labels.
+
+### 8.1 Evidence required next
+
+For each exact shortcode, use the matching sandbox merchant and app configuration to execute a controlled C2B simulation against an isolated callback deployment. Preserve sanitized request/response, callback receipt time, durable inbox event ID/state, normalized canonical transaction, duplicate replay result and the callback-config version. Verify the merchant type and transaction type match. No simulated receipt may be posted to a real tenant ledger.
+
+Separately obtain authoritative provider evidence for callback authentication/abuse controls, acknowledgement/retry semantics, and Pull eligibility. These are distinct evidence questions. Keep C2B confirmation work moving without waiting for optional Pull evidence.
+
+### 8.2 Correction to older readiness wording
+
+The older sections describe unresolved callback and Pull items as release gates. Interpret those gates by capability:
+- Callback trust/delivery and C2B receipt identity are gates for safely operating C2B and for any automated posting.
+- Pull eligibility, nominated KYC number, Pull registration, query/pagination and C2B/Pull convergence are gates only for enabling Pull recovery.
+- Pull not being enabled must not block an otherwise verified C2B-only merchant.
+- Canonical receipt identity and G3 posting safeguards remain separate financial gates even after C2B collection capability is verified.
+
+No callback simulation, Pull request, provider production call, profile activation, migration or G3 posting is evidenced by this owner-provided screen.
