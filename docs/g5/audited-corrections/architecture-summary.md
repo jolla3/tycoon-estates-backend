@@ -14,6 +14,7 @@
 ## Locked decisions
 
 - Registration SMS is an informational snapshot of the exact House billing source. Never generate RentCharges for messaging and never infer invoice/Paid/Outstanding values.
+- Registration copy uses readable labels, one configured billing line per line, and no internal source enum or due-day display; normal due-day calculation for generated charges is unchanged.
 - Capture one registrationAt instant before the retryable transaction; do not substitute moveInDate.
 - HOUSE_CONFIG is timestamp-effective at registrationAt (inclusive start, exclusive end). Monthly RentCharge generation keeps period-start evaluation.
 - HOUSE_TYPE version history remains period-effective. Registration uses the latest version effective for the registration YYYY-MM when history exists. For legacy HouseTypes with no version-history records, registration uses canonical `defaultBilling`; a future-only history is not bypassed. This does not invent effective dates or change charge generation.

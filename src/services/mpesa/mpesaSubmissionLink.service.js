@@ -21,6 +21,7 @@ import { generateBearerToken, digestToken, digestsEqual, isWellFormedToken } fro
 import { Errors } from '../../utils/errors.js';
 import { env } from '../../config/environment.js';
 import { logger } from '../../config/logger.js';
+import { formatSmsDisplayLabel } from '../smsTemplates.js';
 
 export async function resolveOperationalMerchant(clientId, estateId, { merchantProfileId = null, session = null } = {}) {
   const { merchant } = await resolveTillMerchant(clientId, estateId, { merchantProfileId, session });
@@ -68,7 +69,8 @@ function buildOnboardingBody({ estateName, tillCode, token, registrationText = n
   if (!estateName) throw Errors.Conflict('Estate identity is unavailable; onboarding SMS was not queued');
   const url = `${env.G5_PUBLIC_PAYMENT_URL}/pay#t=${token}`;
   const details = registrationText || 'Your M-PESA payment submission link is ready.';
-  return `${estateName}: ${details} M-PESA Buy Goods Till ${tillCode}. Submit your M-PESA confirmation here: ${url}`;
+  const displayEstateName = formatSmsDisplayLabel(estateName);
+  return `${displayEstateName}: ${details} M-PESA Buy Goods Till ${tillCode}. Submit your M-PESA confirmation here: ${url}`;
 }
 
 async function queueOnboarding({ clientId, estateId, tenant, link, token, merchant, estateName, registrationText = null, session = null, messageId = null, attempt = 'delivery' }) {
