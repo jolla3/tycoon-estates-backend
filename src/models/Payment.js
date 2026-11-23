@@ -51,6 +51,10 @@ PaymentSchema.path('amountCents').validate(
 // reference belongs on ManualReceipt only.
 PaymentSchema.index({ estateId: 1, houseId: 1, period: 1 });
 PaymentSchema.index({ clientId: 1, paymentDate: -1 });
+PaymentSchema.index(
+  { clientId: 1, estateId: 1, origin: 1, paymentDate: -1 },
+  { name: 'idx_payment_legacy_manual_list' }
+);
 PaymentSchema.index({ tenancyId: 1, paymentDate: -1 });
 PaymentSchema.index({ mpesaReceiptId: 1 }, { sparse: true, name: 'idx_payment_mpesa_receipt' });
 PaymentSchema.index({ manualReceiptId: 1 }, { sparse: true, name: 'idx_payment_manual_receipt' });

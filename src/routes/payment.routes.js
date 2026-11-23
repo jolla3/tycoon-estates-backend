@@ -9,9 +9,25 @@ import { validate } from '../middlewares/validate.js';
 const router = Router();
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid id');
-const periodString = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
-
 const tenderMethods = z.enum(['CASH', 'MPESA', 'BANK_TRANSFER', 'CHEQUE', 'OTHER']);
+const periodString = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
+const positiveIntegerQuery = z.string().regex(/^[1-9]\d*$/).transform(Number);
+const dateOnly = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
+
+export const paymentListQuerySchema = z.object({
+  clientId: objectId.optional(),
+  page: positiveIntegerQuery.refine((value) => value <= 10000).optional(),
+  limit: positiveIntegerQuery.refine((value) => value <= 100).optional(),
+  estateId: objectId.optional(),
+  houseId: objectId.optional(),
+  tenantId: objectId.optional(),
+  startDate: dateOnly.optional(),
+  endDate: dateOnly.optional(),
+  origin: z.enum(['MANUAL', 'MPESA', 'BANK']).optional(),
+  tenderMethod: tenderMethods.optional(),
+  status: z.enum(['CONFIRMED']).optional(),
+}).strict();
+
 
 /** Ordinary manual payment: house + receipt. Ownership is resolved server-side. */
 export const manualPaymentSchema = z.object({
@@ -49,7 +65,7 @@ export const tenantContextQuerySchema = z.object({
   paymentDate: z.string().optional(),
 }).strict();
 
-router.get('/', authenticate, clientContext, paymentController.list);
+router.get('/', authenticate, clientContext, validate(paymentListQuerySchema, 'query'), paymentController.list);
 router.get(
   '/tenant-context',
   authenticate,

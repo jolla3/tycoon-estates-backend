@@ -79,6 +79,16 @@ const MpesaTransactionSchema = new Schema(
     postingFailureCode: { type: String, default: null },
     postedAt: { type: Date, default: null },
     creditEarnedCents: { type: Number, default: 0 },
+    // G5 canonical settlement snapshot. Null preserves historical rows whose values were never stored.
+    creditPaymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
+    creditMovementIds: { type: [{ type: Schema.Types.ObjectId, ref: 'TenantCreditMovement' }], default: [] },
+    receiptAppliedCents: { type: Number, default: null },
+    creditAppliedCents: { type: Number, default: null },
+    newCreditCents: { type: Number, default: null },
+    creditBeforeCents: { type: Number, default: null },
+    creditRemainingCents: { type: Number, default: null },
+    creditAfterCents: { type: Number, default: null },
+    settlementVersion: { type: Number, default: null },
     /** Receipt-origin Payment children created by the G3 shared Tenant-account allocator. */
     paymentIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Payment' }], default: [] },
   },

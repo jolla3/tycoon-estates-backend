@@ -65,8 +65,14 @@ TenantCreditMovementSchema.index(
   { unique: true, name: CREDIT_MOVEMENT_INDEXES.IDEMPOTENCY.name }
 );
 TenantCreditMovementSchema.index({ clientId: 1, estateId: 1, tenantId: 1, createdAt: 1 });
-TenantCreditMovementSchema.index({ mpesaTransactionId: 1 });
-TenantCreditMovementSchema.index({ manualReceiptId: 1 }, { sparse: true });
+TenantCreditMovementSchema.index(
+  { mpesaTransactionId: 1 },
+  { name: 'idx_tenant_credit_mpesa_receipt', partialFilterExpression: { mpesaTransactionId: { $type: 'objectId' } } }
+);
+TenantCreditMovementSchema.index(
+  { manualReceiptId: 1 },
+  { name: 'idx_tenant_credit_manual_receipt', partialFilterExpression: { manualReceiptId: { $type: 'objectId' } } }
+);
 TenantCreditMovementSchema.index(
   { bankTransactionId: 1 },
   {

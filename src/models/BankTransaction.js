@@ -88,6 +88,10 @@ BankTransactionSchema.index({ provider: 1, providerTransactionId: 1 }, { unique:
 BankTransactionSchema.index({ estateId: 1, paymentReference: 1 });
 BankTransactionSchema.index({ estateId: 1, matchStatus: 1 });
 BankTransactionSchema.index({ clientId: 1, transactionDate: -1 });
+BankTransactionSchema.index(
+  { clientId: 1, estateId: 1, processingState: 1, eventType: 1, matchStatus: 1, transactionDate: -1 },
+  { name: 'idx_bank_posted_receipts' }
+);
 BankTransactionSchema.index({ clientId: 1, matchStatus: 1 });
 BankTransactionSchema.index({ processingState: 1, updatedAt: 1 });
 BankTransactionSchema.index({ processingState: 1, processingClaimExpiresAt: 1 });

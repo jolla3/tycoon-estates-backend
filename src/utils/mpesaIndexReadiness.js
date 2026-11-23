@@ -60,6 +60,13 @@ export const REQUIRED_OPERATIONAL_INDEXES = [
     key: { clientId: 1, transactionAt: -1 },
     unique: false,
   },
+  {
+    collection: MPESA_COLLECTIONS.transactions,
+    gate: 'canonicalQueryIndexes',
+    name: 'idx_mpesa_attributed_posted_receipts',
+    key: { attributedClientId: 1, attributedEstateId: 1, postingState: 1, transactionAt: -1 },
+    unique: false,
+  },
 ];
 
 /** One owner per provider shortcode (aligned with the callback resolver's lookup scope). */
