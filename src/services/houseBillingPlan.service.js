@@ -41,7 +41,15 @@ async function resolveHouseBillingPlan(house, context, { session } = {}) {
   const estate = await estateQuery.lean();
   if (!estate) throw Errors.Conflict('House Estate ownership could not be verified for billing');
 
-  const source = house.billingSource || 'LEGACY_UNCLASSIFIED';
+  const declaredSource = house.billingSource || 'LEGACY_UNCLASSIFIED';
+  // Registration compatibility: a legacy House with an explicit HouseType FK
+  // has an unambiguous billing-plan source. Keep charge generation's existing
+  // fail-closed treatment of LEGACY_UNCLASSIFIED unchanged.
+  const source = context.kind === 'REGISTRATION'
+    && declaredSource === 'LEGACY_UNCLASSIFIED'
+    && house.houseTypeId
+    ? 'HOUSE_TYPE'
+    : declaredSource;
   const emptyMeta = { planId: null, planVersionId: null, planVersion: null };
   const base = { estate, source, planMeta: emptyMeta };
 
@@ -68,9 +76,6 @@ async function resolveHouseBillingPlan(house, context, { session } = {}) {
     if (session) typeQuery.session(session);
     const type = await typeQuery.lean();
     if (!type) {
-      if (context.kind === 'REGISTRATION') {
-        return { ...base, lines: [], outcome: 'NO_EFFECTIVE_HOUSE_TYPE_VERSION' };
-      }
       throw Errors.Conflict('HouseType does not belong to this House Estate');
     }
 
@@ -101,6 +106,49 @@ async function resolveHouseBillingPlan(house, context, { session } = {}) {
       }).sort({ effectiveFromPeriod: -1, version: -1 });
       if (session) q.session(session);
       version = await q.lean();
+    }
+
+    if (!version && context.kind === 'REGISTRATION') {
+      // Older HouseTypes can predate immutable plan-version history. Their
+      // defaultBilling array is still the canonical configured recurring plan.
+      // Use it only when there are NO history records at all. If history exists
+      // but starts in a future period, do not expose the future plan early.
+      const historyQuery = HouseTypePlanVersion.findOne({
+        clientId: house.clientId, estateId: house.estateId, houseTypeId: type._id,
+      }).select('_id');
+      if (session) historyQuery.session(session);
+      const hasAnyHistory = await historyQuery.lean();
+
+      if (!hasAnyHistory) {
+        if (!Array.isArray(type.defaultBilling)) {
+          throw Errors.Conflict('HouseType default billing is missing');
+        }
+        const lines = type.defaultBilling.map((line) => {
+          if (!['RENT', 'WATER', 'ELECTRICITY', 'OTHER'].includes(line.chargeType)
+            || !Number.isSafeInteger(line.amountCents)
+            || line.amountCents < 0) {
+            throw Errors.Conflict('HouseType default billing contains an invalid line');
+          }
+          return {
+            chargeType: line.chargeType,
+            description: String(line.description || line.chargeType || '').trim(),
+            amountCents: line.amountCents,
+            dueDay: line.dueDay,
+            planLineId: line.lineId || null,
+          };
+        });
+        assertUniquePlanLines(lines);
+        return {
+          ...base,
+          lines,
+          planMeta: {
+            ...emptyMeta,
+            planId: type._id,
+            planVersion: Number.isSafeInteger(type.planVersion) ? type.planVersion : null,
+          },
+          outcome: lines.length === 0 ? 'VALID_EMPTY_HOUSE_TYPE_PLAN' : 'OK',
+        };
+      }
     }
 
     if (!version) {

@@ -8,6 +8,7 @@
 ## Core decisions
 
 - Every automated SMS body is prefixed by the actual `Estate.name` resolved within `{clientId, estateId}`. Do not modify Celcom sender ID.
+- Registration queues one standard or protected welcome SMS using the exact House's configured plan, never generated RentCharge rows. HOUSE_TYPE uses its effective version, or canonical `defaultBilling` only when no plan-version history exists. A linked legacy HouseType remains resolvable; no charge generation is triggered by registration.
 - Bank-only registration queues one standard welcome/billing SMS and never creates an M-PESA link.
 - M-PESA link eligibility requires client MPESA entitlement plus an operational BUY_GOODS_TILL profile with ACTIVE mapping to that tenant's estate. Missing profile does not block bank-only registration.
 - Registration creates Tenant, Tenancy and the appropriate SMS outbox row in the existing caller-owned transaction. No external Celcom call occurs in the transaction.
