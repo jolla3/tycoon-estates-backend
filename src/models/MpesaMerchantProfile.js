@@ -72,6 +72,8 @@ const MpesaMerchantProfileSchema = new Schema(
         environment: { type: String, default: null },
         configId: { type: String, default: null },
         configVersion: { type: String, default: null },
+        shortCode: { type: String, default: null },
+        merchantType: { type: String, default: null },
         confirmationUrl: { type: String, default: null },
         validationUrl: { type: String, default: null },
         responseType: { type: String, default: null },

@@ -19,6 +19,8 @@ import mongoose from 'mongoose';
 import { Client } from '../../models/Client.js';
 import { MpesaMerchantProfile } from '../../models/MpesaMerchantProfile.js';
 import { MpesaMerchantProfileEstate } from '../../models/MpesaMerchantProfileEstate.js';
+import { Estate } from '../../models/Estate.js';
+import { getCallbackConfig } from './darajaCallbackConfig.service.js';
 import { auditRequired } from '../audit.service.js';
 import { safeMerchantProfile } from '../platformIntegrations.service.js';
 import { activationBlockers, resumeBlockers } from './mpesaReadiness.js';
@@ -66,11 +68,17 @@ async function run(op, { clientId, profileId, expectedRevision, reason, actor, r
         const client = await Client.findById(clientId).select('isActive').session(session).lean();
         if (!client || client.isActive !== true) throw Errors.InvalidRequest('The client must be active');
       }
-      const activeEstateCount = await MpesaMerchantProfileEstate.countDocuments(
+      // Active mappings only count if the estate itself still exists, is active and belongs to
+      // this same client (a mapping row alone is not proof).
+      const mapRows = await MpesaMerchantProfileEstate.find(
         { merchantProfileId: profile._id, clientId, status: 'ACTIVE' },
-      ).session(session);
+      ).select('estateId').session(session).lean();
+      const activeEstateCount = mapRows.length
+        ? await Estate.countDocuments({ _id: { $in: mapRows.map((m) => m.estateId) }, clientId, isActive: true }).session(session)
+        : 0;
 
-      const blockers = cfg.blockers(profile, { activeEstateCount });
+      // Re-evaluated against the CURRENT callback configuration at submit time.
+      const blockers = cfg.blockers(profile, { activeEstateCount, config: getCallbackConfig() });
       if (blockers.length) {
         throw new AppError('MPESA_LIFECYCLE_BLOCKED', `Cannot ${op} this merchant profile`, 409, { blockers });
       }

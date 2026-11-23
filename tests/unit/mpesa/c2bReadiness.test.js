@@ -9,48 +9,80 @@ import {
   lifecycleActivateSchema, lifecycleSuspendSchema, lifecycleResumeSchema,
 } from '../../../src/routes/platform.routes.js';
 
+// Test-local configuration; the version is NOT a product constant.
+const config = {
+  configured: true, environment: 'sandbox', configId: 'daraja-sandbox', version: 'v-current',
+  confirmationUrl: 'https://cb.example/confirm', validationUrl: 'https://cb.example/validate',
+};
 const draftRegistered = {
   operationalState: 'DRAFT', c2bRegistrationState: 'ACCEPTED', callbackCapability: 'UNKNOWN',
   pullCapability: 'UNKNOWN', pullRegistrationState: 'NONE', lifecycleRevision: 0,
+  businessShortCode: '600995', merchantType: 'BUY_GOODS_TILL',
+  c2bRegistration: {
+    environment: 'sandbox', configId: 'daraja-sandbox', configVersion: 'v-current',
+    confirmationUrl: config.confirmationUrl, validationUrl: config.validationUrl,
+  },
 };
+const ctx = { activeEstateCount: 1, config };
 
 describe('Pull never blocks C2B readiness', () => {
   test('Pull UNKNOWN/unregistered adds no C2B blocker', () => {
-    const b = c2bReadinessBlockers({ ...draftRegistered, callbackCapability: 'VERIFIED' }, { activeEstateCount: 1 });
+    const b = c2bReadinessBlockers({ ...draftRegistered, callbackCapability: 'VERIFIED' }, ctx);
     expect(b).toEqual([]);
     expect(b.some((x) => x.startsWith('PULL'))).toBe(false);
   });
   test('Pull appears only as an advisory', () => {
     expect(pullAdvisories(draftRegistered)).toEqual(['PULL_UNKNOWN', 'PULL_REGISTRATION_NONE']);
-    expect(mpesaBlockers(draftRegistered).some((x) => x.startsWith('PULL'))).toBe(false);
+    expect(mpesaBlockers(draftRegistered, ctx).some((x) => x.startsWith('PULL'))).toBe(false);
+  });
+});
+
+describe('registration evidence must match the CURRENT callback configuration', () => {
+  const ready = { ...draftRegistered, callbackCapability: 'VERIFIED' };
+  test('matching evidence adds no blocker', () => {
+    expect(c2bReadinessBlockers(ready, ctx)).toEqual([]);
+  });
+  test('a config version change makes old registration stale', () => {
+    expect(c2bReadinessBlockers(ready, { ...ctx, config: { ...config, version: 'v-next' } })).toContain('C2B_REGISTRATION_STALE_CONFIG');
+  });
+  test('changed endpoint URL, environment and merchant are each detected', () => {
+    expect(c2bReadinessBlockers(ready, { ...ctx, config: { ...config, confirmationUrl: 'https://other/confirm' } })).toContain('C2B_REGISTRATION_STALE_CONFIG');
+    expect(c2bReadinessBlockers(ready, { ...ctx, config: { ...config, environment: 'production' } })).toContain('C2B_REGISTRATION_ENVIRONMENT_MISMATCH');
+    const wrong = { ...ready, c2bRegistration: { ...ready.c2bRegistration, shortCode: '111' } };
+    expect(c2bReadinessBlockers(wrong, ctx)).toContain('C2B_REGISTRATION_MERCHANT_MISMATCH');
+  });
+  test('missing evidence and missing/unconfigured config fail closed', () => {
+    expect(c2bReadinessBlockers({ ...ready, c2bRegistration: {} }, ctx)).toContain('C2B_REGISTRATION_EVIDENCE_MISSING');
+    expect(c2bReadinessBlockers(ready, { activeEstateCount: 1 })).toContain('CALLBACK_CONFIG_UNAVAILABLE');
+    expect(c2bReadinessBlockers(ready, { ...ctx, config: { configured: false } })).toContain('CALLBACK_CONFIG_UNAVAILABLE');
   });
 });
 
 describe('registration success is not callback readiness or activation', () => {
   test('registered but callback UNKNOWN still blocks activation', () => {
-    const b = activationBlockers(draftRegistered, { activeEstateCount: 1 });
+    const b = activationBlockers(draftRegistered, ctx);
     expect(b).toContain('CALLBACK_UNKNOWN');
-    expect(lifecycleAvailability(draftRegistered, { activeEstateCount: 1 }).canActivate).toBe(false);
+    expect(lifecycleAvailability(draftRegistered, ctx).canActivate).toBe(false);
   });
   test('unregistered C2B and missing estate mapping block activation', () => {
-    const b = activationBlockers({ ...draftRegistered, c2bRegistrationState: 'NONE', callbackCapability: 'VERIFIED' }, { activeEstateCount: 0 });
+    const b = activationBlockers({ ...draftRegistered, c2bRegistrationState: 'NONE', callbackCapability: 'VERIFIED' }, { activeEstateCount: 0, config });
     expect(b).toEqual(['C2B_REGISTRATION_NONE', 'NO_ACTIVE_ESTATE_MAPPING']);
   });
   test('fully ready DRAFT profile may be activated; ACTIVE and SUSPENDED may not use activate', () => {
     const ready = { ...draftRegistered, callbackCapability: 'VERIFIED' };
-    expect(activationBlockers(ready, { activeEstateCount: 1 })).toEqual([]);
-    expect(activationBlockers({ ...ready, operationalState: 'ACTIVE' }, { activeEstateCount: 1 })).toContain('ALREADY_ACTIVE');
-    expect(activationBlockers({ ...ready, operationalState: 'SUSPENDED' }, { activeEstateCount: 1 })).toContain('SUSPENDED_USE_RESUME');
+    expect(activationBlockers(ready, ctx)).toEqual([]);
+    expect(activationBlockers({ ...ready, operationalState: 'ACTIVE' }, ctx)).toContain('ALREADY_ACTIVE');
+    expect(activationBlockers({ ...ready, operationalState: 'SUSPENDED' }, ctx)).toContain('SUSPENDED_USE_RESUME');
   });
 });
 
 describe('suspend / resume availability', () => {
   test('only ACTIVE can be suspended; only SUSPENDED+ready can resume', () => {
     const ready = { ...draftRegistered, callbackCapability: 'VERIFIED' };
-    expect(lifecycleAvailability({ ...ready, operationalState: 'ACTIVE' }, { activeEstateCount: 1 }).canSuspend).toBe(true);
-    expect(lifecycleAvailability(ready, { activeEstateCount: 1 }).canSuspend).toBe(false);
-    expect(resumeBlockers({ ...ready, operationalState: 'SUSPENDED' }, { activeEstateCount: 1 })).toEqual([]);
-    expect(resumeBlockers(ready, { activeEstateCount: 1 })).toContain('OPERATIONAL_STATE_DRAFT');
+    expect(lifecycleAvailability({ ...ready, operationalState: 'ACTIVE' }, ctx).canSuspend).toBe(true);
+    expect(lifecycleAvailability(ready, ctx).canSuspend).toBe(false);
+    expect(resumeBlockers({ ...ready, operationalState: 'SUSPENDED' }, ctx)).toEqual([]);
+    expect(resumeBlockers(ready, ctx)).toContain('OPERATIONAL_STATE_DRAFT');
   });
 });
 

@@ -12,12 +12,42 @@ const REGISTERED = ['ACCEPTED', 'ALREADY_REGISTERED'];
 export const ACTIVATABLE_STATES = ['DRAFT', 'NOT_READY'];
 
 /**
- * Reasons this profile is not ready to carry C2B financial posting. Derived ONLY from stored
- * state. Pull state is deliberately absent: Pull is optional and cannot block C2B.
+ * Registration evidence must match the platform callback configuration CURRENT for this deployment.
+ * A successful registration recorded against an older environment/config/version/URL set is stale
+ * and is NOT valid readiness evidence (the version is a content hash, so any URL change makes old
+ * evidence stale). Nothing here hardcodes a version: the current one comes from `config`.
+ * `config` is the result of getCallbackConfig(); if it is absent or unconfigured this fails closed.
+ * The merchant shortcode is immutable after creation (no update path), so it is compared only when
+ * the evidence recorded it (registrations made after this change do; earlier evidence did not).
  */
-export function c2bReadinessBlockers(p, { activeEstateCount } = {}) {
+export function registrationEvidenceBlockers(p, config) {
+  if (!REGISTERED.includes(p.c2bRegistrationState)) return [];
+  if (!config || config.configured !== true) return ['CALLBACK_CONFIG_UNAVAILABLE'];
+  const e = p.c2bRegistration || {};
+  if (!e.environment || !e.configId || !e.configVersion) return ['C2B_REGISTRATION_EVIDENCE_MISSING'];
+  const b = [];
+  if (e.environment !== config.environment) b.push('C2B_REGISTRATION_ENVIRONMENT_MISMATCH');
+  if (e.configId !== config.configId || e.configVersion !== config.version
+    || e.confirmationUrl !== config.confirmationUrl || e.validationUrl !== config.validationUrl) {
+    b.push('C2B_REGISTRATION_STALE_CONFIG');
+  }
+  if ((e.shortCode && String(e.shortCode) !== String(p.businessShortCode))
+    || (e.merchantType && e.merchantType !== p.merchantType)) {
+    b.push('C2B_REGISTRATION_MERCHANT_MISMATCH');
+  }
+  return b;
+}
+
+/**
+ * Reasons this profile is not ready to carry the C2B collection path. Derived ONLY from stored
+ * state plus the current callback configuration. Pull state is deliberately absent: Pull is
+ * optional and cannot block C2B. Callback capability is evidence-driven and is never set by
+ * registration or by any lifecycle operation.
+ */
+export function c2bReadinessBlockers(p, { activeEstateCount, config } = {}) {
   const b = [];
   if (!REGISTERED.includes(p.c2bRegistrationState)) b.push(`C2B_REGISTRATION_${p.c2bRegistrationState}`);
+  b.push(...registrationEvidenceBlockers(p, config));
   if (p.callbackCapability !== 'VERIFIED') b.push(`CALLBACK_${p.callbackCapability}`);
   if (activeEstateCount !== undefined && activeEstateCount < 1) b.push('NO_ACTIVE_ESTATE_MAPPING');
   return b;

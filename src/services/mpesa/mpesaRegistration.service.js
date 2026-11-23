@@ -175,6 +175,8 @@ export const mpesaRegistrationService = {
         'c2bRegistration.environment': cfg.environment,
         'c2bRegistration.configId': cfg.configId,
         'c2bRegistration.configVersion': cfg.version,
+        'c2bRegistration.shortCode': String(profile.businessShortCode),
+        'c2bRegistration.merchantType': profile.merchantType,
         'c2bRegistration.confirmationUrl': cfg.confirmationUrl,
         'c2bRegistration.validationUrl': cfg.validationUrl,
         'c2bRegistration.responseType': C2B_RESPONSE_TYPE.COMPLETED,
