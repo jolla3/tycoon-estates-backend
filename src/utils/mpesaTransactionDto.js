@@ -20,6 +20,7 @@ export function toMpesaTransactionDTO(row) {
     postingState: row.postingState,
     postedAt: row.postedAt || null,
     attributedEstateId: id(row.attributedEstateId),
+    attributedTenancyId: id(row.attributedTenancyId),
     // Allocation is routing state only: UNALLOCATED is NOT a posted rent payment.
     allocationState: row.allocationState || 'UNALLOCATED',
     allocationReason: row.allocationReason || null,

@@ -520,6 +520,7 @@ async function applyBankReceipt({
       tenancyId: sourceTenancy._id,
       houseId: sourceHouse._id,
       transactionAt: current.transactionDate,
+      allowedStatuses: manualAssignment ? ['ACTIVE', 'CLOSED'] : ['ACTIVE'],
     },
     session,
   });

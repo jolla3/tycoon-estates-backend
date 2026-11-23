@@ -35,10 +35,28 @@ describeWithMongo('G5 multi-Tenancy receipt settlement and Tenant credit', () =>
       const session = await mongoose.startSession();
       try {
         let out;
+        const transactionAt = new Date();
         await session.withTransaction(async () => {
           out = await settleTenantAccount({
-            clientId: client._id, estateId: estate._id, tenantId: tenant._id, session,
-            receipt: { transactionId: txId, receiptNumber: 'QJK2ABCDEF', amountCents, transactionAt: new Date() },
+            clientId: client._id,
+            estateId: estate._id,
+            tenantId: tenant._id,
+            session,
+            receipt: {
+              source: 'MPESA',
+              transactionId: txId,
+              receiptNumber: 'QJK2ABCDEF',
+              amountCents,
+              transactionAt,
+              paymentDate: transactionAt,
+            },
+            paymentDate: transactionAt,
+            sourceTenancyCheck: {
+              tenancyId: tB._id,
+              houseId: houseB._id,
+              transactionAt,
+              allowedStatuses: ['ACTIVE'],
+            },
           });
         });
         return out;
@@ -132,6 +150,7 @@ describeWithMongo('G5 multi-Tenancy receipt settlement and Tenant credit', () =>
     const txId = new mongoose.Types.ObjectId();
     const session = await mongoose.startSession();
 
+    const transactionAt = new Date();
     try {
       await expect(session.withTransaction(async () => {
         const result = await settleTenantAccount({
@@ -140,10 +159,19 @@ describeWithMongo('G5 multi-Tenancy receipt settlement and Tenant credit', () =>
           tenantId: tenant._id,
           session,
           receipt: {
+            source: 'MPESA',
             transactionId: txId,
             receiptNumber: 'X',
             amountCents: 15000,
-            transactionAt: new Date(),
+            transactionAt,
+            paymentDate: transactionAt,
+          },
+          paymentDate: transactionAt,
+          sourceTenancyCheck: {
+            tenancyId: tB._id,
+            houseId: houseB._id,
+            transactionAt,
+            allowedStatuses: ['ACTIVE'],
           },
         });
 

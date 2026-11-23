@@ -108,9 +108,10 @@ async function projectCharge(chargeId, scope, session) {
  * receipt shapes (source is mandatory; an unknown/missing source is rejected):
  *   MPESA:
  *     { source:'MPESA', transactionId, amountCents, receiptNumber?, transactionAt? }
+ *     A sourceTenancyCheck is required for exact transaction-time attribution.
  *   BANK:
  *     { source:'BANK', bankTransactionId, amountCents, paymentDate? }
- *     A Bank sourceTenancyCheck is also required for transaction-time attribution.
+ *     A sourceTenancyCheck is required for exact transaction-time attribution.
  *   MANUAL:
  *     { source:'MANUAL', identityKey, amountCents, tenderMethod,
  *       manualReceiptId?, recordedByUserId?, paymentDate? }
@@ -148,16 +149,21 @@ export async function settleTenantAccount({
     if (source === 'BANK' && !receipt.bankTransactionId) {
       throw Errors.InvalidRequest('receipt.bankTransactionId required for Bank receipts');
     }
-    if (source === 'BANK' && (!sourceTenancyCheck?.tenancyId
+    if (['BANK', 'MPESA'].includes(source) && (!sourceTenancyCheck?.tenancyId
       || !sourceTenancyCheck?.houseId || !sourceTenancyCheck?.transactionAt)) {
-      throw Errors.InvalidRequest('Bank receipt requires exact source-tenancy transaction-time validation');
+      throw Errors.InvalidRequest('M-PESA/Bank receipts require exact source-tenancy transaction-time validation');
     }
-    if (source === 'BANK') {
-      const receiptDate = receipt.paymentDate || paymentDate;
+    if (['BANK', 'MPESA'].includes(source)) {
+      const receiptDate = receipt.paymentDate || paymentDate || receipt.transactionAt;
       const receiptTime = receiptDate instanceof Date ? receiptDate.getTime() : NaN;
       const sourceTime = new Date(sourceTenancyCheck.transactionAt).getTime();
       if (!Number.isFinite(receiptTime) || !Number.isFinite(sourceTime) || receiptTime !== sourceTime) {
-        throw Errors.InvalidRequest('Bank Payment date must equal the source Bank transactionDate exactly');
+        throw Errors.InvalidRequest('Receipt Payment date must equal its provider transaction timestamp exactly');
+      }
+      const allowedStatuses = sourceTenancyCheck.allowedStatuses || ['ACTIVE', 'CLOSED'];
+      if (!Array.isArray(allowedStatuses) || !allowedStatuses.length
+        || allowedStatuses.some((status) => !['ACTIVE', 'CLOSED'].includes(status))) {
+        throw Errors.InvalidRequest('Source tenancy allowedStatuses must be a non-empty ACTIVE/CLOSED list');
       }
     }
   }
@@ -188,16 +194,21 @@ export async function settleTenantAccount({
 
   // Optional provider-source attribution fence. This is deliberately checked
   // AFTER the shared Tenant.creditRev and sorted Tenancy.ledgerRev locks, so
-  // Bank cannot invert the allocator's established lock order.
+  // Bank/M-PESA cannot invert the allocator's established lock order.
   if (sourceTenancyCheck) {
-    const { tenancyId, houseId, transactionAt } = sourceTenancyCheck;
+    const {
+      tenancyId,
+      houseId,
+      transactionAt,
+      allowedStatuses = ['ACTIVE', 'CLOSED'],
+    } = sourceTenancyCheck;
     const eventMs = new Date(transactionAt).getTime();
     const source = await Tenancy.findOne({
       _id: tenancyId,
       clientId,
       estateId,
       tenantId,
-      status: { $in: ['ACTIVE', 'CLOSED'] },
+      status: { $in: allowedStatuses },
     }).session(session).lean();
     const startMs = source ? new Date(source.startAt).getTime() : NaN;
     const endMs = source?.endAt == null ? null : new Date(source.endAt).getTime();
@@ -205,7 +216,9 @@ export async function settleTenantAccount({
       || !Number.isFinite(eventMs) || !Number.isFinite(startMs)
       || eventMs < startMs
       || (endMs != null && (!Number.isFinite(endMs) || eventMs >= endMs))) {
-      throw Errors.Conflict('Receipt transaction timestamp is outside its exact source Tenancy after settlement fencing');
+      const error = Errors.Conflict('Receipt transaction timestamp or source Tenancy status changed before settlement');
+      error.code = 'SOURCE_TENANCY_REQUIRES_REVIEW';
+      throw error;
     }
   }
 
