@@ -2,6 +2,7 @@
 import '../../setup.js';
 import {
   c2bReadinessBlockers, pullAdvisories, activationBlockers, resumeBlockers, lifecycleAvailability,
+  hasEligibleEstateMapping,
 } from '../../../src/services/mpesa/mpesaReadiness.js';
 import { mpesaBlockers } from '../../../src/services/platformIntegrations.service.js';
 import { handleC2bValidation, C2B_EXTERNAL_VALIDATION_ENABLED } from '../../../src/services/mpesa/darajaC2b.service.js';
@@ -24,7 +25,7 @@ const draftRegistered = {
     confirmationUrl: config.confirmationUrl, validationUrl: config.validationUrl,
   },
 };
-const ctx = { activeEstateCount: 1, config };
+const ctx = { activeEstateCount: 1, config, clientActive: true };
 
 describe('Pull never blocks C2B readiness', () => {
   test('Pull UNKNOWN/unregistered adds no C2B blocker', () => {
@@ -80,7 +81,7 @@ describe('registration success is not callback readiness or activation', () => {
     expect(lifecycleAvailability(draftRegistered, ctx).canActivate).toBe(false);
   });
   test('unregistered C2B and missing estate mapping block activation', () => {
-    const b = activationBlockers({ ...draftRegistered, c2bRegistrationState: 'NONE', callbackCapability: 'VERIFIED' }, { activeEstateCount: 0, config });
+    const b = activationBlockers({ ...draftRegistered, c2bRegistrationState: 'NONE', callbackCapability: 'VERIFIED' }, { activeEstateCount: 0, config, clientActive: true });
     expect(b).toEqual(['C2B_REGISTRATION_NONE', 'NO_ACTIVE_ESTATE_MAPPING']);
   });
   test('fully ready DRAFT profile may be activated; ACTIVE and SUSPENDED may not use activate', () => {
@@ -121,5 +122,24 @@ describe('external C2B validation fails closed', () => {
     const res = await handleC2bValidation({ BusinessShortCode: '600995', TransAmount: '10' });
     expect(res).toEqual({ ResultCode: 'C2B00016', ResultDesc: 'Rejected' });
     expect(await handleC2bValidation(null)).toEqual({ ResultCode: 'C2B00016', ResultDesc: 'Rejected' });
+  });
+});
+
+describe('active client lifecycle precondition', () => {
+  const ready = { ...draftRegistered, callbackCapability: 'VERIFIED' };
+  test('inactive clients cannot activate or resume, but ACTIVE profiles can still be suspended', () => {
+    const inactive = { ...ctx, clientActive: false };
+    expect(activationBlockers(ready, inactive)).toContain('CLIENT_INACTIVE');
+    expect(resumeBlockers({ ...ready, operationalState: 'SUSPENDED' }, inactive)).toContain('CLIENT_INACTIVE');
+    expect(lifecycleAvailability({ ...ready, operationalState: 'ACTIVE' }, inactive).canSuspend).toBe(true);
+  });
+});
+
+describe('eligible estate mapping predicate', () => {
+  test('requires ACTIVE mapping and backend-confirmed eligible Estate', () => {
+    expect(hasEligibleEstateMapping([{ status: 'ACTIVE', estateEligible: true }])).toBe(true);
+    expect(hasEligibleEstateMapping([{ status: 'ACTIVE', estateEligible: false }])).toBe(false);
+    expect(hasEligibleEstateMapping([{ status: 'INACTIVE', estateEligible: true }])).toBe(false);
+    expect(hasEligibleEstateMapping([])).toBe(false);
   });
 });

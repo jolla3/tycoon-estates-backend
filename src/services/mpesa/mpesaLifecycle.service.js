@@ -62,9 +62,10 @@ async function run(op, { clientId, profileId, expectedRevision, reason, actor, r
       if ((profile.lifecycleRevision ?? 0) !== expectedRevision) {
         throw Errors.Conflict('This profile changed since you loaded it. Refresh and review before retrying.');
       }
-      if (cfg.needsActiveClient) {
-        const client = await Client.findById(clientId).select('isActive').session(session).lean();
-        if (!client || client.isActive !== true) throw Errors.InvalidRequest('The client must be active');
+      const client = await Client.findById(clientId).select('isActive').session(session).lean();
+      if (!client) throw Errors.NotFound('Client not found');
+      if (cfg.needsActiveClient && client.isActive !== true) {
+        throw Errors.InvalidRequest('The client must be active');
       }
       // Same eligible-estate definition as every read model (annotateMappingEligibility): an ACTIVE
       // mapping whose Estate exists, is active and belongs to this same client.
@@ -72,7 +73,11 @@ async function run(op, { clientId, profileId, expectedRevision, reason, actor, r
       const activeEstateCount = mapped.filter((m) => m.estateEligible === true).length;
 
       // Re-evaluated against the CURRENT callback configuration at submit time.
-      const blockers = cfg.blockers(profile, { activeEstateCount, config: getCallbackConfig() });
+      const blockers = cfg.blockers(profile, {
+        activeEstateCount,
+        clientActive: client.isActive === true,
+        config: getCallbackConfig(),
+      });
       if (blockers.length) {
         throw new AppError('MPESA_LIFECYCLE_BLOCKED', `Cannot ${op} this merchant profile`, 409, { blockers });
       }
@@ -102,9 +107,13 @@ async function run(op, { clientId, profileId, expectedRevision, reason, actor, r
     await session.endSession();
   }
 
-  const fresh = await MpesaMerchantProfile.findOne({ _id: profileId, clientId }).lean();
+  const [fresh, client] = await Promise.all([
+    MpesaMerchantProfile.findOne({ _id: profileId, clientId }).lean(),
+    Client.findById(clientId).select('isActive').lean(),
+  ]);
+  if (!fresh) throw Errors.NotFound('Merchant profile not found');
   const mappings = (await mappingsByProfile([fresh])).get(String(fresh._id)) || [];
-  return safeMerchantProfile(fresh, undefined, mappings);
+  return safeMerchantProfile(fresh, undefined, mappings, client?.isActive === true);
 }
 
 export const mpesaLifecycleService = {

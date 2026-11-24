@@ -9,6 +9,8 @@ import { createDarajaOAuthClientFromEnv } from './darajaOAuth.client.js';
 import { registerC2bUrls } from './darajaC2b.service.js';
 import { registerPull } from './darajaPull.service.js';
 import { getCallbackConfig } from './darajaCallbackConfig.service.js';
+import { mappingsByProfile } from '../platformIntegrations.service.js';
+import { hasEligibleEstateMapping } from './mpesaReadiness.js';
 import { C2B_RESPONSE_TYPE, PULL_REGISTRATION_ELIGIBILITY } from './daraja.constants.js';
 import { logger } from '../../config/logger.js';
 import { encryptionUtil } from '../../utils/encryption.js';
@@ -152,8 +154,12 @@ async function runAttempt({ kind, profile, clientId, actor, reqMeta, cfg, oauth,
 export const mpesaRegistrationService = {
   async registerC2b({ clientId, profileId, actor, reqMeta = {}, http, oauthClient }) {
     const cfg = requireCallbackConfig();
-    const oauth = oauthClient || requireOAuth();
     const profile = await load(clientId, profileId);
+    const mappings = (await mappingsByProfile([profile])).get(String(profile._id)) || [];
+    if (!hasEligibleEstateMapping(mappings)) {
+      throw Errors.InvalidRequest('C2B URL registration requires an ACTIVE mapping to an active estate belonging to this client');
+    }
+    const oauth = oauthClient || requireOAuth();
     if (BLOCKING.includes(profile.c2bRegistrationState)) {
       throw Errors.Conflict(`C2B registration is ${profile.c2bRegistrationState}; reconcile it before another attempt`);
     }

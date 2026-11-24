@@ -4,12 +4,18 @@
 //   1. provider registration state   (c2bRegistrationState / pullRegistrationState)
 //   2. callback capability           (callbackCapability: evidence of real, trusted delivery)
 //   3. Pull capability               (pullCapability: OPTIONAL, never a C2B prerequisite)
-//   4. financial posting permission  (operationalState === 'ACTIVE', set only by the explicit
-//                                     Superadmin lifecycle operations)
-// Registration success proves neither callback capability nor posting permission.
+//   4. merchant operational state     (operationalState === 'ACTIVE', set only by explicit
+//                                      Superadmin lifecycle operations)
+// G3 financial posting permission is a separate gate; ACTIVE alone never authorizes a Payment.
 
 const REGISTERED = ['ACCEPTED', 'ALREADY_REGISTERED'];
 export const ACTIVATABLE_STATES = ['DRAFT', 'NOT_READY'];
+
+/** True only when a mapping is ACTIVE and its backend-verified Estate eligibility is true. */
+export function hasEligibleEstateMapping(mappings) {
+  return Array.isArray(mappings)
+    && mappings.some((m) => m?.status === 'ACTIVE' && m?.estateEligible === true);
+}
 
 /**
  * Registration evidence must be COMPLETE and must match both the platform callback configuration
@@ -76,12 +82,14 @@ export function activationBlockers(p, ctx = {}) {
   if (p.operationalState === 'ACTIVE') b.push('ALREADY_ACTIVE');
   else if (p.operationalState === 'SUSPENDED') b.push('SUSPENDED_USE_RESUME');
   else if (!ACTIVATABLE_STATES.includes(p.operationalState)) b.push(`OPERATIONAL_STATE_${p.operationalState}`);
+  if (ctx.clientActive !== true) b.push('CLIENT_INACTIVE');
   return [...b, ...c2bReadinessBlockers(p, ctx)];
 }
 
 /** Blockers for RESUME: must be SUSPENDED and still satisfy C2B readiness. */
 export function resumeBlockers(p, ctx = {}) {
   const b = p.operationalState === 'SUSPENDED' ? [] : [`OPERATIONAL_STATE_${p.operationalState}`];
+  if (ctx.clientActive !== true) b.push('CLIENT_INACTIVE');
   return [...b, ...c2bReadinessBlockers(p, ctx)];
 }
 

@@ -97,13 +97,17 @@ export async function bankingSummaryByClient(clientIds) {
 
 // Allowlisted merchant view. Never includes the Pull nominated number (only its mask), encrypted
 // material, provider credentials or raw provider bodies.
-export function safeMerchantProfile(p, evidence, mappings) {
+export function safeMerchantProfile(p, evidence, mappings, clientActive = false) {
   // Mappings are required so every response carries an authoritative lifecycleAvailability; the
   // UI never has to guess. Callers must load them (see mappingsByProfile).
   if (!Array.isArray(mappings)) throw new Error('safeMerchantProfile requires the profile estate mappings');
   // The single definition of an eligible estate (see annotateMappingEligibility): ACTIVE mapping to an
   // existing, active estate of the SAME client. Un-annotated mappings count as ineligible (fail closed).
-  const ctx = { activeEstateCount: mappings.filter((m) => m.status === 'ACTIVE' && m.estateEligible === true).length, config: getCallbackConfig() };
+  const ctx = {
+    activeEstateCount: mappings.filter((m) => m.status === 'ACTIVE' && m.estateEligible === true).length,
+    clientActive: clientActive === true,
+    config: getCallbackConfig(),
+  };
   const reg = (r) => (r ? {
     environment: r.environment || null, configId: r.configId || null, configVersion: r.configVersion || null,
     attemptedAt: r.attemptedAt || null, succeededAt: r.succeededAt || null,
@@ -203,9 +207,14 @@ export async function mpesaSummaryByClient(clientIds, { includeProfiles = false 
   const profiles = await MpesaMerchantProfile.find({ clientId: { $in: clientIds.map(oid) } })
     .sort({ createdAt: 1, _id: 1 }).lean();
   const ids = profiles.map((p) => p._id);
-  const [evidence, mappings] = includeProfiles
-    ? await Promise.all([ingestionEvidence(ids), mappingsByProfile(profiles)])
-    : [null, null];
+  const [evidence, mappings, clients] = includeProfiles
+    ? await Promise.all([
+      ingestionEvidence(ids),
+      mappingsByProfile(profiles),
+      Client.find({ _id: { $in: clientIds.map(oid) } }).select('_id isActive').lean(),
+    ])
+    : [null, null, null];
+  const clientActivity = new Map((clients || []).map((c) => [String(c._id), c.isActive === true]));
   const out = new Map();
   for (const p of profiles) {
     const k = String(p.clientId);
@@ -217,7 +226,12 @@ export async function mpesaSummaryByClient(clientIds, { includeProfiles = false 
     s.operationalStates[p.operationalState] = (s.operationalStates[p.operationalState] || 0) + 1;
     s.callbackCapabilities[p.callbackCapability] = (s.callbackCapabilities[p.callbackCapability] || 0) + 1;
     s.pullCapabilities[p.pullCapability] = (s.pullCapabilities[p.pullCapability] || 0) + 1;
-    if (includeProfiles) s.profiles.push(safeMerchantProfile(p, evidence.get(String(p._id)) || {}, mappings.get(String(p._id)) || []));
+    if (includeProfiles) s.profiles.push(safeMerchantProfile(
+      p,
+      evidence.get(String(p._id)) || {},
+      mappings.get(String(p._id)) || [],
+      clientActivity.get(String(p.clientId)) === true,
+    ));
   }
   if (!includeProfiles) for (const s of out.values()) delete s.profiles;
   return out;

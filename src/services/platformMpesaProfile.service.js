@@ -27,8 +27,12 @@ async function requireReadiness() {
 export async function loadProfileView(clientId, profileId) {
   const profile = await MpesaMerchantProfile.findOne({ _id: profileId, clientId }).lean();
   if (!profile) throw Errors.NotFound('Merchant profile not found');
-  const mappings = (await mappingsByProfile([profile])).get(String(profile._id)) || [];
-  return safeMerchantProfile(profile, undefined, mappings);
+  const [mappingMap, client] = await Promise.all([
+    mappingsByProfile([profile]),
+    Client.findById(clientId).select('isActive').lean(),
+  ]);
+  const mappings = mappingMap.get(String(profile._id)) || [];
+  return safeMerchantProfile(profile, undefined, mappings, client?.isActive === true);
 }
 
 async function assertActiveClient(clientId, session) {
@@ -59,7 +63,7 @@ export const platformMpesaProfileService = {
     await requireReadiness();
 
     const session = await mongoose.startSession();
-    let profile; let mappings;
+    let profile;
     try {
       await session.withTransaction(async () => {
         const client = await assertActiveClient(clientId, session);
@@ -73,7 +77,7 @@ export const platformMpesaProfileService = {
           createdByUserId: actor?._id || null, updatedByUserId: actor?._id || null,
         }], { session });
         profile = created;
-        mappings = await MpesaMerchantProfileEstate.create(ids.map((id) => ({
+        await MpesaMerchantProfileEstate.create(ids.map((id) => ({
           merchantProfileId: created._id, clientId, estateId: id, status: 'ACTIVE', source: 'SUPERADMIN',
           createdByUserId: actor?._id || null,
         })), { session, ordered: true });
@@ -91,8 +95,7 @@ export const platformMpesaProfileService = {
     } finally {
       await session.endSession();
     }
-    const created = profile.toObject();
-    return safeMerchantProfile(created, undefined, (await mappingsByProfile([created])).get(String(created._id)) || []);
+    return loadProfileView(clientId, profile._id);
   },
 
   async get(clientId, profileId) {
