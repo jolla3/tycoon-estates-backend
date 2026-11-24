@@ -20,6 +20,7 @@ const draftRegistered = {
   businessShortCode: '600995', merchantType: 'BUY_GOODS_TILL',
   c2bRegistration: {
     environment: 'sandbox', configId: 'daraja-sandbox', configVersion: 'v-current',
+    shortCode: '600995', merchantType: 'BUY_GOODS_TILL',
     confirmationUrl: config.confirmationUrl, validationUrl: config.validationUrl,
   },
 };
@@ -50,6 +51,20 @@ describe('registration evidence must match the CURRENT callback configuration', 
     expect(c2bReadinessBlockers(ready, { ...ctx, config: { ...config, environment: 'production' } })).toContain('C2B_REGISTRATION_ENVIRONMENT_MISMATCH');
     const wrong = { ...ready, c2bRegistration: { ...ready.c2bRegistration, shortCode: '111' } };
     expect(c2bReadinessBlockers(wrong, ctx)).toContain('C2B_REGISTRATION_MERCHANT_MISMATCH');
+  });
+  test('each missing identity/config evidence field is an explicit blocker, never a silent pass', () => {
+    for (const k of ['environment', 'configId', 'configVersion', 'confirmationUrl', 'validationUrl']) {
+      const e = { ...ready.c2bRegistration, [k]: null };
+      expect(c2bReadinessBlockers({ ...ready, c2bRegistration: e }, ctx)).toContain('C2B_REGISTRATION_EVIDENCE_MISSING');
+    }
+    for (const k of ['shortCode', 'merchantType']) {
+      const e = { ...ready.c2bRegistration, [k]: null };
+      expect(c2bReadinessBlockers({ ...ready, c2bRegistration: e }, ctx)).toContain('C2B_REGISTRATION_IDENTITY_EVIDENCE_MISSING');
+    }
+  });
+  test('legacy evidence without shortCode/merchantType (current profiles) keeps activation blocked', () => {
+    const legacy = { ...draftRegistered, c2bRegistration: { ...draftRegistered.c2bRegistration, shortCode: undefined, merchantType: undefined } };
+    expect(activationBlockers(legacy, ctx)).toContain('C2B_REGISTRATION_IDENTITY_EVIDENCE_MISSING');
   });
   test('missing evidence and missing/unconfigured config fail closed', () => {
     expect(c2bReadinessBlockers({ ...ready, c2bRegistration: {} }, ctx)).toContain('C2B_REGISTRATION_EVIDENCE_MISSING');

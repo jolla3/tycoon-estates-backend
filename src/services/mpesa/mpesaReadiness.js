@@ -12,23 +12,32 @@ const REGISTERED = ['ACCEPTED', 'ALREADY_REGISTERED'];
 export const ACTIVATABLE_STATES = ['DRAFT', 'NOT_READY'];
 
 /**
- * Registration evidence must match the platform callback configuration CURRENT for this deployment.
- * A successful registration recorded against an older environment/config/version/URL set is stale
- * and is NOT valid readiness evidence (the version is a content hash, so any URL change makes old
- * evidence stale). Nothing here hardcodes a version: the current one comes from `config`.
- * `config` is the result of getCallbackConfig(); if it is absent or unconfigured this fails closed.
- * The merchant shortcode is immutable after creation (no update path), so it is compared only when
- * the evidence recorded it (registrations made after this change do; earlier evidence did not).
+ * Registration evidence must be COMPLETE and must match both the platform callback configuration
+ * CURRENT for this deployment and this merchant profile. A successful registration recorded against
+ * an older environment/config/version/URL set, or without full identity proof, is NOT valid
+ * readiness evidence. Missing proof is an explicit blocker; it never passes silently, and nothing
+ * here invents or back-fills evidence. Nothing hardcodes a version: the current one comes from
+ * `config` (the result of getCallbackConfig()); if it is absent or unconfigured this fails closed.
+ *
+ * Required stored evidence: environment, configId, configVersion, confirmationUrl, validationUrl
+ * (config identity) and shortCode, merchantType (merchant identity). Evidence recorded before
+ * shortCode/merchantType were captured is therefore treated as incomplete until the URLs are
+ * registered again.
  */
 export function registrationEvidenceBlockers(p, config) {
   if (!REGISTERED.includes(p.c2bRegistrationState)) return [];
   if (!config || config.configured !== true) return ['CALLBACK_CONFIG_UNAVAILABLE'];
   const e = p.c2bRegistration || {};
-  if (!e.environment || !e.configId || !e.configVersion) return ['C2B_REGISTRATION_EVIDENCE_MISSING'];
   const b = [];
-  if (e.environment !== config.environment) b.push('C2B_REGISTRATION_ENVIRONMENT_MISMATCH');
-  if (e.configId !== config.configId || e.configVersion !== config.version
-    || e.confirmationUrl !== config.confirmationUrl || e.validationUrl !== config.validationUrl) {
+  if (!e.environment || !e.configId || !e.configVersion || !e.confirmationUrl || !e.validationUrl) {
+    b.push('C2B_REGISTRATION_EVIDENCE_MISSING');
+  }
+  if (!e.shortCode || !e.merchantType) b.push('C2B_REGISTRATION_IDENTITY_EVIDENCE_MISSING');
+  if (e.environment && e.environment !== config.environment) b.push('C2B_REGISTRATION_ENVIRONMENT_MISMATCH');
+  if ((e.configId && e.configId !== config.configId)
+    || (e.configVersion && e.configVersion !== config.version)
+    || (e.confirmationUrl && e.confirmationUrl !== config.confirmationUrl)
+    || (e.validationUrl && e.validationUrl !== config.validationUrl)) {
     b.push('C2B_REGISTRATION_STALE_CONFIG');
   }
   if ((e.shortCode && String(e.shortCode) !== String(p.businessShortCode))

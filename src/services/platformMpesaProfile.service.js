@@ -11,7 +11,7 @@ import { inspectMpesaIndexes } from '../utils/mpesaIndexReadiness.js';
 import { encryptionUtil } from '../utils/encryption.js';
 import { Errors } from '../utils/errors.js';
 import { auditRequired } from './audit.service.js';
-import { safeMerchantProfile } from './platformIntegrations.service.js';
+import { safeMerchantProfile, mappingsByProfile } from './platformIntegrations.service.js';
 import { maskMsisdn, normalizeKenyanMsisdn } from './mpesa/mpesaRegistration.service.js';
 import { getCallbackConfig } from './mpesa/darajaCallbackConfig.service.js';
 import { MERCHANT_TYPE } from './mpesa/daraja.constants.js';
@@ -27,7 +27,7 @@ async function requireReadiness() {
 export async function loadProfileView(clientId, profileId) {
   const profile = await MpesaMerchantProfile.findOne({ _id: profileId, clientId }).lean();
   if (!profile) throw Errors.NotFound('Merchant profile not found');
-  const mappings = await MpesaMerchantProfileEstate.find({ merchantProfileId: profile._id }).lean();
+  const mappings = (await mappingsByProfile([profile])).get(String(profile._id)) || [];
   return safeMerchantProfile(profile, undefined, mappings);
 }
 
@@ -91,7 +91,8 @@ export const platformMpesaProfileService = {
     } finally {
       await session.endSession();
     }
-    return safeMerchantProfile(profile.toObject(), undefined, mappings.map((m) => m.toObject()));
+    const created = profile.toObject();
+    return safeMerchantProfile(created, undefined, (await mappingsByProfile([created])).get(String(created._id)) || []);
   },
 
   async get(clientId, profileId) {

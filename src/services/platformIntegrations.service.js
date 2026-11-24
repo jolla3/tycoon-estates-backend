@@ -18,6 +18,7 @@ import { BankAccount } from '../models/BankAccount.js';
 import { MpesaMerchantProfile } from '../models/MpesaMerchantProfile.js';
 import { MpesaIngestionEvent } from '../models/MpesaIngestionEvent.js';
 import { MpesaMerchantProfileEstate } from '../models/MpesaMerchantProfileEstate.js';
+import { Estate } from '../models/Estate.js';
 import { getCallbackConfig } from './mpesa/darajaCallbackConfig.service.js';
 import { PULL_REGISTRATION_ELIGIBILITY } from './mpesa/daraja.constants.js';
 import { c2bReadinessBlockers, pullAdvisories, lifecycleAvailability } from './mpesa/mpesaReadiness.js';
@@ -100,7 +101,9 @@ export function safeMerchantProfile(p, evidence, mappings) {
   // Mappings are required so every response carries an authoritative lifecycleAvailability; the
   // UI never has to guess. Callers must load them (see mappingsByProfile).
   if (!Array.isArray(mappings)) throw new Error('safeMerchantProfile requires the profile estate mappings');
-  const ctx = { activeEstateCount: mappings.filter((m) => m.status === 'ACTIVE').length, config: getCallbackConfig() };
+  // The single definition of an eligible estate (see annotateMappingEligibility): ACTIVE mapping to an
+  // existing, active estate of the SAME client. Un-annotated mappings count as ineligible (fail closed).
+  const ctx = { activeEstateCount: mappings.filter((m) => m.status === 'ACTIVE' && m.estateEligible === true).length, config: getCallbackConfig() };
   const reg = (r) => (r ? {
     environment: r.environment || null, configId: r.configId || null, configVersion: r.configVersion || null,
     attemptedAt: r.attemptedAt || null, succeededAt: r.succeededAt || null,
@@ -136,17 +139,40 @@ export function safeMerchantProfile(p, evidence, mappings) {
     pullRegistrationEligible: Boolean(PULL_REGISTRATION_ELIGIBILITY[p.merchantType]?.verified),
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
-    estates: mappings.map((m) => ({ estateId: String(m.estateId), status: m.status })),
+    estates: mappings.map((m) => ({ estateId: String(m.estateId), status: m.status, eligible: m.status === 'ACTIVE' && m.estateEligible === true })),
     ...(evidence !== undefined ? { ingestionEvidence: evidence } : {}),
   };
 }
 
-/** Estate mappings for many profiles in one query, keyed by profile id string. */
-export async function mappingsByProfile(profileIds) {
-  const out = new Map(profileIds.map((id) => [String(id), []]));
-  if (!profileIds.length) return out;
-  const rows = await MpesaMerchantProfileEstate.find({ merchantProfileId: { $in: profileIds.map(oid) } }).lean();
-  for (const m of rows) out.get(String(m.merchantProfileId))?.push(m);
+/**
+ * THE definition of an eligible estate for readiness, shared by every read model and by the
+ * lifecycle endpoints: the mapping is ACTIVE, belongs to the profile's client, and its Estate exists,
+ * is active and belongs to that same client. Adds `estateEligible` to each mapping row. Two queries
+ * total regardless of how many profiles/mappings (no N+1). Pass `session` inside a transaction.
+ */
+export async function annotateMappingEligibility(profiles, rows, { session } = {}) {
+  const estateIds = [...new Set(rows.map((m) => String(m.estateId)))];
+  const estates = estateIds.length
+    ? await Estate.find({ _id: { $in: estateIds.map(oid) }, isActive: true }).select('_id clientId').session(session || null).lean()
+    : [];
+  const estateClient = new Map(estates.map((e) => [String(e._id), String(e.clientId)]));
+  const profileClient = new Map(profiles.map((p) => [String(p._id), String(p.clientId)]));
+  return rows.map((m) => {
+    const client = profileClient.get(String(m.merchantProfileId));
+    return {
+      ...m,
+      estateEligible: m.status === 'ACTIVE' && client !== undefined
+        && String(m.clientId) === client && estateClient.get(String(m.estateId)) === client,
+    };
+  });
+}
+
+/** Annotated estate mappings for many profiles (profile docs, needing _id and clientId), keyed by profile id. */
+export async function mappingsByProfile(profiles, { session } = {}) {
+  const out = new Map(profiles.map((p) => [String(p._id), []]));
+  if (!profiles.length) return out;
+  const rows = await MpesaMerchantProfileEstate.find({ merchantProfileId: { $in: profiles.map((p) => oid(p._id)) } }).session(session || null).lean();
+  for (const m of await annotateMappingEligibility(profiles, rows, { session })) out.get(String(m.merchantProfileId))?.push(m);
   return out;
 }
 
@@ -178,7 +204,7 @@ export async function mpesaSummaryByClient(clientIds, { includeProfiles = false 
     .sort({ createdAt: 1, _id: 1 }).lean();
   const ids = profiles.map((p) => p._id);
   const [evidence, mappings] = includeProfiles
-    ? await Promise.all([ingestionEvidence(ids), mappingsByProfile(ids)])
+    ? await Promise.all([ingestionEvidence(ids), mappingsByProfile(profiles)])
     : [null, null];
   const out = new Map();
   for (const p of profiles) {
@@ -407,13 +433,13 @@ export async function listMpesaIntegrations(q = {}) {
   const [evidence, identity, mappings] = await Promise.all([
     ingestionEvidence(profiles.map((p) => p._id)),
     clientIdentity([...new Set(profiles.map((p) => String(p.clientId)))]),
-    mappingsByProfile(profiles.map((p) => p._id)),
+    mappingsByProfile(profiles),
   ]);
   return {
     items: profiles.map((p) => ({
       ...(identity.get(String(p.clientId)) || { clientId: String(p.clientId) }),
       ...safeMerchantProfile(p, evidence.get(String(p._id)) || {}, mappings.get(String(p._id)) || []),
-      blockers: mpesaBlockers(p, { activeEstateCount: (mappings.get(String(p._id)) || []).filter((m) => m.status === 'ACTIVE').length, config: getCallbackConfig() }),
+      blockers: mpesaBlockers(p, { activeEstateCount: (mappings.get(String(p._id)) || []).filter((m) => m.estateEligible === true).length, config: getCallbackConfig() }),
     })),
     total, page, limit,
   };
