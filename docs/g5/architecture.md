@@ -1138,3 +1138,112 @@ The owner supplied current portal documentation and an executed successful C2B v
 - The documented example transaction type `c2b-pay-bill-debit` is PayBill and must not be accepted as a Buy Goods receipt. Unknown transaction types are quarantined rather than guessed.
 - Pull pagination completion, a Buy Goods Pull transaction-type fixture, the relationship between app-card shortcode `174379` and C2B invocation shortcode `600987`, Pull registration eligibility, callback authentication and callback retry/acknowledgement semantics remain unresolved.
 - C2B URLs were registered in sandbox, but the Render callback gate remains disabled. Do not enable inbound callbacks or G3 posting as part of this parser correction.
+
+
+## 30. G5.5 — C2B-first merchant lifecycle and independent posting gates (23 November 2026, authoritative)
+
+This section is the current target architecture for the merchant-profile lifecycle. It supersedes older assumptions that a merchant must have both callback and Pull capability verified before it can become operational. Historical provider facts remain classified as recorded in docs/provider-contracts/G5_DARAJA_C2B_PULL_EVIDENCE.md.
+
+### 30.1 Split three different questions
+
+The implementation must never collapse these into one green/red status:
+
+1. **Was this merchant registered with Daraja?** Per-operation registration evidence: C2B and Pull have separate state, provider response, timestamps and callback-configuration version.
+2. **Can this channel safely operate?** Per-capability evidence: C2B callback delivery/trust and, independently, Pull registration/query/result recovery.
+3. **May this receipt change tenant finances?** A separate G5/G3 posting decision requiring canonical receipt identity, verified provider evidence, exact attribution and atomic G3 settlement.
+
+The operationalState field represents the primary merchant collection mode, which for the current product is C2B. It must not be calculated as “all available capabilities are VERIFIED”.
+
+### 30.2 Target state machine
+
+Persisted operational states remain DRAFT, NOT_READY, ACTIVE, SUSPENDED. Registration states remain separate for C2B and Pull. Capability states remain separate for callback and Pull.
+
+| Event | From | To | Rules |
+|---|---|---|---|
+| Create profile | none | DRAFT | Configuration only; never call provider and never set capability. |
+| Begin/complete setup assessment | DRAFT | NOT_READY | Explicit audited evaluation; retain unmet requirements. |
+| C2B registration accepted | DRAFT/NOT_READY | unchanged | Store registration evidence only. |
+| C2B callback proof completed | NOT_READY | eligible for explicit ACTIVE transition | Requires exact merchant/environment, safe callback trust, durable inbox and duplicate-safe handling. |
+| Explicit activate | NOT_READY | ACTIVE | Server re-evaluates required C2B readiness atomically/conditionally against observed evidence and config version. |
+| Suspend | ACTIVE/NOT_READY | SUSPENDED | Audited operator action; blocks new collection/posting actions according to policy. |
+| Resume | SUSPENDED | NOT_READY | Re-run current readiness; never blindly restore ACTIVE. |
+| Pull registration/query proof | any non-suspended state | unchanged operationalState | Updates Pull registration/capability only. Pull success does not activate C2B. |
+
+The activation operation must be an authenticated SUPER_ADMIN operation, audited with actor, reason, evidence references and the callback-configuration version evaluated. Stale evidence/config versions must fail closed. The browser can request an action but cannot write operational or capability fields directly.
+
+### 30.3 C2B readiness predicate
+
+For the current C2B-first collection mode, require:
+
+- one exact merchant owner for provider + environment + shortcode; merchant type must match the transaction type;
+- active same-client estate mappings for the estates that will use the channel;
+- configured platform-owned HTTPS callback endpoints and stable config version;
+- C2B v2 registration accepted/reconciled for the current callback-config version;
+- controlled end-to-end sandbox callback observation from the provider simulator to the intended exposed endpoint;
+- durable inbox persistence, exact merchant resolution, correct normalization and acknowledgement-after-persist behavior;
+- duplicate/replay, conflict, unknown merchant and persistence-failure tests;
+- approved callback trust/abuse controls based on documented provider behaviour and observed infrastructure controls.
+
+Until these checks pass, callbackCapability remains UNKNOWN (or NOT_ENABLED where explicitly chosen) and the profile cannot be ACTIVE. A C2B Register URL success alone only updates c2bRegistrationState and its registration evidence.
+
+**Trust boundary caveat:** current provider evidence has not established a Daraja cryptographic signature, HMAC or auth header. BusinessShortCode is not authentication. Do not call callback payloads provider-authenticated or enable money posting from them until the security model is explicitly approved and tested. A compensating design must be evidence-based; TLS, rate limiting, allowlists or obscurity must not be claimed as provider authentication.
+
+### 30.4 Pull recovery is independent and optional
+
+Pull registration/capability must be evaluated separately from C2B. UNKNOWN and NOT_ENABLED are legitimate Pull states for a C2B-only merchant and must not appear as C2B activation blockers.
+
+Pull readiness requires its own evidence: merchant-type and environment eligibility; verified nominated KYC MSISDN; explicit one-time registration outcome; callback-config version for results; query request/response contract; actual Buy Goods row fixture; complete pagination/terminal semantics; durable ingestion; duplicate convergence with C2B; recovery horizon and entitlement. The current PULL_REGISTRATION_ELIGIBILITY map sets PAYBILL and BUY_GOODS_TILL to verified false; no Pull registration or query should be sent until that evidence is updated through review.
+
+The Pull scheduler's selection of ACTIVE + Pull-VERIFIED + accepted registration is a valid separate gate. It does not imply that an ACTIVE merchant must be Pull-enabled.
+
+### 30.5 Separate financial posting gate
+
+The G5 posting predicate must remain stricter than merchant collection readiness. It independently requires:
+
+- G5 posting enabled in the target environment;
+- supported replica-set transactions and required financial/index readiness;
+- provider-supported callback trust or an approved defensible trust design;
+- proven external receipt identity scope and installed migration-controlled unique index;
+- callback/Pull identity convergence and duplicate/concurrency evidence;
+- valid merchant type, exact provider shortcode, client and merchant ownership;
+- exact PayBill reference or Till tenant-link/SMS evidence as applicable;
+- one exact tenant account and eligible tenancy-scoped charges;
+- exact amount, currency and timestamp consistency;
+- G3 settlement through existing accounting/tenant-credit services;
+- one Mongo transaction for all Payment children, PaymentAllocation, ledger/charge projection, credit movements and canonical POSTED state.
+
+A merchant can be C2B ACTIVE while automated posting remains disabled. That state must be visible and explained; do not confuse successful technical intake with money movement.
+
+### 30.6 Required code corrections identified by the review
+
+- Replace mpesaBlockers()'s unconditional requirements for pullCapability VERIFIED and accepted Pull registration. Block only on capabilities required by the selected primary collection mode; for the current mode, that is verified C2B. Report optional Pull gaps separately as recovery limitations.
+- Add server-owned, audited, compare-and-set activation, suspension and resume operations. No current platform route implements this lifecycle. Preserve registration operations as separate provider calls.
+- Correct the frontend headline derivation: a verified Pull capability must not produce a generic CAPABILITY_VERIFIED state that can be mistaken for C2B readiness. Display separate C2B and Pull capability states and an overall C2B readiness explanation.
+- Ensure profile/environment and callback configuration version match at activation and before dispatch/ingestion as applicable. A stale registration snapshot must be re-registered or reconciled, not assumed current.
+- Fail closed on external C2B validation. The current handler accepts all requests despite external validation not being enabled for Tycoon; do not expose it as a working reference-validation feature.
+- Preserve current safe ingestion behaviour for unknown, ambiguous, suspended, wrong-type and conflicting transactions. DRAFT/NOT_READY receipt observations, if persisted for diagnostics, are observations only and never a posting authorization.
+- Keep the canonical identity gate hard-blocked until provider evidence and migration preflight resolve it. Do not make a speculative unique-index choice.
+
+### 30.7 Environment and deployment separation
+
+The two owner-reported profiles mamba (8965322) and Safaricom Sandbox Till (600995) show C2B registration against daraja-sandbox, configuration version d3c06c1df7e7, as of the owner's 22 November 2026 screen. They remain DRAFT with callback and Pull capabilities UNKNOWN. This is not callback test evidence and does not establish production readiness.
+
+All simulator tests must use a dedicated sandbox deployment, disposable replica-set database, isolated callback URL and test-only configuration. Never enable DARAJA_CALLBACKS_ENABLED, G5_MPESA_POSTING_ENABLED, or production provider settings merely to make the dashboard green. Never direct sandbox receipts into real tenant ledgers.
+
+### 30.8 Architecture acceptance tests
+
+1. C2B accepted but no callback observed cannot activate the profile.
+2. C2B callback verified and security-approved may activate without Pull.
+3. Pull UNKNOWN/NOT_ENABLED never blocks a C2B-only activation.
+4. Pull VERIFIED alone never activates or verifies C2B.
+5. Config-version drift invalidates readiness.
+6. Any unresolved registration outcome blocks retry/activation until reconciliation.
+7. Callback replay and C2B/Pull duplicate observations yield one canonical receipt and at most one G3 posting.
+8. Callback with unknown/ambiguous shortcode, wrong merchant type, invalid reference or untrusted source cannot create a financial effect.
+9. Posting remains blocked when canonical identity or accounting gates are false, even with an ACTIVE merchant.
+10. Suspension and resume are audited and cannot restore stale readiness.
+11. Tests run against disposable isolated MongoDB replica-set state; no production data, real payments or provider production calls.
+
+### 30.9 No implementation authorization implied
+
+This architecture amendment records the agreed technical direction and source defects. It does not itself authorize production callback exposure, Pull registration, provider calls, migrations, operational-state mutation, feature-flag changes or G3 posting. The implementation remains phased behind review and controlled sandbox evidence.

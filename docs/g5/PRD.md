@@ -448,3 +448,100 @@ Implemented behind OFF flags: Tenant link + public submission, SMS evidence (dig
 The owner supplied current Daraja portal documentation for C2B v2 and TransactionPull and returned a successful C2B v2 sandbox URL-registration response for shortcode `600987` (`ResponseCode: 00000000`, `ResponseDescription: Success`). The general sandbox app credential card separately displayed shortcode `174379`; the two values must not be silently equated. See `docs/provider-contracts/G5_DARAJA_C2B_PULL_EVIDENCE.md` for provenance and exact request/response details.
 
 The implementation therefore uses C2B v2 by default and parses the documented Pull POST response envelope and lower-case row fields. PayBill Pull rows and unknown transaction types remain non-postable. Pull registration/merchant eligibility, a real Buy Goods Pull row fixture, pagination completion, callback authentication and callback retry/acknowledgement semantics remain release gates. Sandbox URL registration success does not prove callback delivery or authorize callback exposure.
+
+
+## 24. G5.5 — C2B-first merchant readiness and sandbox proof (23 November 2026, authoritative)
+
+This addendum supersedes any earlier wording that makes TransactionPull registration or Pull capability a prerequisite for ordinary C2B collection. It does not erase historical provider evidence or authorize callback exposure, migrations, production registration, or G3 posting.
+
+### 24.1 Product decision
+
+- **C2B confirmation is the primary payment-collection path.** A merchant intended to collect through C2B must be able to become operational when its C2B path is proven, even when Pull is unsupported, unregistered, disabled, or unavailable.
+- **Pull is an optional recovery/reconciliation capability.** It may improve recovery of missed provider observations, but it is not a prerequisite for accepting C2B confirmations or for the merchant's C2B operational state.
+- **Collection readiness and automatic financial posting are separate.** An ACTIVE C2B merchant means its configured C2B intake path has met the approved operational checks. It does not mean every observed callback is authenticated, every receipt is attributable, canonical receipt identity is settled, or G3 posting is enabled.
+- **A successful Register URL response proves registration acceptance only.** It does not prove callback delivery, callback trust, durable ingestion, duplicate safety, tenant attribution, or successful rent settlement.
+- Merchant creation remains non-operational. Profile creation creates configuration only and starts in DRAFT.
+
+### 24.2 State meanings and transitions
+
+The persisted operational state remains DRAFT, NOT_READY, ACTIVE and SUSPENDED; capability and provider-registration fields remain independent dimensions.
+
+| State | Required meaning |
+|---|---|
+| DRAFT | Profile exists; onboarding/evidence collection has not established readiness. |
+| NOT_READY | Setup has been attempted or reviewed, but one or more C2B primary-path requirements are incomplete or failed. |
+| ACTIVE | C2B collection intake has passed its approved readiness and trust checks. Pull may remain UNKNOWN or NOT_ENABLED. |
+| SUSPENDED | An operator or safety control has deliberately stopped operational use; registration history and receipt history are retained. |
+
+Required transitions must be explicit, audited and server-enforced. Creation sets DRAFT. Registration calls update only their own registration evidence. A successful registration call must never silently set capability or operational state. A controlled activation operation must evaluate current evidence and callback-config version; a profile with an unresolved/uncertain registration, ambiguous shortcode owner, missing active estate mapping, unproven callback trust, or failed C2B verification cannot become ACTIVE. Suspension must block new financial posting and new collection use according to the approved cut-off policy without deleting historical receipts.
+
+### 24.3 C2B primary-path readiness
+
+The C2B capability may become VERIFIED only after the evidence bundle establishes all of the following for the exact merchant shortcode and environment:
+
+1. The shortcode's legal/business identity, merchant type and ownership are confirmed; the configured Daraja environment is the intended one.
+2. The current platform-owned callback configuration is valid, HTTPS, exposed in the intended non-production test environment, and its version is recorded with the registration attempt.
+3. C2B v2 URL registration is ACCEPTED or ALREADY_REGISTERED, with provider evidence retained. An UNCERTAIN attempt must be reconciled before retry.
+4. A controlled sandbox confirmation reaches the intended callback route for that exact shortcode.
+5. The callback is durably persisted in the ingestion inbox; merchant resolution is exact and unambiguous; the normalizer produces the expected provider transaction type and fields.
+6. Replay/duplicate delivery, conflicting observations, persistence failures and unknown shortcodes have tested deterministic outcomes. A callback acknowledgment must follow the documented durable-persistence rule.
+7. The callback trust boundary has an approved provider-supported authentication or compensating abuse-control design. A shortcode in a JSON body is a lookup key, not authentication. No claim of cryptographic provider authentication may be made without evidence.
+8. The callback configuration version and environment used by the test match the profile's stored registration evidence.
+
+A C2B URL registration result without an end-to-end callback test remains C2B registration ACCEPTED with callback capability UNKNOWN; it must not be labelled operational.
+
+### 24.4 Pull is optional and separately gated
+
+Pull remains UNKNOWN until it is proven, or may be explicitly NOT_ENABLED when the product/operator chooses not to use it. Neither state blocks C2B activation.
+
+Pull may be enabled only when official provider evidence or a controlled permitted environment proves eligibility for that exact merchant type/environment, nominated KYC MSISDN requirements are satisfied, registration is reconciled, query/result ingestion is tested, pagination completion is understood, and callback/Pull observations converge to one canonical receipt without duplicate posting. The current code's eligibility map intentionally sets both PAYBILL and BUY_GOODS_TILL to unverified; no Pull request is authorized by this addendum. Saving an encrypted nominated MSISDN is data capture only, not eligibility or registration.
+
+### 24.5 Separate G3 posting release gate
+
+Even after C2B is operational, automated rent posting remains disabled until all independent posting gates are satisfied:
+
+- callback trust and receipt provenance are sufficient for a financial claim;
+- canonical external receipt identity and the corresponding unique index are proven by provider evidence and migration preflight;
+- duplicate/replay/concurrent callback and callback-versus-Pull convergence tests pass;
+- merchant, client, estate, Tenant/Tenancy and collection-reference/evidence attribution resolves exactly;
+- exact amount/currency/time and merchant-type checks pass;
+- posting uses the existing G3 accounting/credit service in one transaction, with all child Payments, allocations, credit movements and receipt state committed atomically;
+- required financial indexes, replica-set transactions, audit and deployment flags are verified.
+
+An ingested provider observation is not a Payment. SMS evidence is not a provider receipt. A confirmed C2B registration is not a posted rent payment.
+
+### 24.6 Current owner-reported sandbox profile evidence (22 November 2026)
+
+The owner-provided Superadmin view reports two Buy Goods Till profiles against shared platform callback configuration daraja-sandbox, version d3c06c1df7e7:
+
+| Display name | Shortcode | C2B registration | Callback capability | Pull capability | Pull registration |
+|---|---:|---|---|---|---|
+| mamba | 8965322 | Confirmed | UNKNOWN | UNKNOWN | Not registered |
+| Safaricom Sandbox Till | 600995 | Confirmed | UNKNOWN | UNKNOWN | Not registered |
+
+The view reports successful C2B registration attempts on 22 November 2026 (mamba 14:21:22–14:21:24; Sandbox Till 14:55:21–14:55:23, as displayed). Mamba has a masked nominated number captured; the Sandbox Till does not. These are owner-provided UI observations, not independent Safaricom portal verification or proof of callback delivery. The exact relationship between these profiles and historical shortcodes 600987 and 174379 is not established; do not equate or merge them.
+
+Both profiles correctly remain non-operational until callback capability and the trust boundary are proven. Their Pull status must not be used to block C2B readiness.
+
+### 24.7 Required acceptance scenarios
+
+- C2B accepted + no callback observed => registration confirmed, capability UNKNOWN, not ACTIVE.
+- C2B accepted + verified callback path + safe ingress evidence => C2B capability can become VERIFIED and profile can be explicitly activated without Pull registration.
+- Pull UNKNOWN or NOT_ENABLED + C2B verified => C2B profile may be ACTIVE.
+- Pull VERIFIED without C2B readiness => must not imply C2B readiness or enable C2B tenant collection.
+- Uncertain registration, stale callback-config version, ambiguous shortcode ownership, inactive estate mapping or callback trust failure => activation rejected.
+- A callback replay creates no second canonical receipt or financial effect.
+- An ingested callback never posts G3 while canonical receipt identity/posting gates are closed.
+- Pull eligibility false => no HTTP request, no registration-state mutation and no operational-state mutation.
+- Suspension prevents new posting while preserving auditable history.
+- All sandbox tests use disposable isolated persistence; no simulated receipt may enter a real tenant's rent account.
+
+### 24.8 Source defects to correct in implementation
+
+The current backend has no platform route for an explicit merchant activation/suspension lifecycle. mpesaBlockers() currently requires both callback and Pull capabilities to be VERIFIED and both registrations accepted, which makes C2B-only operation impossible while Pull eligibility is deliberately false. Replace this generic gate with capability-specific readiness rules. Do not solve it by weakening receipt verification or by making the browser authoritative.
+
+The current handleC2bValidation() returns Accepted for every request, while provider evidence says external validation has not been enabled for Tycoon merchants. Keep that endpoint disabled or fail closed until Safaricom enablement, validation semantics, reference rules and security controls are verified. External validation is a separate opt-in feature, not a prerequisite for C2B confirmation.
+
+The current Pull job also records pagination as blocked and cannot be described as a complete recovery mechanism. Keep the job gated until pagination/terminal-page semantics and a real Buy Goods Pull fixture are established.
+
+No application code, profile state, provider configuration, database, migration or feature flag was changed by this documentation update.

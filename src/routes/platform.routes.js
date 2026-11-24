@@ -49,6 +49,11 @@ export const createMpesaProfileSchema = z.object({
 export const estateMappingSchema = z.object({ estateId: objectId('estate id') }).strict();
 export const pullNumberSchema = z.object({ msisdn: z.string().trim().min(9).max(16) }).strict();
 export const issueReferenceSchema = z.object({ tenancyId: objectId('tenancy id') }).strict();
+// Lifecycle: expectedRevision is mandatory (stale-update protection). No state is accepted from the caller.
+const revisionField = z.number().int().min(0);
+export const lifecycleActivateSchema = z.object({ expectedRevision: revisionField, reason: z.string().trim().max(500).optional() }).strict();
+export const lifecycleSuspendSchema = z.object({ expectedRevision: revisionField, reason: z.string().trim().min(3).max(500) }).strict();
+export const lifecycleResumeSchema = z.object({ expectedRevision: revisionField, reason: z.string().trim().max(500).optional() }).strict();
 export const reconcileSchema = z.object({ outcome: z.enum(['NOT_REGISTERED', 'REGISTERED']) }).strict();
 
 router.get('/overview', platformController.overview);
@@ -74,6 +79,10 @@ router.put('/clients/:clientId/mpesa-profiles/:profileId/pull-number', validate(
 router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/c2b', platformController.registerMpesaC2b);
 router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/pull', platformController.registerMpesaPull);
 router.post('/clients/:clientId/mpesa-profiles/:profileId/registrations/:kind/reconcile', validate(reconcileSchema), platformController.reconcileMpesaRegistration);
+
+router.post('/clients/:clientId/mpesa-profiles/:profileId/lifecycle/activate', validate(lifecycleActivateSchema), platformController.activateMpesaProfile);
+router.post('/clients/:clientId/mpesa-profiles/:profileId/lifecycle/suspend', validate(lifecycleSuspendSchema), platformController.suspendMpesaProfile);
+router.post('/clients/:clientId/mpesa-profiles/:profileId/lifecycle/resume', validate(lifecycleResumeSchema), platformController.resumeMpesaProfile);
 
 router.get('/clients/:clientId/mpesa-profiles/:profileId/references', platformController.listMpesaReferences);
 router.post('/clients/:clientId/mpesa-profiles/:profileId/references', validate(issueReferenceSchema), platformController.issueMpesaReference);

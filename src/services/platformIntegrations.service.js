@@ -17,7 +17,11 @@ import { BankConnection } from '../models/BankConnection.js';
 import { BankAccount } from '../models/BankAccount.js';
 import { MpesaMerchantProfile } from '../models/MpesaMerchantProfile.js';
 import { MpesaIngestionEvent } from '../models/MpesaIngestionEvent.js';
+import { MpesaMerchantProfileEstate } from '../models/MpesaMerchantProfileEstate.js';
+import { Estate } from '../models/Estate.js';
+import { getCallbackConfig } from './mpesa/darajaCallbackConfig.service.js';
 import { PULL_REGISTRATION_ELIGIBILITY } from './mpesa/daraja.constants.js';
+import { c2bReadinessBlockers, pullAdvisories, lifecycleAvailability } from './mpesa/mpesaReadiness.js';
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 export const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -93,7 +97,17 @@ export async function bankingSummaryByClient(clientIds) {
 
 // Allowlisted merchant view. Never includes the Pull nominated number (only its mask), encrypted
 // material, provider credentials or raw provider bodies.
-export function safeMerchantProfile(p, evidence, mappings) {
+export function safeMerchantProfile(p, evidence, mappings, clientActive = false) {
+  // Mappings are required so every response carries an authoritative lifecycleAvailability; the
+  // UI never has to guess. Callers must load them (see mappingsByProfile).
+  if (!Array.isArray(mappings)) throw new Error('safeMerchantProfile requires the profile estate mappings');
+  // The single definition of an eligible estate (see annotateMappingEligibility): ACTIVE mapping to an
+  // existing, active estate of the SAME client. Un-annotated mappings count as ineligible (fail closed).
+  const ctx = {
+    activeEstateCount: mappings.filter((m) => m.status === 'ACTIVE' && m.estateEligible === true).length,
+    clientActive: clientActive === true,
+    config: getCallbackConfig(),
+  };
   const reg = (r) => (r ? {
     environment: r.environment || null, configId: r.configId || null, configVersion: r.configVersion || null,
     attemptedAt: r.attemptedAt || null, succeededAt: r.succeededAt || null,
@@ -112,15 +126,58 @@ export function safeMerchantProfile(p, evidence, mappings) {
     pullRegistrationState: p.pullRegistrationState,
     c2bRegistration: reg(p.c2bRegistration),
     pullRegistration: reg(p.pullRegistration),
+    lifecycleRevision: p.lifecycleRevision ?? 0,
+    lifecycle: {
+      activatedAt: p.lifecycle?.activatedAt || null,
+      suspendedAt: p.lifecycle?.suspendedAt || null,
+      suspensionReason: p.lifecycle?.suspensionReason || null,
+      resumedAt: p.lifecycle?.resumedAt || null,
+    },
+    // C2B/callback readiness and Pull are reported separately; Pull never blocks C2B.
+    readinessBlockers: c2bReadinessBlockers(p, ctx),
+    pullAdvisories: pullAdvisories(p),
+    lifecycleAvailability: lifecycleAvailability(p, ctx),
     pullNominatedNumber: { captured: Boolean(p.pullNominatedMsisdnMasked), masked: p.pullNominatedMsisdnMasked || null },
     lastPullRegisteredAt: p.lastPullRegisteredAt || null,
     // Registration is blocked until provider evidence exists for this merchant type (fail closed).
     pullRegistrationEligible: Boolean(PULL_REGISTRATION_ELIGIBILITY[p.merchantType]?.verified),
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
-    ...(mappings ? { estates: mappings.map((m) => ({ estateId: String(m.estateId), status: m.status })) } : {}),
+    estates: mappings.map((m) => ({ estateId: String(m.estateId), status: m.status, eligible: m.status === 'ACTIVE' && m.estateEligible === true })),
     ...(evidence !== undefined ? { ingestionEvidence: evidence } : {}),
   };
+}
+
+/**
+ * THE definition of an eligible estate for readiness, shared by every read model and by the
+ * lifecycle endpoints: the mapping is ACTIVE, belongs to the profile's client, and its Estate exists,
+ * is active and belongs to that same client. Adds `estateEligible` to each mapping row. Two queries
+ * total regardless of how many profiles/mappings (no N+1). Pass `session` inside a transaction.
+ */
+export async function annotateMappingEligibility(profiles, rows, { session } = {}) {
+  const estateIds = [...new Set(rows.map((m) => String(m.estateId)))];
+  const estates = estateIds.length
+    ? await Estate.find({ _id: { $in: estateIds.map(oid) }, isActive: true }).select('_id clientId').session(session || null).lean()
+    : [];
+  const estateClient = new Map(estates.map((e) => [String(e._id), String(e.clientId)]));
+  const profileClient = new Map(profiles.map((p) => [String(p._id), String(p.clientId)]));
+  return rows.map((m) => {
+    const client = profileClient.get(String(m.merchantProfileId));
+    return {
+      ...m,
+      estateEligible: m.status === 'ACTIVE' && client !== undefined
+        && String(m.clientId) === client && estateClient.get(String(m.estateId)) === client,
+    };
+  });
+}
+
+/** Annotated estate mappings for many profiles (profile docs, needing _id and clientId), keyed by profile id. */
+export async function mappingsByProfile(profiles, { session } = {}) {
+  const out = new Map(profiles.map((p) => [String(p._id), []]));
+  if (!profiles.length) return out;
+  const rows = await MpesaMerchantProfileEstate.find({ merchantProfileId: { $in: profiles.map((p) => oid(p._id)) } }).session(session || null).lean();
+  for (const m of await annotateMappingEligibility(profiles, rows, { session })) out.get(String(m.merchantProfileId))?.push(m);
+  return out;
 }
 
 /** Last received G5 ingestion event per merchant profile (safe: timestamps/state/channel only). */
@@ -149,7 +206,15 @@ async function ingestionEvidence(profileIds) {
 export async function mpesaSummaryByClient(clientIds, { includeProfiles = false } = {}) {
   const profiles = await MpesaMerchantProfile.find({ clientId: { $in: clientIds.map(oid) } })
     .sort({ createdAt: 1, _id: 1 }).lean();
-  const evidence = includeProfiles ? await ingestionEvidence(profiles.map((p) => p._id)) : null;
+  const ids = profiles.map((p) => p._id);
+  const [evidence, mappings, clients] = includeProfiles
+    ? await Promise.all([
+      ingestionEvidence(ids),
+      mappingsByProfile(profiles),
+      Client.find({ _id: { $in: clientIds.map(oid) } }).select('_id isActive').lean(),
+    ])
+    : [null, null, null];
+  const clientActivity = new Map((clients || []).map((c) => [String(c._id), c.isActive === true]));
   const out = new Map();
   for (const p of profiles) {
     const k = String(p.clientId);
@@ -161,7 +226,12 @@ export async function mpesaSummaryByClient(clientIds, { includeProfiles = false 
     s.operationalStates[p.operationalState] = (s.operationalStates[p.operationalState] || 0) + 1;
     s.callbackCapabilities[p.callbackCapability] = (s.callbackCapabilities[p.callbackCapability] || 0) + 1;
     s.pullCapabilities[p.pullCapability] = (s.pullCapabilities[p.pullCapability] || 0) + 1;
-    if (includeProfiles) s.profiles.push(safeMerchantProfile(p, evidence.get(String(p._id)) || {}));
+    if (includeProfiles) s.profiles.push(safeMerchantProfile(
+      p,
+      evidence.get(String(p._id)) || {},
+      mappings.get(String(p._id)) || [],
+      clientActivity.get(String(p.clientId)) === true,
+    ));
   }
   if (!includeProfiles) for (const s of out.values()) delete s.profiles;
   return out;
@@ -345,15 +415,14 @@ export async function listBankingIntegrations(q = {}) {
   };
 }
 
-/** Known blockers derived ONLY from stored states (never from guesses). */
-export function mpesaBlockers(p) {
+/**
+ * Known C2B blockers derived ONLY from stored states (never from guesses). Pull state is NOT a
+ * blocker: Pull is optional and reported separately via pullAdvisories().
+ */
+export function mpesaBlockers(p, ctx = {}) {
   const b = [];
   if (p.operationalState !== 'ACTIVE') b.push(`OPERATIONAL_STATE_${p.operationalState}`);
-  if (p.callbackCapability !== 'VERIFIED') b.push(`CALLBACK_${p.callbackCapability}`);
-  if (p.pullCapability !== 'VERIFIED') b.push(`PULL_${p.pullCapability}`);
-  if (!['ACCEPTED', 'ALREADY_REGISTERED'].includes(p.c2bRegistrationState)) b.push(`C2B_REGISTRATION_${p.c2bRegistrationState}`);
-  if (!['ACCEPTED', 'ALREADY_REGISTERED'].includes(p.pullRegistrationState)) b.push(`PULL_REGISTRATION_${p.pullRegistrationState}`);
-  return b;
+  return [...b, ...c2bReadinessBlockers(p, ctx)];
 }
 
 /** Platform-wide M-PESA merchant profiles with independent callback/Pull state. */
@@ -375,15 +444,16 @@ export async function listMpesaIntegrations(q = {}) {
     MpesaMerchantProfile.find(filter).sort({ createdAt: -1, _id: 1 }).skip(skip).limit(limit).lean(),
     MpesaMerchantProfile.countDocuments(filter),
   ]);
-  const [evidence, identity] = await Promise.all([
+  const [evidence, identity, mappings] = await Promise.all([
     ingestionEvidence(profiles.map((p) => p._id)),
     clientIdentity([...new Set(profiles.map((p) => String(p.clientId)))]),
+    mappingsByProfile(profiles),
   ]);
   return {
     items: profiles.map((p) => ({
       ...(identity.get(String(p.clientId)) || { clientId: String(p.clientId) }),
-      ...safeMerchantProfile(p, evidence.get(String(p._id)) || {}),
-      blockers: mpesaBlockers(p),
+      ...safeMerchantProfile(p, evidence.get(String(p._id)) || {}, mappings.get(String(p._id)) || []),
+      blockers: mpesaBlockers(p, { activeEstateCount: (mappings.get(String(p._id)) || []).filter((m) => m.estateEligible === true).length, config: getCallbackConfig() }),
     })),
     total, page, limit,
   };

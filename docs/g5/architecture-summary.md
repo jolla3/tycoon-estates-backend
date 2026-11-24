@@ -1,5 +1,50 @@
 # G5 — Architecture Summary and Engineering Handoff
 
+## Current authoritative handoff — G5.5 C2B-first readiness (23 November 2026)
+
+**Current position:** M-PESA has implemented profile creation, shared callback configuration, C2B/Pull registration attempts, durable ingress, canonical receipt records and gated posting code. The end-to-end C2B collection-to-G3 path is NOT yet proven operational. Do not describe M-PESA as production-ready.
+
+### Locked direction
+
+- C2B is the primary collection path. Pull is optional recovery/reconciliation and must not block C2B activation.
+- Profile creation starts DRAFT and changes configuration only. C2B registration acceptance updates registration evidence only; it does not verify callback delivery or set ACTIVE.
+- operationalState=ACTIVE requires explicit audited server-side activation after exact-shortcode C2B callback delivery, safe callback trust, durable ingress, correct normalization, duplicate handling and current callback-config evidence pass.
+- C2B operational readiness is separate from G3 automatic posting. Posting stays blocked by callback trust, canonical receipt identity/index, exact attribution, transaction/idempotency, database and accounting gates.
+- PULL UNKNOWN or NOT_ENABLED is a normal state for a C2B-only merchant. Pull is enabled only after merchant/environment eligibility, nominated KYC number, registration, query, actual Buy Goods row and pagination/reconciliation evidence are proven.
+- The callback's shortcode is a lookup key, not authentication. The current provider evidence does not establish a Daraja signature/HMAC/auth header. External C2B validation is not enabled, and the current handler's unconditional Accept response is a defect to fix before exposure.
+
+### Current profile evidence supplied by owner
+
+As shown in the Superadmin UI on 22 November 2026, both profiles have C2B URL registration confirmed under shared daraja-sandbox callback configuration version d3c06c1df7e7:
+- mamba, Buy Goods Till 8965322: callback UNKNOWN, Pull UNKNOWN, Pull not registered; masked nominated number captured.
+- Safaricom Sandbox Till, Buy Goods Till 600995: callback UNKNOWN, Pull UNKNOWN, Pull not registered; nominated number not captured.
+
+These screen values are owner-reported registration evidence, not proof of a delivered callback or a live collection. Do not equate these shortcodes with historical 600987 or 174379 without provider evidence.
+
+### Current source blockers
+
+1. mpesaBlockers() currently treats Pull capability and Pull registration as mandatory for every profile. This is inconsistent with the C2B-first product and with the backend's own fail-closed Pull eligibility map.
+2. There is no platform API operation for explicit activate/suspend/resume.
+3. handleC2bValidation() accepts every request even though external validation is not enabled. Keep the route disabled/fail-closed until provider enablement and validation behaviour are verified.
+4. The callback routes are feature-gated; earlier evidence records the deployed callback as not exposed. No owner evidence supplied here proves an end-to-end callback simulation for either current profile.
+5. Canonical external receipt identity remains hardcoded false; automatic G3 posting remains blocked.
+6. Pull pagination terminal semantics remain unresolved; the current scheduled worker does not implement a proven full-page sequence.
+
+### Required delivery order
+
+G5.5: implement capability-specific readiness and audited server-owned lifecycle transitions, plus tests proving Pull absence does not block C2B.
+G5.6: controlled sandbox callback proof for each exact profile/shortcode; verify durable inbox, replay/conflict handling and exact merchant resolution.
+G5.7: resolve callback trust and canonical receipt identity, then implement the migration-controlled index only after duplicate preflight and provider evidence.
+G5.8: enable G3 posting only after exact attribution, G3 tenant credit, atomicity, transaction indexes and replica-set tests pass.
+G5.9: separately finish optional Pull eligibility, registration, query, pagination and C2B convergence.
+
+### Hard holds
+
+No production callback exposure, production provider requests, Pull registration, real-tenant sandbox posting, migrations, or financial feature-flag changes are authorized by this documentation update. No code or database state has been changed.
+
+---
+
+
 **State (2026-11-14, `main` at `5a96f124f45b7f556fc467eb65dbf1bc87413f88`):** G5.3 ingestion and Tenant collection code is published; this patch adds the owner-supplied C2B v2/Pull contract corrections. Not production ready; callback exposure and money-moving capabilities remain gated.
 
 ### Operational handoff (short)

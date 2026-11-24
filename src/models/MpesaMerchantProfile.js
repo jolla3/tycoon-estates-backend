@@ -40,6 +40,22 @@ const MpesaMerchantProfileSchema = new Schema(
       default: 'DRAFT',
       index: true,
     },
+    // Optimistic-concurrency token for lifecycle operations (activate/suspend/resume). Missing on
+    // legacy documents; treated as 0. Incremented only by the lifecycle service.
+    lifecycleRevision: { type: Number, default: 0, min: 0 },
+    // Evidence of the last explicit Superadmin lifecycle action. Registration never writes this.
+    lifecycle: {
+      type: new Schema({
+        activatedAt: { type: Date, default: null },
+        activatedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+        suspendedAt: { type: Date, default: null },
+        suspendedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+        suspensionReason: { type: String, default: null },
+        resumedAt: { type: Date, default: null },
+        resumedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+      }, { _id: false }),
+      default: () => ({}),
+    },
     c2bRegistrationState: {
       type: String,
       enum: ['NONE', 'REQUESTED', 'ACCEPTED', 'ALREADY_REGISTERED', 'REJECTED', 'UNCERTAIN'],
@@ -56,6 +72,8 @@ const MpesaMerchantProfileSchema = new Schema(
         environment: { type: String, default: null },
         configId: { type: String, default: null },
         configVersion: { type: String, default: null },
+        shortCode: { type: String, default: null },
+        merchantType: { type: String, default: null },
         confirmationUrl: { type: String, default: null },
         validationUrl: { type: String, default: null },
         responseType: { type: String, default: null },
