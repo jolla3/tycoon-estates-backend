@@ -104,7 +104,7 @@ A future merchant withdrawal/bank-credit reconciliation is a separate merchant-s
 ### FR-01 — Merchant configuration and scope
 
 - A merchant profile is separate from G4 bank connections and bank credentials.
-- Store the actual customer-facing Till identifier separately from Store Number, Head Office number, Notification Number, Nominated Number, and any other provider identity fields.
+- Store the actual customer-facing Till identifier as the merchant `ShortCode`, separately from Store Number, Head Office number, Notification Number, and Nominated Number. In the supplied Pull contract, `NominatedNumber` is the Safaricom MSISDN associated with the organization account: it is sent for the one-time Pull registration only. C2B registration/notifications and Pull transaction queries are scoped by `ShortCode`; the nominated MSISDN is not a second Till number.
 - The profile must carry an explicit client ownership boundary and an explicit allowed estate/store mapping.
 - Do not assume one Till equals one estate, or that one Till can safely serve multiple estates. The supported mapping must be verified against the client's actual Safaricom account hierarchy and transaction payloads before automatic posting is enabled.
 - Record sandbox/live enablement and callback/pull registration/readiness independently. A configured profile is not necessarily an operational profile.
@@ -137,11 +137,12 @@ A future merchant withdrawal/bank-credit reconciliation is a separate merchant-s
 ### FR-04 — SMS evidence submission
 
 - Accept the complete M-PESA confirmation SMS. Do not accept a receipt number alone as equivalent evidence for the automatic flow.
-- Parse receipt number, amount, transaction time, merchant/Till fields where present, payer name/phone where present, and parser version.
-- Store raw SMS only encrypted and only for a specifically approved retention period. The retention period and authorized visibility are production blockers, not developer guesses.
-- Store a digest and normalized allowlisted fields for reconciliation. A digest alone is not a substitute for raw evidence when dispute policy requires the original SMS.
-- Treat all submitted content and parsed fields as untrusted until matched to Daraja.
-- Deterministic parser only. Unsupported, truncated, malformed, or ambiguous templates must be rejected or placed in review, not heuristically parsed.
+- Parse the transaction-bearing core: receipt number, payment amount, transaction date/time, and the merchant description where present. The SMS merchant description is descriptive evidence only; it never replaces the configured Safaricom ShortCode/Till identity.
+- Use exact, versioned deterministic templates. Allow only explicitly recognized informational suffixes. `BUY_GOODS_PAID_V2` recognizes the daily transaction-limit sentence and the `https://saf.cx/<token>` balances link after the transaction-cost field; neither suffix value is payment identity or stored as a parsed field. Do not follow or fetch the link. Unknown trailing text remains unsupported until a sanitized real capture establishes a new template.
+- When raw-message retention is approved, encrypt the exact submitted text, preserving its original whitespace and line breaks. A whitespace-canonicalized digest may be used for duplicate detection, but must never replace the retained original evidence. The retention period and authorized visibility remain production blockers, not developer guesses.
+- Store only a digest and normalized allowlisted transaction fields for reconciliation. A digest alone is not a substitute for raw evidence when dispute policy requires the original SMS.
+- Treat all submitted content and parsed fields as untrusted until matched to Daraja. A successful parse is not proof of payment.
+- Unsupported, truncated, malformed, ambiguous, or contradictory transaction cores must be rejected or placed in review, not heuristically parsed. Multiple confirmation messages are always ambiguous.
 - Repeated submission of the same receipt/evidence must be idempotent.
 - Third-party payer phone/name may differ from the tenant's details. Do not reject solely for that reason.
 
@@ -283,7 +284,7 @@ The following must be resolved before the relevant implementation slice is allow
 | G5-B01 | Actual merchant hierarchy: whether this Till maps to one estate, several estates, or multiple Store identities; exact shortcode/Till/Store/Head Office/Notification/Nominated semantics | Determines transaction ownership and whether a Till receipt can map to the correct profile/store | Disable automatic posting for ambiguous merchant scope. |
 | G5-B02 | Authenticated Daraja sandbox contract for callback registration, callback payload, callback authentication/acknowledgment, Pull registration/query methods and payloads, pagination and response schema | Prevents invented endpoints, fields, signatures, or success semantics | Owner supplied portal evidence now establishes C2B v2 registration and Pull POST query/envelope fields; callback authentication, Pull merchant eligibility, Buy Goods Pull type, pagination completion and callback acknowledgement/retry details remain blocked. |
 | G5-B03 | Exact merchant enablement for both callback and Pull Transactions on the real Buy Goods Till, including any Safaricom onboarding or production approval | A generic API guide does not prove a merchant can use the capability | Profile remains not operational. |
-| G5-B04 | Timestamp semantics and tolerance, established with actual SMS and Daraja fixtures | Prevents false matches and false rejections | Timestamp conflict or unsupported precision goes to review; no arbitrary tolerance. |
+| G5-B04 | SMS date order/timezone/precision and the matching tolerance, established by correlating the same real receipt in an SMS capture and a Daraja C2B record | Prevents false matches and false rejections | Keep the current DD/MM/YY parser interpretation and existing ten-minute check explicitly provisional; date conflicts go to review. The owner-supplied `5/9/26` sample and the existing test's `20260509182900` value must not be assumed to describe the same date until confirmed against the provider record. |
 | G5-B05 | Raw SMS and payer PII retention period, authorized visibility, dispute hold and deletion policy | Personal financial data requires a deliberate retention decision | Store only what is necessary, encrypted; do not enable production until the owner-approved policy is documented. |
 | G5-B06 | G3 implementation of Tenant-level carried-forward credit for multi-unit combined accounts | Product rule is fixed: excess remains the Tenant's money and reduces future combined rent due within the same client/Estate. Current G3 does not pool credit across Tenancies. | Keep excess in an auditable G3 Tenant-account credit mechanism; never drop it, refund it automatically, or pin it to an arbitrary House. |
 | G5-B07 | Criteria and evidence source for verifying historical ledger coverage before a closed link becomes SETTLED | Current summaries may expose `historicalCoverage: 'UNVERIFIED'` | Keep link `ARREARS_ONLY`/review; never auto-close from a zero projection. |

@@ -16,6 +16,14 @@ describe('submission acceptance fence contract', () => {
     expect(src).toContain('acceptedAt');
   });
 
+  test('duplicate digest normalization never replaces the exact encrypted submitted evidence', () => {
+    const src = readFileSync(join(here, '../../../src/services/mpesa/mpesaSubmission.service.js'), 'utf8');
+    expect(src).toContain('const normalized = canonicalText(text);');
+    expect(src).toContain('const digest = evidenceDigest(normalized);');
+    expect(src).toContain('sealEnvelope(text,');
+    expect(src).not.toContain('sealEnvelope(normalized,');
+  });
+
   test('link model exposes submissionRevision', () => {
     const src = readFileSync(join(here, '../../../src/models/MpesaSubmissionLink.js'), 'utf8');
     expect(src).toContain('submissionRevision');
