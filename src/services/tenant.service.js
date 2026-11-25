@@ -19,7 +19,7 @@ import { tenancyService } from './tenancy.service.js';
 import { smsService } from './sms.service.js';
 import { formatRegistrationPlanText, formatSmsDisplayLabel } from './smsTemplates.js';
 import { mpesaSubmissionLinkService } from './mpesa/mpesaSubmissionLink.service.js';
-import { protectedSmsHistoryPreview } from './g5ProtectedSms.service.js';
+import { protectedSmsHistoryDetails } from './g5ProtectedSms.service.js';
 import { resolveRegistrationBillingPlan } from './rent.service.js';
 import { logger } from '../config/logger.js';
 import { generateBearerToken } from '../utils/g5Token.js';
@@ -362,19 +362,23 @@ export const tenantService = {
         balanceCents: c.balanceCents,
         status: c.status,
       })),
-      smsHistory: sms.map((m) => ({
-        _id: m._id,
-        phoneNumber: m.phoneNumber,
-        message: m.deliveryMode === 'G5_PROTECTED'
-          ? protectedSmsHistoryPreview(m)
-          : m.message,
-        status: m.status,
-        failureReason: m.failureReason || null,
-        type: m.type,
-        deliveryMode: m.deliveryMode || 'STANDARD',
-        createdAt: m.createdAt,
-        sentAt: m.sentAt,
-      })),
+      smsHistory: sms.map((m) => {
+        const protectedDetails = m.deliveryMode === 'G5_PROTECTED'
+          ? protectedSmsHistoryDetails(m)
+          : null;
+        return {
+          _id: m._id,
+          phoneNumber: protectedDetails?.phoneNumber ?? m.phoneNumber,
+          message: protectedDetails?.message ?? m.message,
+          status: m.status,
+          failureReason: m.failureReason || null,
+          type: m.type,
+          deliveryMode: m.deliveryMode || 'STANDARD',
+          dispatchMode: m.dispatchMode || 'ENABLED',
+          createdAt: m.createdAt,
+          sentAt: m.sentAt,
+        };
+      }),
       activity,
     };
   },

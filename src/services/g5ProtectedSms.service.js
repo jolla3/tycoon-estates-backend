@@ -74,9 +74,14 @@ export function buildProtectedSmsAad({
   return parts.join(':');
 }
 
-/** Return a readable history preview without disclosing the protected link or token. */
-export function protectedSmsHistoryPreview(row) {
-  if (!row?.payloadEnvelope) return 'Protected message content unavailable.';
+/**
+ * Decrypt the actual SMS only for a caller-scoped history read.
+ * The envelope remains encrypted at rest; history must show the exact message
+ * (including the payment URL) so an operator can verify what the tenant receives.
+ */
+export function protectedSmsHistoryDetails(row) {
+  const unavailable = { phoneNumber: '[protected]', message: 'Protected message content unavailable.' };
+  if (!row?.payloadEnvelope) return unavailable;
   try {
     const aad = buildProtectedSmsAad({
       messageId: row._id,
@@ -90,15 +95,16 @@ export function protectedSmsHistoryPreview(row) {
       idempotencyKey: row.idempotencyKey,
     });
     const payload = JSON.parse(openEnvelope(row.payloadEnvelope, aad));
-    if (typeof payload.body !== 'string' || !payload.body.trim()) {
-      return 'Protected message content unavailable.';
-    }
-    return payload.body
-      .replace(/https?:\/\/[^\s]+?#t=[A-Za-z0-9_-]{43}/gi, '[private payment link]')
-      .replace(/#t=[A-Za-z0-9_-]{43}/gi, '#t=[redacted]');
+    if (typeof payload.body !== 'string' || !payload.body.trim()
+      || typeof payload.phone !== 'string' || !payload.phone.trim()) return unavailable;
+    return { phoneNumber: payload.phone, message: payload.body };
   } catch {
-    return 'Protected message content unavailable.';
+    return unavailable;
   }
+}
+
+export function protectedSmsHistoryPreview(row) {
+  return protectedSmsHistoryDetails(row).message;
 }
 
 /**
