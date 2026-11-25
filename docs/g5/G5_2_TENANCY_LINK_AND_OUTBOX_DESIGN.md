@@ -554,7 +554,7 @@ This section supersedes prior G5.2 wording that binds the link and protected SMS
 - The Tenant DTO exposes `activeTenancies[]`, not `currentTenancyId`. `Tenant.houseId` is not an authority for occupancy or payment attribution. `Tenant.status` remains active while at least one ACTIVE Tenancy exists; per-unit dates and status live on Tenancy records. Tenant-level compatibility fields are addressed in D21 without blocking G5 link identity.
 - Keep one canonical MpesaTransaction claim per verified receipt and Tenant. Combined receipt settlement invokes G3 to create per-Tenancy Payments/allocations and any Tenant-account credit movement atomically. G5 does not perform accounting writes itself.
 - A surplus becomes Tenant-account carry-forward credit in G3, applied to future combined rent due within the same client/Estate. The current Tenancy-only credit functions are insufficient; this is an explicit G3 extension, not a new M-PESA wallet.
-- Each Client's rent effective-date/proration policy is applied by existing G3 billing configuration. G5 consumes the resulting RentCharges and must not invent an effective date.
+- G3's effective RENT-line due day governs the first rent cycle: move-in on/before due day joins that cycle; later move-in starts the next cycle at the full monthly amount. No proration. G5 consumes the resulting RentCharges and must not invent or recalculate rent.
 - This correction remains documentation-only. No G3 source code, model, index, migration, route, SMS configuration, key, worker or provider change is authorized.
 
 
@@ -564,4 +564,4 @@ Sections earlier in this decision record that describe one link per Tenancy, a l
 
 The authoritative rules are: one Tenant-level link per `{ clientId, estateId, tenantId }`; multiple ACTIVE Tenancies for one Tenant are valid in different Houses within the same Estate; per-House ACTIVE uniqueness remains; move/close names one exact `expectedTenancyId`; the Tenant DTO returns `activeTenancies[]`; combined M-PESA receipts are claimed once and settled through G3 per-Tenancy postings plus any Tenant-account carry-forward credit.
 
-G5 uses the existing SMS provider and sender configuration. Client rent effective-date and proration policy is owned by Client configuration/G3 billing. G5 attributes verified receipts to the obligations G3 generates.
+G5 uses the existing SMS provider and sender configuration. G3's effective RENT-line due day controls the first monthly rent cycle and the full amount charged; no proration applies. G5 attributes verified receipts to the obligations G3 generates.

@@ -49,59 +49,91 @@ describe('classifyTenanciesForPeriod', () => {
   });
 });
 
-describe('tenancyIneligibleReason / isTenancyEligibleForPeriod share one boundary (Africa/Nairobi)', () => {
-  const P = '2026-03'; // period starts 2026-03-01T00:00+03:00, next starts 2026-04-01T00:00+03:00
+describe('tenancyIneligibleReason / isTenancyEligibleForPeriod share one due-day boundary (Africa/Nairobi)', () => {
+  const P = '2026-03';
   const at = (iso, extra = {}) => ({ status: 'ACTIVE', tenantId: oid(1), startAt: iso, endAt: null, ...extra });
 
-  test('starting exactly at the beginning of the period is eligible', () => {
-    const t = at('2026-03-01T00:00:00+03:00');
-    expect(isTenancyEligibleForPeriod(t, P)).toBe(true);
-    expect(tenancyIneligibleReason(t, P)).toBeNull();
-  });
-  test('starting before the period is eligible', () => {
-    expect(tenancyIneligibleReason(at('2026-02-28T23:59:59+03:00'), P)).toBeNull();
-  });
-  test('starting later on the first day is NOT eligible (one millisecond is enough)', () => {
-    for (const iso of ['2026-03-01T00:00:00.001+03:00', '2026-03-01T08:00:00+03:00']) {
+  test('move-in on the due date qualifies, including later that Nairobi day', () => {
+    for (const iso of ['2026-03-05T00:00:00+03:00', '2026-03-05T18:00:00+03:00']) {
       const t = at(iso);
-      expect(isTenancyEligibleForPeriod(t, P)).toBe(false);
-      expect(tenancyIneligibleReason(t, P)).toMatch(/began after/);
+      expect(isTenancyEligibleForPeriod(t, P, 5)).toBe(true);
+      expect(tenancyIneligibleReason(t, P, 5)).toBeNull();
     }
   });
-  test('starting on the second day is NOT eligible', () => {
-    const t = at('2026-03-02T00:00:00+03:00');
-    expect(isTenancyEligibleForPeriod(t, P)).toBe(false);
-    expect(tenancyIneligibleReason(t, P)).toMatch(/began after/);
+
+  test('move-in before the due date qualifies', () => {
+    expect(tenancyIneligibleReason(at('2026-03-04T23:59:59+03:00'), P, 5)).toBeNull();
   });
-  test('ending before the next period begins is NOT eligible', () => {
-    const t = at('2026-01-01T00:00:00+03:00', { status: 'CLOSED', endAt: '2026-03-31T23:59:59+03:00' });
-    expect(isTenancyEligibleForPeriod(t, P)).toBe(false);
-    expect(tenancyIneligibleReason(t, P)).toMatch(/ended before/);
+
+  test('move-in after the due-date calendar day does not qualify for that cycle', () => {
+    for (const iso of ['2026-03-06T00:00:00+03:00', '2026-03-15T00:00:00+03:00']) {
+      const t = at(iso);
+      expect(isTenancyEligibleForPeriod(t, P, 5)).toBe(false);
+      expect(tenancyIneligibleReason(t, P, 5)).toMatch(/rent due day/);
+    }
   });
-  test('ending exactly when the next period begins is eligible (endAt exclusive)', () => {
-    const t = at('2026-01-01T00:00:00+03:00', { status: 'CLOSED', endAt: '2026-04-01T00:00:00+03:00' });
-    expect(isTenancyEligibleForPeriod(t, P)).toBe(true);
-    expect(tenancyIneligibleReason(t, P)).toBeNull();
+
+  test('John joining after the 17 November due date starts with the full December cycle', () => {
+    const john = at('2026-11-21T00:00:00+03:00');
+    expect(isTenancyEligibleForPeriod(john, '2026-11', 17)).toBe(false);
+    expect(tenancyIneligibleReason(john, '2026-11', 17)).toMatch(/rent due day/);
+    expect(isTenancyEligibleForPeriod(john, '2026-12', 17)).toBe(true);
+    expect(tenancyIneligibleReason(john, '2026-12', 17)).toBeNull();
   });
-  test('ACTIVE and CLOSED historical tenancies are both eligible when they cover the period', () => {
-    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00'), P)).toBeNull();
-    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00', { status: 'CLOSED', endAt: '2026-09-01T00:00:00+03:00' }), P)).toBeNull();
+
+  test('a tenancy ending at due-day midnight does not overlap that due date', () => {
+    const t = at('2026-01-01T00:00:00+03:00', {
+      status: 'CLOSED', endAt: '2026-03-05T00:00:00+03:00',
+    });
+    expect(isTenancyEligibleForPeriod(t, P, 5)).toBe(false);
+    expect(tenancyIneligibleReason(t, P, 5)).toMatch(/ended before/);
   });
+
+  test('a tenancy ending later on due day overlaps; endAt remains exclusive', () => {
+    const t = at('2026-01-01T00:00:00+03:00', {
+      status: 'CLOSED', endAt: '2026-03-05T18:00:00+03:00',
+    });
+    expect(isTenancyEligibleForPeriod(t, P, 5)).toBe(true);
+  });
+
+  test('the due day is clamped to the last day of shorter months', () => {
+    const feb = at('2027-02-28T23:00:00+03:00');
+    expect(isTenancyEligibleForPeriod(feb, '2027-02', 31)).toBe(true);
+    expect(isTenancyEligibleForPeriod(at('2027-03-01T00:00:00+03:00'), '2027-02', 31)).toBe(false);
+  });
+
+  test('ACTIVE and CLOSED tenancies qualify when they overlap the due date', () => {
+    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00'), P, 5)).toBeNull();
+    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00', {
+      status: 'CLOSED', endAt: '2026-09-01T00:00:00+03:00',
+    }), P, 5)).toBeNull();
+  });
+
   test('VOID or unknown status is never eligible', () => {
-    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00', { status: 'VOID' }), P)).toMatch(/not active or closed/);
-    expect(tenancyIneligibleReason(null, P)).not.toBeNull();
+    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00', { status: 'VOID' }), P, 5)).toMatch(/not active or closed/);
+    expect(tenancyIneligibleReason(null, P, 5)).not.toBeNull();
   });
+
   test('invalid dates and periods are ineligible with a specific reason', () => {
-    expect(tenancyIneligibleReason(at('not-a-date'), P)).toMatch(/invalid start/);
-    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00', { status: 'CLOSED', endAt: 'garbage' }), P)).toMatch(/invalid end/);
-    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00'), '')).toMatch(/Invalid billing period/);
+    expect(tenancyIneligibleReason(at('not-a-date'), P, 5)).toMatch(/invalid start/);
+    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00', {
+      status: 'CLOSED', endAt: 'garbage',
+    }), P, 5)).toMatch(/invalid end/);
+    expect(tenancyIneligibleReason(at('2025-01-01T00:00:00+03:00'), '', 5)).toMatch(/Invalid billing period/);
   });
-  test('reason is null exactly when eligible, across boundary instants', () => {
-    const instants = ['2026-02-28T20:59:59Z', '2026-02-28T21:00:00Z', '2026-02-28T21:00:00.001Z', '2026-03-01T21:00:00Z'];
-    for (const s of instants) {
-      for (const e of [null, '2026-03-31T20:59:59Z', '2026-03-31T21:00:00Z']) {
-        const t = at(s, { endAt: e, status: e ? 'CLOSED' : 'ACTIVE' });
-        expect(tenancyIneligibleReason(t, P) === null).toBe(isTenancyEligibleForPeriod(t, P));
+
+  test('the in-memory reason and eligibility agree around the UTC/Nairobi boundary', () => {
+    const starts = [
+      '2026-03-04T20:59:59.999Z', // 23:59:59.999 on 4 March EAT
+      '2026-03-04T21:00:00Z', // 00:00 due day EAT
+      '2026-03-05T20:59:59.999Z', // final millisecond of due day EAT
+      '2026-03-05T21:00:00Z', // next calendar day EAT
+    ];
+    for (const startAt of starts) {
+      for (const endAt of [null, '2026-03-04T21:00:00Z', '2026-03-05T21:00:00Z']) {
+        const t = at(startAt, { endAt, status: endAt ? 'CLOSED' : 'ACTIVE' });
+        expect(tenancyIneligibleReason(t, P, 5) === null)
+          .toBe(isTenancyEligibleForPeriod(t, P, 5));
       }
     }
   });

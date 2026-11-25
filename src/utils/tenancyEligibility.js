@@ -1,49 +1,55 @@
 import { dateUtil } from './date.js';
 
 /**
- * G3 interim full-period eligibility:
- * startAt <= periodStart AND (endAt is null OR endAt >= nextPeriodStart)
- *
- * Single source of truth for the period boundary. Both the boolean check and the
- * human-readable reason derive from this function so they can never disagree.
- * @returns {{eligible: boolean, code: null|'NO_PERIOD'|'BAD_STATUS'|'BAD_START'|'BAD_END'|'STARTS_AFTER_PERIOD_START'|'ENDS_BEFORE_PERIOD_END'}}
+ * G3 due-day-cycle eligibility. A tenancy interval [startAt, endAt) must overlap
+ * the full Africa/Nairobi calendar date of the effective monthly RENT due day.
+ * Move-in on the due date counts; endAt is exclusive.
  */
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
-export function tenancyPeriodEligibility(tenancy, period) {
+export function tenancyPeriodEligibility(tenancy, period, dueDay = 5) {
   if (!tenancy || !period || !PERIOD_RE.test(String(period))) return { eligible: false, code: 'NO_PERIOD' };
   if (!['ACTIVE', 'CLOSED'].includes(tenancy.status)) return { eligible: false, code: 'BAD_STATUS' };
-  const periodStart = dateUtil.startOfMonth(period).toDate();
-  const nextPeriodStart = dateUtil.startOfMonth(period).add(1, 'month').toDate();
-  if (Number.isNaN(periodStart.getTime())) return { eligible: false, code: 'NO_PERIOD' };
+
+  const window = dateUtil.dueDayWindowFor(period, dueDay);
+  if (!window || Number.isNaN(window.start.getTime()) || Number.isNaN(window.endExclusive.getTime())) {
+    return { eligible: false, code: 'NO_PERIOD' };
+  }
+
   const startAt = new Date(tenancy.startAt);
   if (Number.isNaN(startAt.getTime())) return { eligible: false, code: 'BAD_START' };
-  if (startAt > periodStart) return { eligible: false, code: 'STARTS_AFTER_PERIOD_START' };
+  if (startAt >= window.endExclusive) return { eligible: false, code: 'STARTS_AFTER_DUE_DAY' };
+
   if (tenancy.endAt != null) {
     const endAt = new Date(tenancy.endAt);
     if (Number.isNaN(endAt.getTime())) return { eligible: false, code: 'BAD_END' };
-    if (endAt < nextPeriodStart) return { eligible: false, code: 'ENDS_BEFORE_PERIOD_END' };
+    if (endAt <= window.start) return { eligible: false, code: 'ENDS_BEFORE_DUE_DAY' };
   }
   return { eligible: true, code: null };
 }
 
-export function isTenancyEligibleForPeriod(tenancy, period) {
-  return tenancyPeriodEligibility(tenancy, period).eligible;
+export function isTenancyEligibleForPeriod(tenancy, period, dueDay = 5) {
+  return tenancyPeriodEligibility(tenancy, period, dueDay).eligible;
+}
+
+/** True when the tenancy begins after this period's complete Nairobi due-date day. */
+export function tenancyStartsAfterDueDay(tenancy, period, dueDay = 5) {
+  const window = dateUtil.dueDayWindowFor(period, dueDay);
+  const startAt = new Date(tenancy?.startAt);
+  return Boolean(window && !Number.isNaN(startAt.getTime()) && startAt >= window.endExclusive);
 }
 
 /**
- * Exact MongoDB filter equivalent of tenancyPeriodEligibility (same boundaries, same status set),
- * so eligibility is decided by the database across the COMPLETE candidate set instead of an
- * in-memory scan of a truncated page. Returns null for an invalid period (nothing is eligible).
+ * Exact MongoDB equivalent of tenancyPeriodEligibility. Returns null for an
+ * invalid period, so invalid input never broadens a query.
  */
-export function eligibleTenancyFilter(period) {
+export function eligibleTenancyFilter(period, dueDay = 5) {
   if (!period || !PERIOD_RE.test(String(period))) return null;
-  const periodStart = dateUtil.startOfMonth(period).toDate();
-  if (Number.isNaN(periodStart.getTime())) return null;
-  const nextPeriodStart = dateUtil.startOfMonth(period).add(1, 'month').toDate();
+  const window = dateUtil.dueDayWindowFor(period, dueDay);
+  if (!window || Number.isNaN(window.start.getTime()) || Number.isNaN(window.endExclusive.getTime())) return null;
   return {
     status: { $in: ['ACTIVE', 'CLOSED'] },
-    startAt: { $lte: periodStart },
-    $or: [{ endAt: null }, { endAt: { $gte: nextPeriodStart } }],
+    startAt: { $lt: window.endExclusive },
+    $or: [{ endAt: null }, { endAt: { $gt: window.start } }],
   };
 }

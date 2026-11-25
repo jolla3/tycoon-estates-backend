@@ -364,7 +364,7 @@ No source code, index, migration, provider configuration, key or test environmen
 - Claim a verified M-PESA receipt once. Post exact portions through the G3 accounting service to individual Tenancies. Never create a cross-Tenancy PaymentAllocation.
 - Underpayments reduce the combined total by applying to oldest eligible due obligations first, with stable tie-breakers. The payer never has to split the amount manually.
 - Overpayment remains a Tenant-level carried-forward rent credit and reduces future combined rent due in that same Estate. This requires an auditable G3 aggregate-credit/application mechanism; do not invent a G5 wallet or silently net unrelated Tenants.
-- Each Client's rent effective-date/proration configuration determines charges on a new unit. G5 does not calculate or hard-code those policies.
+- G3's effective RENT-line due day determines the first monthly charge on a new unit. A move-in after that date starts the next cycle at the full configured amount; no proration. G5 does not calculate rent.
 - Tests must prove one-unit regression, two-unit combined payment, one receipt claim, child posting totals, excess-credit carry-forward, credit application to future configured charges, move of one Tenancy leaving another untouched, and exact tenant/Estate isolation.
 
 
@@ -375,7 +375,7 @@ No source code, index, migration, provider configuration, key or test environmen
 - Every child Payment and PaymentAllocation remains tenancy-scoped. The aggregate statement is not permission to create a cross-Tenancy PaymentAllocation.
 - Any excess remains the Tenant's credit and reduces the next combined rent due in the same Estate. Current G3 does not pool Tenancy credits, so an auditable G3 Tenant-account credit/application extension is required. Never create a G5 wallet or pin pooled credit to an arbitrary unit.
 - G3's default internal allocation order is oldest eligible due date first, then period, tenancyId and RentCharge ID. Apply Tenant credit to future eligible charges using the same deterministic order.
-- The new unit's rent effective date and any proration are resolved from that Client's configured policy. G5 must not calculate or hard-code those rules.
+- The new unit's first rent cycle follows G3's effective RENT-line due day. G5 must not calculate or prorate rent or override the RentCharges G3 generated.
 - Preserve one-unit regression behavior and prove multi-unit combined payment, one receipt claim, atomic child postings, carried-forward credit, credit application next month, and unit-specific move isolation.
 
 

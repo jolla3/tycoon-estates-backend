@@ -40,7 +40,7 @@ Tenant credit auto-apply, rent ledger, payment allocation, reconciliation or M-P
 
 ## Do not implement in this scope
 
-- Partial-month proration; preserve full-month-only billing until the owner approves the formula.
+- No daily proration. Every due-day cycle creates the full configured monthly amount; a move-in after the due date starts the next cycle.
 - Combined deposit deduction/refund/move-out settlement or any UI promise that it refunds money or closes a Tenancy/House.
 - Deposit payment-before-requirement and overpayment behavior; do not choose defaults.
 - Paid deposit requirement adjustments; return `409 Conflict` after payment instead.

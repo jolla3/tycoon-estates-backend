@@ -411,7 +411,7 @@ The detailed source paths, required corrections and test gaps are in G5_2_TENANC
 - For multi-unit Tenants, credit must be held and applied in G3 under the Tenant/client/Estate account scope. Current G3 keeps tenancy credits separate, so this requires a G3 aggregate-credit extension. It must not be implemented as a G5 wallet or a silent cross-Tenancy Ledger transfer.
 
 ### Client-configured rent changes
-- G5 does not decide the effective date or proration when a Tenant moves to a different unit or rent changes.
+- G5 does not calculate rent or choose a separate move-in effective date. G3's due-day-cycle policy and effective RentCharge are authoritative.
 - G3 owns the recurring monthly rent-cycle rule: the effective RENT-line due day defines each House's cycle. A move-in on or before that Nairobi due date starts that cycle; a move-in after it starts the next cycle at the full configured monthly amount. There is no daily proration. G3 generates the resulting RentCharges; G5 allocates verified receipts only to those eligible obligations.
 - Persist the effective policy/version and resulting charge snapshots. A missing or invalid client policy must not be replaced by a hard-coded G5 default.
 

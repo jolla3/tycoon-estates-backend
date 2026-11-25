@@ -5,6 +5,7 @@
 import { Estate } from '../models/Estate.js';
 import { HouseBillingConfig } from '../models/HouseBillingConfig.js';
 import { HouseType, assertUniquePlanLines } from '../models/HouseType.js';
+import { HouseTypePlanVersion } from '../models/HouseTypePlanVersion.js';
 import { resolveHouseTypePlanVersion } from './houseTypePlanVersion.service.js';
 import { dateUtil } from '../utils/date.js';
 import { money } from '../utils/money.js';
@@ -99,7 +100,6 @@ async function resolveHouseBillingPlan(house, context, { session } = {}) {
       });
     } else {
       // Registration: pure read of the same period-effective rule (no write fence).
-      const { HouseTypePlanVersion } = await import('../models/HouseTypePlanVersion.js');
       const q = HouseTypePlanVersion.findOne({
         clientId: house.clientId, estateId: house.estateId, houseTypeId: type._id,
         effectiveFromPeriod: { $lte: period },
@@ -265,6 +265,21 @@ async function planLinesForHouse(house, period, { session } = {}) {
 }
 
 /**
+ * Read the effective rent-cycle due day for a House/period without acquiring the
+ * charge-generation write fence. Charge creation re-resolves and validates the
+ * same plan inside its transaction before committing any RentCharge.
+ */
+async function resolveRentDueDayForPeriod(house, period, { session } = {}) {
+  const snapshot = await resolveRegistrationBillingPlan(
+    house,
+    dateUtil.startOfMonth(period).toDate(),
+    { session },
+  );
+  const rentLine = (snapshot.lines || []).find((line) => line.chargeType === 'RENT');
+  return rentLine?.dueDay ?? resolveDueDay(house, snapshot.estate, null);
+}
+
+/**
  * Registration snapshot: informational House plan at one captured registrationAt.
  * Never generates RentCharges. Returns structured outcome + display lines with due-day policy.
  */
@@ -299,5 +314,6 @@ export {
   resolveHouseBillingPlan,
   planLinesForHouse,
   resolveRegistrationBillingPlan,
+  resolveRentDueDayForPeriod,
   resolveDueDay,
 };

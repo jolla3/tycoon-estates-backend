@@ -11,6 +11,7 @@ import { estateFilterClause } from '../utils/estateFilter.js';
 import { supportsMongoTransactions } from '../config/database.js';
 import { tenancyIneligibleReason, TENANCY_RESOLUTION } from '../utils/manualPaymentTenancy.js';
 import { eligibleTenancyFilter } from '../utils/tenancyEligibility.js';
+import { resolveRentDueDayForPeriod } from './houseBillingPlan.service.js';
 import { generateBearerToken } from '../utils/g5Token.js';
 import { mpesaSubmissionLinkService } from './mpesa/mpesaSubmissionLink.service.js';
 import { smsService } from './sms.service.js';
@@ -43,8 +44,8 @@ async function tenancyPage({ clientId, house, extra = null, term = '', pageNo, p
   return { rows: facet?.rows || [], total: facet?.total?.[0]?.n || 0 };
 }
 
-async function resolveEligible(base, period, { tenantId = null, session = null } = {}) {
-  const elig = eligibleTenancyFilter(period);
+async function resolveEligible(base, period, { tenantId = null, dueDay = 5, session = null } = {}) {
+  const elig = eligibleTenancyFilter(period, dueDay);
   if (!elig) return { status: TENANCY_RESOLUTION.NONE, tenancy: null };
   const rows = await Tenancy.find({ ...base, ...elig, ...(tenantId ? { tenantId } : {}) })
     .sort({ startAt: -1, _id: -1 }).limit(2).session(session || null).lean();
@@ -302,7 +303,8 @@ export const tenancyService = {
         throw Errors.InvalidRequest('Selected tenancy belongs to a different tenant');
       }
       if (period) {
-        const reason = tenancyIneligibleReason(t, period);
+        const dueDay = await resolveRentDueDayForPeriod(house, period, { session });
+        const reason = tenancyIneligibleReason(t, period, dueDay);
         if (reason) throw Errors.InvalidRequest(`Selected tenancy cannot take a payment for ${period}: ${reason}`);
       }
       if (paymentDate && !tenancyContains(t, paymentDate)) {
@@ -321,15 +323,16 @@ export const tenancyService = {
     }
 
     if (period) {
-      const r = await resolveEligible(base, period, { tenantId, session });
+      const dueDay = await resolveRentDueDayForPeriod(house, period, { session });
+      const r = await resolveEligible(base, period, { tenantId, dueDay, session });
       if (r.status === TENANCY_RESOLUTION.UNIQUE) return r.tenancy;
       if (r.status === TENANCY_RESOLUTION.AMBIGUOUS) {
         throw Errors.Conflict(`More than one tenancy covers ${period} for this house; choose which tenancy this payment is for`);
       }
-      if (tenantId && (await resolveEligible(base, period, { session })).status !== TENANCY_RESOLUTION.NONE) {
+      if (tenantId && (await resolveEligible(base, period, { dueDay, session })).status !== TENANCY_RESOLUTION.NONE) {
         throw Errors.InvalidRequest('tenantId does not match any tenancy covering this period for this house');
       }
-      throw Errors.InvalidRequest(`No tenancy fully covers ${period} for this house; a payment cannot be attributed to a tenant`);
+      throw Errors.InvalidRequest(`No tenancy overlaps ${period}'s configured rent due date for this house; a payment cannot be attributed to a tenant`);
     }
 
     throw Errors.InvalidRequest('paymentDate is required to resolve payment ownership');
@@ -339,8 +342,9 @@ export const tenancyService = {
     page = 1, limit = 20, search = '', eligiblePage = 1, eligibleLimit = 10, eligibleSearch = '',
   } = {}) {
     const base = { clientId, houseId: house._id, estateId: house.estateId, status: { $in: ['ACTIVE', 'CLOSED'] } };
-    const elig = eligibleTenancyFilter(period);
-    const r = await resolveEligible(base, period);
+    const dueDay = await resolveRentDueDayForPeriod(house, period);
+    const elig = eligibleTenancyFilter(period, dueDay);
+    const r = await resolveEligible(base, period, { dueDay });
     const ePage = clampPage(eligiblePage);
     const eSize = clampLimit(eligibleLimit, 10);
     const eTerm = String(eligibleSearch || '').trim().slice(0, 80);
@@ -353,7 +357,7 @@ export const tenancyService = {
     const hTerm = String(search || '').trim().slice(0, 80);
     const history = await tenancyPage({ clientId, house, term: hTerm, pageNo: hPage, pageSize: hSize });
     const toOption = (t) => {
-      const reason = tenancyIneligibleReason(t, period);
+      const reason = tenancyIneligibleReason(t, period, dueDay);
       return {
         tenancyId: String(t._id),
         tenantName: t.tenantName || 'Unknown tenant',

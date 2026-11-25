@@ -29,6 +29,13 @@ export const dateUtil = {
     const day = Math.min(Math.max(1, Number(dueDay) || 1), lastDay);
     return start.date(day).toDate();
   },
+  dueDayWindowFor: (period, dueDay) => {
+    const dueDate = dateUtil.dueDateFor(period, dueDay);
+    if (!(dueDate instanceof Date) || Number.isNaN(dueDate.getTime())) return null;
+    const start = dayjs(dueDate).tz(BUSINESS_TZ).startOf('day');
+    const endExclusive = start.add(1, 'day').startOf('day');
+    return { start: start.toDate(), endExclusive: endExclusive.toDate() };
+  },
   format: (date, fmt = 'DD MMM YYYY, HH:mm') => dayjs(date).tz(BUSINESS_TZ).format(fmt),
   isSamePeriod: (dateA, dateB) => dateUtil.periodOf(dateA) === dateUtil.periodOf(dateB),
 
