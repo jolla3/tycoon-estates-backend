@@ -1,7 +1,7 @@
 # G3 — Tenancy, Rent, Payments, Tenant Credit and Deposits
 
 **Status:** Current-source requirements and corrective specification, 21 November 2026  
-**Backend baseline:** `main` `0dbf7ef75ed6c1a39e24775aec9a86e08f7d0617`  
+**Backend baseline:** `main` `1ff9c85932a3d8c3de77f017c33fb988171146ba`  
 **Frontend baseline:** `main` `a27f20dd3244cdc7370cffa16b70c6cd32a45576`
 
 ## 1. Product
@@ -79,6 +79,15 @@ Where M-PESA reporting aggregates are exposed, distinguish provider-observed rec
 - Every eligible cycle creates the full configured monthly charge amount. No daily rate, proration or partial-month amount is calculated.
 - Repeated generation remains idempotent under the existing `{tenancyId, period, chargeType, description}` identity. Historical RentCharges and Ledger entries are not rewritten.
 - After charge generation, the existing Tenant/Estate credit settlement runs oldest-first. Surplus credit reduces the next eligible outstanding charge and any remainder carries forward.
+
+### G3-08 — Manual receipts ensure the first eligible rent cycle before allocation
+
+- A newly registered tenant can submit a manual receipt before the hourly estate billing job has created any RentCharge. Recording that receipt must not leave the money temporarily labelled as unapplied credit when an eligible current or upcoming rent cycle can already be determined.
+- In the same MongoDB transaction that records a new ManualReceipt, resolve and validate the exact House and Tenancy, then ensure the exact Tenancy's eligible current and next cycle charges using the existing effective-plan/due-day resolver. The base period is the current Africa/Nairobi billing period, not a backdated receipt's payment period. A backdated payment date continues to determine tenancy ownership, not which future cycle is generated.
+- Generate only periods for which the exact Tenancy overlaps the effective RENT due-day calendar date. A move-in after this month's due day is billed at the full configured amount for the next eligible month. Never prorate. Never generate charges for other tenants or Houses from a manual-payment request.
+- After the charge rows and their Ledger entries exist in that transaction, use the existing Tenant/Estate settlement engine unchanged: apply older tenant credit first, apply the new manual receipt against the oldest remaining eligible obligations, and carry any genuine remainder forward as credit.
+- Charge creation, receipt, allocations, Ledger entries and credit movements must commit or roll back together. Idempotent retries must return the original receipt/settlement and must not generate a second charge or payment.
+- If no current/next period is eligible or no configured charge lines exist, preserve the existing surplus-credit behavior. Do not fabricate an obligation to consume money.
 
 ## 5. Out of scope / do not rebuild
 
