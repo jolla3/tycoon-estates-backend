@@ -156,6 +156,36 @@ function manualBranch(f) {
     { $unwind: '$sourceTenancy' },
     {
       $set: {
+        _paymentDayStart: {
+          $dateFromString: {
+            dateString: '$paymentDateLocal',
+            timezone: 'Africa/Nairobi',
+            onError: null,
+            onNull: null,
+          },
+        },
+      },
+    },
+    {
+      $set: {
+        _paymentNextDayStart: {
+          $cond: [
+            { $ne: ['$_paymentDayStart', null] },
+            {
+              $dateAdd: {
+                startDate: '$_paymentDayStart',
+                unit: 'day',
+                amount: 1,
+                timezone: 'Africa/Nairobi',
+              },
+            },
+            null,
+          ],
+        },
+      },
+    },
+    {
+      $set: {
         sourceTenancyValid: {
           $and: [
             { $eq: ['$sourceTenancy.clientId', '$clientId'] },
@@ -163,10 +193,12 @@ function manualBranch(f) {
             { $eq: ['$sourceTenancy.tenantId', '$tenantId'] },
             { $eq: ['$sourceTenancy.houseId', '$houseId'] },
             { $in: ['$sourceTenancy.status', CURRENT_TENANCY_STATES] },
-            { $lte: ['$sourceTenancy.startAt', '$paymentDate'] },
+            { $ne: ['$_paymentDayStart', null] },
+            { $ne: ['$_paymentNextDayStart', null] },
+            { $lt: ['$sourceTenancy.startAt', '$_paymentNextDayStart'] },
             { $or: [
               { $eq: [{ $ifNull: ['$sourceTenancy.endAt', null] }, null] },
-              { $gt: ['$sourceTenancy.endAt', '$paymentDate'] },
+              { $gt: ['$sourceTenancy.endAt', '$_paymentDayStart'] },
             ] },
           ],
         },
@@ -465,7 +497,9 @@ function legacyManualBranch(f) {
 
 async function aggregatePage(f) {
   const stages = manualBranch(f);
-  if (f.origin !== 'MANUAL') {
+  // No origin filter means all source envelopes, including MANUAL receipts.
+  // Suppress this branch only when the caller explicitly requested another source.
+  if (f.origin && f.origin !== 'MANUAL') {
     stages[0] = { $match: { _id: { $exists: false } } };
   }
   if (!f.origin || f.origin === 'MPESA') {

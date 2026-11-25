@@ -364,9 +364,12 @@ export const tenantService = {
       smsHistory: sms.map((m) => ({
         _id: m._id,
         phoneNumber: m.phoneNumber,
-        message: m.message,
+        message: m.deliveryMode === 'G5_PROTECTED'
+          ? 'M-PESA onboarding notification (private payment link hidden for security).'
+          : m.message,
         status: m.status,
         type: m.type,
+        deliveryMode: m.deliveryMode || 'STANDARD',
         createdAt: m.createdAt,
         sentAt: m.sentAt,
       })),
