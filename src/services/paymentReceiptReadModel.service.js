@@ -225,6 +225,7 @@ function manualBranch(f) {
         amountCents: '$amountCents',
         grossReceivedCents: '$amountCents',
         paymentDate: '$paymentDate',
+        paymentDateLocal: 1,
         receivedAt: '$paymentDate',
         paymentReference: { $ifNull: ['$paymentReference', null] },
         period: 1,
@@ -603,11 +604,25 @@ function verifySourceTenancy(row, tenancy) {
     || !sameId(tenancy.tenantId, row.tenantId)
     || !CURRENT_TENANCY_STATES.includes(tenancy.status)) return false;
   if (row.sourceHouseId && !sameId(tenancy.houseId, row.sourceHouseId)) return false;
-  const eventAt = new Date(row.paymentDate || row.receivedAt).getTime();
   const startAt = new Date(tenancy.startAt).getTime();
   const endAt = tenancy.endAt == null ? null : new Date(tenancy.endAt).getTime();
+  if (!Number.isFinite(startAt)) return false;
+
+  // ManualReceipt.paymentDate is a noon-Nairobi representative timestamp.
+  // Its immutable paymentDateLocal is the authoritative calendar-day identity.
+  if (row.origin === 'MANUAL' && typeof row.paymentDateLocal === 'string') {
+    const paymentDay = dateUtil.parseNairobiDateOnly(row.paymentDateLocal);
+    if (!paymentDay) return false;
+    const dayStart = paymentDay.start.getTime();
+    const dayEnd = paymentDay.end.getTime();
+    return Number.isFinite(dayStart)
+      && Number.isFinite(dayEnd)
+      && startAt <= dayEnd
+      && (endAt == null || (Number.isFinite(endAt) && endAt > dayStart));
+  }
+
+  const eventAt = new Date(row.paymentDate || row.receivedAt).getTime();
   return Number.isFinite(eventAt)
-    && Number.isFinite(startAt)
     && eventAt >= startAt
     && (endAt == null || (Number.isFinite(endAt) && eventAt < endAt));
 }

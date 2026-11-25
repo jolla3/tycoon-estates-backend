@@ -400,7 +400,9 @@ describeWithMongo('G5 canonical Payments receipt-envelope read model', () => {
       limit: 20,
       origin: 'MANUAL',
     });
-    expect(manualOnly.items.some((row) => String(row._id) === String(receipt._id))).toBe(true);
+    const visibleReceipt = manualOnly.items.find((row) => String(row._id) === String(receipt._id));
+    expect(visibleReceipt).toBeDefined();
+    expect(visibleReceipt.sourceTenancyStatus).toBe('VERIFIED');
   });
 
   test('uses immutable source House filters and excludes CREDIT rows, unallocated M-PESA, Bank debits and reviews', async () => {
