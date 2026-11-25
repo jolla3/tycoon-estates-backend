@@ -329,67 +329,8 @@ export const openApiSpec = {
         tags: ['G5 M-PESA Collection'],
         summary: 'View retained original SMS evidence for an authorized review',
         description: 'Requires authenticated CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN with explicit client scope and MPESA entitlement. Decrypts the original SMS only for this request, records a required audit event, and returns Cache-Control: no-store. The plaintext is omitted from list responses and audit metadata. If raw evidence was not retained, available=false.',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', pattern: '^[a-fA-F0-9]{24}
-
-    // --- G5 public submission (no cookie auth) ---
-    '/public/mpesa/submissions': {
-      post: {
-        tags: ['G5 Public'],
-        summary: 'Public Tenant SMS submission (bearer token in body)',
-        description: 'Actual mount: POST /api/v1/public/mpesa/submissions (before CSRF). No cookie auth. 4KB body limit. Additional body fields rejected. Rate limited. Neutral responses for invalid/unknown/revoked links.',
-        security: [],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object',
-                required: ['token', 'text'],
-                properties: {
-                  token: { type: 'string', description: 'One-time bearer token from link issue/rotate' },
-                  text: { type: 'string', description: 'Full M-PESA confirmation SMS text' },
-                },
-                additionalProperties: false,
-              },
-            },
-          },
-        },
-        responses: {
-          200: { description: 'Accepted or neutral rejection (indistinguishable to caller)' },
-          429: { description: 'Rate limited' },
-        },
-      },
-    },
-
-    // --- Daraja webhooks (public; no invented auth) ---
-    '/webhooks/daraja/c2b/confirm': {
-      post: {
-        tags: ['Daraja'],
-        summary: 'Daraja C2B confirmation callback',
-        description: 'Actual mount: POST /api/v1/webhooks/daraja/c2b/confirm. Public webhook. Do not invent Safaricom auth; handler persists then acknowledges when enabled.',
-        security: [],
-        responses: { 200: { description: 'Acknowledged' } },
-      },
-    },
-    '/webhooks/daraja/c2b/validate': {
-      post: {
-        tags: ['Daraja'],
-        summary: 'Daraja C2B validation callback',
-        security: [],
-        responses: { 200: { description: 'Acknowledged' } },
-      },
-    },
-    '/webhooks/daraja/pull/results': {
-      post: {
-        tags: ['Daraja'],
-        summary: 'Daraja transaction status / pull results callback',
-        security: [],
-        responses: { 200: { description: 'Acknowledged' } },
-      },
-    },
-  },
-};
- } }],
+        security: [{ cookieAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', pattern: '^[a-fA-F0-9]{24}$' } }],
         responses: {
           200: { description: 'Evidence detail or an explicit unavailable state' },
           404: { description: 'Submission not found in the caller scope' },
