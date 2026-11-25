@@ -1,4 +1,4 @@
-// src/jobs/rentStatus.job.js — generates this period's RentCharges for eligible Tenancies.
+// src/jobs/rentStatus.job.js — generates current and next eligible due-day RentCharges.
 // G3.1: indexesAligned is derived from live listIndexes inspection every run — not a sticky Boolean.
 import { Estate } from '../models/Estate.js';
 import { rentService } from '../services/rent.service.js';
@@ -41,17 +41,29 @@ export async function rentStatusJob() {
     try {
       const result = await rentService.generateChargesForEstate(estate.clientId, estate._id);
       createdTotal += result?.created || 0;
-      try {
-        const notice = await smsService.queueBillingNotificationsForEstate(
-          estate.clientId, estate._id, result?.period || dateUtil.currentPeriod(),
-          { skipTenantIds: result?.creditApplyFailedTenantIds || [] }
-        );
-        billingNotificationsQueued += notice?.queued || 0;
-        billingNotificationsSkipped += notice?.skipped || 0;
-      } catch (notifyErr) {
-        const failure = { estateId: String(estate._id), code: notifyErr.code || 'BILLING_NOTIFICATION_ERROR', reason: String(notifyErr.message || 'unknown').slice(0, 200) };
-        billingNotificationErrors.push(failure);
-        logger.error(failure, 'rentStatusJob: billing notification queue failed');
+      const notificationPeriods = [...new Set(
+        result?.chargePeriods?.length
+          ? result.chargePeriods
+          : [result?.period || dateUtil.currentPeriod()]
+      )];
+      for (const notificationPeriod of notificationPeriods) {
+        try {
+          const notice = await smsService.queueBillingNotificationsForEstate(
+            estate.clientId, estate._id, notificationPeriod,
+            { skipTenantIds: result?.creditApplyFailedTenantIds || [] }
+          );
+          billingNotificationsQueued += notice?.queued || 0;
+          billingNotificationsSkipped += notice?.skipped || 0;
+        } catch (notifyErr) {
+          const failure = {
+            estateId: String(estate._id),
+            period: notificationPeriod,
+            code: notifyErr.code || 'BILLING_NOTIFICATION_ERROR',
+            reason: String(notifyErr.message || 'unknown').slice(0, 200),
+          };
+          billingNotificationErrors.push(failure);
+          logger.error(failure, 'rentStatusJob: billing notification queue failed');
+        }
       }
     } catch (err) {
       const msg = err?.message || String(err);

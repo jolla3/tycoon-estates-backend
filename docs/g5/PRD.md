@@ -411,8 +411,8 @@ The detailed source paths, required corrections and test gaps are in G5_2_TENANC
 - For multi-unit Tenants, credit must be held and applied in G3 under the Tenant/client/Estate account scope. Current G3 keeps tenancy credits separate, so this requires a G3 aggregate-credit extension. It must not be implemented as a G5 wallet or a silent cross-Tenancy Ledger transfer.
 
 ### Client-configured rent changes
-- G5 does not decide the effective date or proration when a Tenant moves to a different unit or rent changes.
-- The applicable Client configuration defines the effective-date and proration policy. G3 generates the resulting RentCharges from that configuration; G5 allocates verified receipts only to the resulting eligible obligations.
+- G5 does not calculate rent or choose a separate move-in effective date. G3's due-day-cycle policy and effective RentCharge are authoritative.
+- G3 owns the recurring monthly rent-cycle rule: the effective RENT-line due day defines each House's cycle. A move-in on or before that Nairobi due date starts that cycle; a move-in after it starts the next cycle at the full configured monthly amount. There is no daily proration. G3 generates the resulting RentCharges; G5 allocates verified receipts only to those eligible obligations.
 - Persist the effective policy/version and resulting charge snapshots. A missing or invalid client policy must not be replaced by a hard-coded G5 default.
 
 ### Tenant/Tenancy lifecycle
@@ -425,7 +425,7 @@ The detailed source paths, required corrections and test gaps are in G5_2_TENANC
 
 - **D21 — multi-unit Tenant:** RESOLVED at product level. One Tenant profile can have multiple active Tenancies in different Houses within the same Estate. The G5 link is Tenant-level. The API exposes `activeTenancies[]`; `Tenant.houseId` is not authoritative. Remaining work is a compatibility-safe G3 implementation contract, not a request to choose one active tenancy.
 - **D22 — combined payment and excess credit:** RESOLVED at product level. One receipt is claimed once; partial payment reduces the combined balance; any amount above current eligible obligations remains the Tenant's carried-forward credit and reduces the next combined rent due within that same Estate. G3 must implement this auditable Tenant-account credit; the existing Tenancy-only balance service is not sufficient.
-- **D23 — rent effective date/proration:** RESOLVED as a configuration rule. Each Client's configured policy decides the effective date and proration when the Tenant moves to a different unit or rent changes. G3 billing generates the applicable RentCharges; G5 consumes them and does not hard-code dates or proration.
+- **D23 — rent cycle on move-in:** RESOLVED. The effective RENT-line due day in Africa/Nairobi defines the recurring monthly cycle. A move-in on or before that date is charged the full monthly amount for that cycle; a move-in after it starts with the next cycle at the full monthly amount. No proration. G3 generates the RentCharges; G5 consumes them and does not recalculate rent.
 - **Remaining technical gates:** G3 tenant-account credit/application design and atomic posting; Payment receipt index migration for one child Payment per Tenancy; Tenant profile compatibility fields and aggregate DTO; Daraja merchant/receipt uniqueness and actual Till callback/Pull capability. These are implementation design/evidence gates, not unresolved product intent.
 
 

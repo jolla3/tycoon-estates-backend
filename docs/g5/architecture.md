@@ -633,7 +633,7 @@ G5 must not change the shared G4 `tenancyContains()` rule. It must use an explic
 2. Lock that exact Tenancy through the existing G3 tenancy revision/serialization mechanism.
 3. Permit `CLOSED` only through this explicit G5 arrears path. Reject `VOID` for automatic posting.
 4. Select only eligible RentCharges belonging to the validated Tenant's permitted Tenancies. Every allocation line must match the exact charge's `tenancyId`, `clientId`, `estateId`, and `houseId`.
-5. Verify the charge periods/ownership against G3's billing rules. Do not invent prorated liabilities or generate missing charges for the closed tenancy.
+5. Verify the charge periods/ownership against G3's due-day-cycle rules. Do not invent prorated liabilities or generate missing charges for a tenancy that did not overlap the applicable rent due date.
 6. Do not call charge-generation helpers such as `rentService.ensureChargesForHouse()` for a closed tenancy.
 7. Post through shared G3 accounting with the actual M-PESA transaction date while skipping only the irrelevant G4 date-to-occupancy reassignment. Do not weaken other G3 validations.
 8. Keep Payment, allocations and Ledger attached to the old Tenancy.
@@ -1102,7 +1102,7 @@ Other production Tenancy.updateOne() calls in accountingPosting, ledger and reco
 - G3 records the source receipt, credit amount, remaining balance and each application to an exact future Tenancy/RentCharge. Apply eligible obligations oldest-due-first, with stable tie-breakers; no silent cross-Tenancy allocation.
 
 ### Client-configured rent effective dates
-- Each Client's configured rent-change/effective-date and proration policy determines when a new unit's rent begins and how a partial period is billed. G5 does not hard-code a global effective date or proration rule.
+- G3 determines the first rent cycle from the effective RENT-line due day: move-ins on/before that due date join the cycle; later move-ins begin with the next cycle at the full configured monthly amount. G5 does not recalculate or prorate rent.
 - G3 billing generates the RentCharges from the approved client policy and preserves the effective policy/version in the charge snapshot. G5 only allocates a verified receipt to the resulting eligible obligations.
 - A missing/invalid client configuration must not be replaced with an invented G5 default.
 

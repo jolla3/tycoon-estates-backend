@@ -1,6 +1,6 @@
 // src/services/rent.service.js
 // G3: Tenancy-aware charge generation. HouseType is the shared plan source.
-// Eligible monthly tenancy: startAt <= periodStart AND (endAt == null OR endAt >= nextPeriodStart).
+// Monthly eligibility is tenancy overlap with the full Nairobi calendar date of the effective RENT due day.
 
 import mongoose from 'mongoose';
 import { House } from '../models/House.js';
@@ -17,7 +17,11 @@ import { assertBillingIndexesAligned } from '../utils/billingIndexReadiness.js';
 import { supportsMongoTransactions } from '../config/database.js';
 import { Errors } from '../utils/errors.js';
 import { logger } from '../config/logger.js';
-import { isTenancyEligibleForPeriod } from '../utils/tenancyEligibility.js';
+import {
+  eligibleTenancyFilter,
+  isTenancyEligibleForPeriod,
+  tenancyStartsAfterDueDay,
+} from '../utils/tenancyEligibility.js';
 
 // Billing-plan resolution lives in houseBillingPlan.service.js (shared REGISTRATION /
 // CHARGE_PERIOD contexts). Charge generation keeps the prior planLinesForHouse contract.
@@ -25,6 +29,7 @@ import {
   planLinesForHouse,
   resolveHouseBillingPlan,
   resolveRegistrationBillingPlan,
+  resolveRentDueDayForPeriod,
 } from './houseBillingPlan.service.js';
 
 function resolveDueDay(house, estate, configDueDay) {
@@ -90,12 +95,6 @@ function isRentChargeIdentityDuplicate(error) {
     && expected.every(([key, direction], index) =>
       keys[index]?.[0] === key && keys[index]?.[1] === direction
     );
-}
-
-function periodBounds(period) {
-  const periodStart = dateUtil.startOfMonth(period).toDate();
-  const nextPeriodStart = dateUtil.startOfMonth(period).add(1, 'month').toDate();
-  return { periodStart, nextPeriodStart };
 }
 
 async function ensureChargeAndLedger({
@@ -207,7 +206,7 @@ export const rentService = {
   resolveHouseBillingPlan,
   resolveRegistrationBillingPlan,
 
-  async generateChargesForEstate(clientId, estateId, period = dateUtil.currentPeriod()) {
+  async generateChargesForEstate(clientId, estateId, period = null) {
     await assertBillingIndexesAligned();
     if (supportsMongoTransactions() !== true) {
       throw Errors.ServiceUnavailable(
@@ -215,109 +214,146 @@ export const rentService = {
       );
     }
 
+    const automaticRun = period == null;
+    const billingPeriod = period || dateUtil.currentPeriod();
+    const nextPeriod = dateUtil.startOfMonth(billingPeriod).add(1, 'month').format('YYYY-MM');
+    const periodStart = dateUtil.startOfMonth(billingPeriod).toDate();
+    const afterNextPeriodStart = dateUtil.startOfMonth(billingPeriod).add(2, 'month').toDate();
     const estate = await Estate.findOne({ _id: estateId, clientId }).lean();
     if (!estate) throw Errors.EstateNotFound?.() || Errors.NotFound('Estate not found');
 
-    const { periodStart, nextPeriodStart } = periodBounds(period);
-
-    const tenancies = await Tenancy.find({
+    // The scheduled/default run considers the current cycle and the next cycle.
+    // This creates the first full charge for a tenant who joined after this
+    // month's rent due date, without inventing a partial-month charge.
+    const candidates = await Tenancy.find({
       clientId,
       estateId,
       status: { $in: ['ACTIVE', 'CLOSED'] },
-      startAt: { $lte: periodStart },
-      $or: [{ endAt: null }, { endAt: { $gte: nextPeriodStart } }],
+      startAt: { $lt: afterNextPeriodStart },
+      $or: [{ endAt: null }, { endAt: { $gt: periodStart } }],
     }).lean();
 
-    const partial = await Tenancy.find({
-      clientId,
-      estateId,
-      status: { $in: ['ACTIVE', 'CLOSED'] },
-      $or: [
-        { startAt: { $gt: periodStart, $lt: nextPeriodStart } },
-        { endAt: { $gt: periodStart, $lt: nextPeriodStart } },
-      ],
-    })
-      .select('_id houseId startAt endAt status')
-      .lean();
-
     let created = 0;
+    let eligibleTenancies = 0;
+    const excludedTenancyIds = [];
+    const tenantIdsForCredit = new Set();
+    const chargePeriods = new Set();
     const session = await mongoose.startSession();
     try {
-      for (const candidateTenancy of tenancies) {
+      for (const candidateTenancy of candidates) {
         let committedCreated = 0;
+        let committedEligible = false;
+        let committedDueCycleExcluded = false;
+        let committedPeriod = null;
         await session.withTransaction(async () => {
           const tenancy = await Tenancy.findOne({
             _id: candidateTenancy._id, clientId, estateId,
             status: { $in: ['ACTIVE', 'CLOSED'] },
           }).session(session).lean();
-          if (!tenancy || !isTenancyEligibleForPeriod(tenancy, period)) {
-            committedCreated = 0;
-            return;
-          }
+          if (!tenancy) return;
 
           const lock = await House.updateOne(
             { _id: tenancy.houseId, clientId, estateId, isActive: true },
             { $inc: { billingConfigRev: 1 } },
             { session }
           );
-          if (lock.matchedCount !== 1) {
-            committedCreated = 0;
-            return;
-          }
+          if (lock.matchedCount !== 1) return;
           const house = await House.findOne({
             _id: tenancy.houseId, clientId, estateId, isActive: true,
           }).session(session).lean();
-          if (!house) {
-            committedCreated = 0;
-            return;
+          if (!house) return;
+
+          const currentPlan = await planLinesForHouse(house, billingPeriod, { session });
+          const currentRentLine = currentPlan.lines.find((line) => line.chargeType === 'RENT');
+          const currentDueDay = resolveDueDay(
+            house, currentPlan.estate || estate, currentRentLine?.dueDay
+          );
+
+          let selectedPeriod = billingPeriod;
+          let selectedPlan = currentPlan;
+          if (!isTenancyEligibleForPeriod(tenancy, billingPeriod, currentDueDay)) {
+            // Only the automatic scheduler may move a late joiner's first charge
+            // into the next cycle. An explicit historical/month request stays exact.
+            if (!automaticRun || !tenancyStartsAfterDueDay(tenancy, billingPeriod, currentDueDay)) {
+              committedDueCycleExcluded = true;
+              return;
+            }
+
+            const nextPlan = await planLinesForHouse(house, nextPeriod, { session });
+            const nextRentLine = nextPlan.lines.find((line) => line.chargeType === 'RENT');
+            const nextDueDay = resolveDueDay(
+              house, nextPlan.estate || estate, nextRentLine?.dueDay
+            );
+            if (!isTenancyEligibleForPeriod(tenancy, nextPeriod, nextDueDay)) {
+              committedDueCycleExcluded = true;
+              return;
+            }
+            selectedPeriod = nextPeriod;
+            selectedPlan = nextPlan;
           }
 
-          const { lines, planMeta, estate: est } = await planLinesForHouse(house, period, { session });
           let attemptCreated = 0;
-          for (const line of lines) {
+          for (const line of selectedPlan.lines) {
             if (!line.amountCents || line.amountCents <= 0) continue;
             const result = await ensureChargeAndLedger({
               clientId,
               estateId,
               house,
               tenancy,
-              period,
+              period: selectedPeriod,
               line,
-              planMeta,
-              estate: est || estate,
+              planMeta: selectedPlan.planMeta,
+              estate: selectedPlan.estate || estate,
               session,
             });
             if (result.created) attemptCreated += 1;
           }
           committedCreated = attemptCreated;
+          committedEligible = true;
+          committedPeriod = selectedPeriod;
         });
+
         created += committedCreated;
+        if (committedEligible) {
+          eligibleTenancies += 1;
+          chargePeriods.add(committedPeriod);
+          if (candidateTenancy.tenantId) tenantIdsForCredit.add(String(candidateTenancy.tenantId));
+        } else if (committedDueCycleExcluded) {
+          excludedTenancyIds.push(String(candidateTenancy._id));
+        }
       }
     } finally {
       session.endSession();
     }
 
+    const orderedChargePeriods = [...chargePeriods].sort();
+    const dueCycleExcluded = excludedTenancyIds.length;
     if (created > 0) {
       await audit({
         clientId,
         estateId,
         action: 'BILL_GENERATED',
         resource: 'RentCharge',
-        description: `Generated ${created} charges for period ${period}`,
+        description: `Generated ${created} charges for rent cycle period${orderedChargePeriods.length === 1 ? '' : 's'} ${orderedChargePeriods.join(', ')}`,
         metadata: {
           created,
-          period,
-          eligibleTenancies: tenancies.length,
-          partialPeriodExcluded: partial.length,
+          period: billingPeriod,
+          chargePeriods: orderedChargePeriods,
+          eligibleTenancies,
+          dueCycleExcluded,
         },
       });
     }
 
     let creditApplied = 0;
     const creditApplyFailedTenantIds = [];
-    for (const tenantId of new Set(tenancies.filter((t) => t.tenantId).map((t) => String(t.tenantId)))) {
+    for (const tenantId of tenantIdsForCredit) {
       try {
-        const r = await autoApplyCredit({ clientId, estateId, tenantId: new mongoose.Types.ObjectId(tenantId) });
+        const r = await autoApplyCredit({
+          clientId,
+          estateId,
+          tenantId: new mongoose.Types.ObjectId(tenantId),
+        });
         creditApplied += r.applied || 0;
       } catch (err) {
         creditApplyFailedTenantIds.push(String(tenantId));
@@ -329,10 +365,14 @@ export const rentService = {
       created,
       creditAppliedCents: creditApplied,
       creditApplyFailedTenantIds,
-      period,
-      eligibleTenancies: tenancies.length,
-      partialPeriodExcluded: partial.length,
-      partialPeriodTenancyIds: partial.slice(0, 20).map((t) => String(t._id)),
+      period: billingPeriod,
+      chargePeriods: orderedChargePeriods,
+      eligibleTenancies,
+      dueCycleExcluded,
+      // Retained temporarily for existing API consumers; this now means
+      // tenancies excluded from the selected due-day cycle, not proration.
+      partialPeriodExcluded: dueCycleExcluded,
+      partialPeriodTenancyIds: excludedTenancyIds.slice(0, 20),
     };
   },
 
@@ -360,14 +400,16 @@ export const rentService = {
         _id: tenancy._id, clientId, estateId: tenancy.estateId, houseId: scopedHouse._id,
       }).session(ses).lean();
       if (!currentTenancy) throw Errors.NotFound('Tenancy does not belong to the selected House/Estate');
-      if (!isTenancyEligibleForPeriod(currentTenancy, period)) {
-        throw Errors.InvalidRequest('Tenancy does not cover the full billing period; partial-period billing remains blocked pending owner policy.');
+      const { lines, planMeta, estate } = await planLinesForHouse(scopedHouse, period, { session: ses });
+      const rentLine = lines.find((line) => line.chargeType === 'RENT');
+      const dueDay = resolveDueDay(scopedHouse, estate, rentLine?.dueDay);
+      if (!isTenancyEligibleForPeriod(currentTenancy, period, dueDay)) {
+        throw Errors.InvalidRequest(`Tenancy was not active on ${period}'s configured rent due date; use its first eligible billing cycle.`);
       }
       assertTenancyHouseScope({
         clientId, estateId: scopedHouse.estateId, house: scopedHouse, tenancy: currentTenancy,
       });
 
-      const { lines, planMeta, estate } = await planLinesForHouse(scopedHouse, period, { session: ses });
       const charges = [];
       for (const line of lines) {
         if (!line.amountCents || line.amountCents <= 0) continue;
@@ -413,19 +455,24 @@ export const rentService = {
         throw Errors.InvalidRequest('tenancyId does not belong to the selected house');
       }
     } else {
-      const { tenancyService } = await import('./tenancy.service.js');
-      const at = dateUtil.startOfMonth(period).toDate();
-      tenancy = await tenancyService.findUniqueForHouseAt(clientId, house._id, at, { session });
-      if (!tenancy) {
+      const dueDay = await resolveRentDueDayForPeriod(house, period, { session });
+      const eligibility = eligibleTenancyFilter(period, dueDay);
+      const matches = eligibility
+        ? await Tenancy.find({
+          clientId,
+          estateId: house.estateId,
+          houseId: house._id,
+          ...eligibility,
+        }).sort({ startAt: -1, _id: -1 }).limit(2).session(session || null).lean()
+        : [];
+      if (matches.length !== 1) {
         throw Errors.InvalidRequest(
-          'No unique tenancy for house/period; supply tenancyId explicitly'
+          matches.length > 1
+            ? 'More than one tenancy overlaps this rent due date; supply tenancyId explicitly'
+            : 'No tenancy overlaps this rent due date; supply a tenancyId for a valid cycle'
         );
       }
-      if (!isTenancyEligibleForPeriod(tenancy, period)) {
-        throw Errors.InvalidRequest(
-          'Resolved tenancy does not cover the full billing period; partial-period billing is blocked pending owner policy'
-        );
-      }
+      [tenancy] = matches;
     }
     return this.ensureChargesForTenancy(clientId, tenancy, house, period, { session });
   },
@@ -481,7 +528,8 @@ export const rentService = {
   },
 
   async generateForClient(clientId, { estateId = null, period = null, estateFilter = null } = {}) {
-    const p = period || dateUtil.currentPeriod();
+    const requestedPeriod = period || null;
+    const p = requestedPeriod || dateUtil.currentPeriod();
     const estateQuery = {
       clientId,
       isActive: true,
@@ -493,7 +541,7 @@ export const rentService = {
     let created = 0;
     const results = [];
     for (const estate of estates) {
-      const r = await this.generateChargesForEstate(clientId, estate._id, p);
+      const r = await this.generateChargesForEstate(clientId, estate._id, requestedPeriod);
       created += r.created || 0;
       results.push({
         estateId: estate._id,
@@ -501,10 +549,12 @@ export const rentService = {
         created: r.created,
         period: r.period,
         eligibleTenancies: r.eligibleTenancies,
+        chargePeriods: r.chargePeriods,
+        dueCycleExcluded: r.dueCycleExcluded,
         partialPeriodExcluded: r.partialPeriodExcluded,
       });
     }
-    return { period: p, created, estates: results };
+    return { period: p, chargePeriods: [...new Set(results.flatMap((r) => r.chargePeriods || []))].sort(), created, estates: results };
   },
 
   async houseAccount(clientId, houseId, estateFilter = null) {

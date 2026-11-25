@@ -249,7 +249,7 @@ Two missed API paths are now explicit: House PATCH can change occupancy status/i
 - One Tenant profile, one Tenant-level private link, one-unit simple account, multi-unit combined statement within the same Estate.
 - One verified M-PESA receipt is claimed once. G3 posts the portions to exact Tenancies and preserves any surplus as a Tenant-level carried-forward credit.
 - Excess credit reduces future combined rent due for that same Tenant/Estate. Current G3 needs an auditable aggregate-credit extension; G5 does not own another wallet or ledger.
-- Rent effective dates and proration come from each Client's configured policy. G5 consumes the RentCharges G3 generated; it does not invent rent dates.
+- G3's effective RENT-line due day determines the first rent cycle for a tenancy. A move-in after that date starts the next cycle at the full monthly amount; no proration. G5 consumes G3 RentCharges without recalculating rent.
 - Existing SMS provider and sender configuration are unchanged.
 
 

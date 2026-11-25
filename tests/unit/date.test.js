@@ -23,6 +23,17 @@ describe('utils/date (Africa/Nairobi business time)', () => {
     expect(dateUtil.format(due, 'YYYY-MM-DD')).toBe('2026-03-05');
   });
 
+  test('dueDayWindowFor returns the full Nairobi calendar due date with an exclusive next-day boundary', () => {
+    const window = dateUtil.dueDayWindowFor('2026-11', 17);
+    expect(dateUtil.format(window.start, 'YYYY-MM-DD HH:mm:ss')).toBe('2026-11-17 00:00:00');
+    expect(dateUtil.format(window.endExclusive, 'YYYY-MM-DD HH:mm:ss')).toBe('2026-11-18 00:00:00');
+  });
+
+  test('dueDateFor clamps configured day 31 to February month end', () => {
+    const due = dateUtil.dueDateFor('2027-02', 31);
+    expect(dateUtil.format(due, 'YYYY-MM-DD')).toBe('2027-02-28');
+  });
+
   test('startOfMonth / endOfMonth bracket the whole period', () => {
     const start = dateUtil.startOfMonth('2026-06');
     const end = dateUtil.endOfMonth('2026-06');

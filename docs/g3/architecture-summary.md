@@ -2,7 +2,7 @@
 
 **Backend:** `0dbf7ef75ed6c1a39e24775aec9a86e08f7d0617`  
 **Frontend:** `a27f20dd3244cdc7370cffa16b70c6cd32a45576`  
-**Date:** 21 November 2026
+**Date:** 25 November 2026
 
 ## Runtime
 
@@ -19,6 +19,8 @@ G3 is the financial source of truth for Tenancy, RentCharge, Payment, PaymentAll
 - Tenant credit is scoped to Client + Estate + Tenant and already applies oldest-first across that Tenant's Tenancies in the same Estate.
 - Bank/M-PESA records are evidence until G3 posts a Payment and Ledger movement.
 - Historical charges remain unchanged; plan updates are prospective.
+- Monthly rent uses the effective RENT-line due day in Africa/Nairobi; move-ins after that date start the next full monthly cycle without proration.
+- Automatic billing checks the current and next cycle, then existing Tenant/Estate credit applies oldest-first to the next eligible RentCharge.
 - Authenticated API requests retain cookie sessions and CSRF.
 
 ## Current corrective work
@@ -29,7 +31,7 @@ G3 is the financial source of truth for Tenancy, RentCharge, Payment, PaymentAll
 4. Permit `Idempotency-Key` in CORS without weakening CSRF.
 5. Make ambiguous manual-payment options searchable/paginated beyond the first 20.
 6. Add HouseType editor to workspace and explain prospective impact on existing `HOUSE_TYPE` houses.
-7. Keep full-month billing until proration policy is approved.
+7. Use due-day-cycle billing: move-ins on/before the due date join that cycle; later move-ins start next cycle at the full monthly amount. No proration. Auto-apply existing tenant credit oldest-first.
 8. Keep receipt evidence separate from posted Payments in aggregate reporting.
 
 ## Do not rebuild
@@ -38,7 +40,7 @@ Tenant credit auto-apply, rent ledger, payment allocation, reconciliation or M-P
 
 ## Do not implement in this scope
 
-- Partial-month proration; preserve full-month-only billing until the owner approves the formula.
+- No daily proration. Every due-day cycle creates the full configured monthly amount; a move-in after the due date starts the next cycle.
 - Combined deposit deduction/refund/move-out settlement or any UI promise that it refunds money or closes a Tenancy/House.
 - Deposit payment-before-requirement and overpayment behavior; do not choose defaults.
 - Paid deposit requirement adjustments; return `409 Conflict` after payment instead.

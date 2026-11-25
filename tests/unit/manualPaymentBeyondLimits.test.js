@@ -20,6 +20,8 @@ function matches(t, f) {
       if ('$in' in v && !v.$in.some((x) => same(x, val))) return false;
       if ('$lte' in v && !(new Date(val) <= v.$lte)) return false;
       if ('$gte' in v && !(val != null && new Date(val) >= v.$gte)) return false;
+      if ('$lt' in v && !(new Date(val) < v.$lt)) return false;
+      if ('$gt' in v && !(val != null && new Date(val) > v.$gt)) return false;
       if ('$exists' in v && (val !== undefined) !== v.$exists) return false;
     } else if (v === null) { if (val != null) return false; } else if (!same(val, v)) return false;
   }
@@ -81,6 +83,9 @@ jest.unstable_mockModule('../../src/models/Tenancy.js', () => ({
 jest.unstable_mockModule('../../src/models/Tenant.js', () => ({ Tenant: { collection: { name: 'tenants' }, find: jest.fn() } }));
 jest.unstable_mockModule('../../src/models/MpesaCollectionReference.js', () => ({ MpesaCollectionReference: {} }));
 jest.unstable_mockModule('../../src/models/House.js', () => ({ House: {} }));
+jest.unstable_mockModule('../../src/services/houseBillingPlan.service.js', () => ({
+  resolveRentDueDayForPeriod: jest.fn(async (selectedHouse) => selectedHouse.dueDay ?? 5),
+}));
 jest.unstable_mockModule('../../src/config/database.js', () => ({ supportsMongoTransactions: () => true }));
 
 const { tenancyService } = await import('../../src/services/tenancy.service.js');
@@ -88,7 +93,7 @@ const { eligibleTenancyFilter, isTenancyEligibleForPeriod } = await import('../.
 const { manualOptionsQuerySchema } = await import('../../src/routes/payment.routes.js');
 
 const hex = (n) => n.toString(16).padStart(24, '0');
-const house = { _id: hex(1), estateId: hex(2) };
+const house = { _id: hex(1), estateId: hex(2), dueDay: 5 };
 const C = hex(3);
 const P = '2026-03';
 const base = { clientId: C, houseId: house._id, estateId: house.estateId, status: 'ACTIVE' };
@@ -169,8 +174,8 @@ describe('Test D: ineligible records never enter the eligible selector', () => {
   test('mixed fixture', async () => {
     const ok1 = addTenancy('OK Active', { day: 1 });
     const ok2 = addTenancy('OK Closed boundary', { day: 2, status: 'CLOSED', endAt: new Date('2026-03-31T21:00:00Z') }); // == next period start (EAT)
-    addTenancy('Starts after period start', { startAt: new Date('2026-03-02T00:00:00+03:00') });
-    addTenancy('Ends before period covered', { status: 'CLOSED', endAt: new Date('2026-03-20T00:00:00+03:00') });
+    addTenancy('Starts after rent due day', { startAt: new Date('2026-03-06T00:00:00+03:00') });
+    addTenancy('Ends before rent due day', { status: 'CLOSED', endAt: new Date('2026-03-04T23:59:59+03:00') });
     addTenancy('Void', { status: 'VOID' });
     addTenancy('Pending', { status: 'PENDING' });
     addTenancy('Other client', { clientId: hex(77) });
@@ -235,7 +240,7 @@ describe('Test E: search correctness and bounds', () => {
 describe('Test F: the resolver stays authoritative', () => {
   test('explicit eligible resolves; ineligible / other house / client / estate / tenant are rejected', async () => {
     const good = addTenancy('Good', { day: 1 });
-    const late = addTenancy('Late start', { startAt: new Date('2026-03-02T00:00:00+03:00') });
+    const late = addTenancy('Late start', { startAt: new Date('2026-03-06T00:00:00+03:00') });
     const otherHouse = addTenancy('Other house', { houseId: hex(79) });
     const otherClient = addTenancy('Other client', { clientId: hex(77) });
     const otherEstate = addTenancy('Other estate', { estateId: hex(78) });
@@ -266,10 +271,10 @@ describe('Test F: the resolver stays authoritative', () => {
 });
 
 describe('Test G: DB eligibility filter equals the in-memory rule at every boundary', () => {
-  test('both ACTIVE and CLOSED, month-boundary dates', () => {
-    const f = eligibleTenancyFilter(P);
-    const starts = ['2026-02-28T23:59:59+03:00', '2026-03-01T00:00:00+03:00', '2026-03-01T00:00:00.001+03:00', '2026-03-15T00:00:00+03:00'];
-    const ends = [null, '2026-03-31T23:59:59+03:00', '2026-04-01T00:00:00+03:00', '2026-06-01T00:00:00+03:00'];
+  test('both ACTIVE and CLOSED, exact due-day boundaries', () => {
+    const f = eligibleTenancyFilter(P, 5);
+    const starts = ['2026-03-04T23:59:59+03:00', '2026-03-05T00:00:00+03:00', '2026-03-05T23:59:59.999+03:00', '2026-03-06T00:00:00+03:00'];
+    const ends = [null, '2026-03-04T23:59:59+03:00', '2026-03-05T00:00:00+03:00', '2026-03-06T00:00:00+03:00'];
     for (const status of ['ACTIVE', 'CLOSED', 'VOID', 'PENDING']) for (const s of starts) for (const e of ends) {
       const t = { status, startAt: new Date(s), endAt: e ? new Date(e) : null };
       expect(matches(t, f)).toBe(isTenancyEligibleForPeriod(t, P));
@@ -281,7 +286,7 @@ describe('Test G: DB eligibility filter equals the in-memory rule at every bound
     await opts();
     const pipeline = aggStats.pipelines[0]; // eligible page is issued first
     const m = pipeline[0].$match;
-    const f = eligibleTenancyFilter(P);
+    const f = eligibleTenancyFilter(P, house.dueDay);
     expect(m.status).toEqual(f.status);
     expect(m.startAt).toEqual(f.startAt);
     expect(m.$or).toEqual(f.$or);

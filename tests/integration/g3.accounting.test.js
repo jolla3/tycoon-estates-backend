@@ -20,6 +20,7 @@ import { houseTypeService } from '../../src/services/houseType.service.js';
 import { Tenant } from '../../src/models/Tenant.js';
 import { Tenancy } from '../../src/models/Tenancy.js';
 import { RentCharge } from '../../src/models/RentCharge.js';
+import { TenantCreditMovement, CREDIT_MOVEMENT_TYPE } from '../../src/models/TenantCreditMovement.js';
 import { Payment } from '../../src/models/Payment.js';
 import { PaymentAllocation } from '../../src/models/PaymentAllocation.js';
 import { Ledger } from '../../src/models/Ledger.js';
@@ -31,6 +32,7 @@ import { accountingPostingService } from '../../src/services/accountingPosting.s
 import { reconciliationService } from '../../src/services/reconciliation.service.js';
 import { ledgerService } from '../../src/services/ledger.service.js';
 import { runIntegrityVerifier } from '../../src/services/integrityVerifier.service.js';
+import { settleTenantAccount } from '../../src/services/tenantCredit.service.js';
 import { tenancyService } from '../../src/services/tenancy.service.js';
 import { prepareG3TestIndexes } from '../helpers/g3Indexes.js';
 import { encryptionUtil } from '../../src/utils/encryption.js';
@@ -158,7 +160,145 @@ describeWithMongo('G3 accounting foundation', () => {
     expect(outstandingB.every((c) => String(c.tenancyId) === String(tenancyB._id))).toBe(true);
   });
 
-  test('partial-period tenancy is excluded from automatic generation', async () => {
+  test('late move-in starts the next full due-day rent cycle and existing tenant credit settles it', async () => {
+    const billingPeriod = dateUtil.currentPeriod();
+    const nextPeriod = dateUtil.startOfMonth(billingPeriod).add(1, 'month').format('YYYY-MM');
+    const dueDay = 17;
+    const moveIn = dateUtil.parseNairobiDateOnly(`${billingPeriod}-21`).start;
+
+    // The effective RENT line controls the rent cycle even if House.dueDay differs.
+    // This also verifies the next-period plan snapshot, not just a House fallback.
+    await houseTypeService.update(client._id, houseType._id, {
+      defaultBilling: houseType.defaultBilling.map((line) => ({
+        chargeType: line.chargeType,
+        description: line.description,
+        amountCents: line.amountCents,
+        dueDay,
+      })),
+      effectiveFromPeriod: billingPeriod,
+      changeReason: 'test: effective rent due-day cycle',
+    });
+    house.billingSource = 'HOUSE_TYPE';
+    house.dueDay = 5; // Deliberately differs from the RENT line's due day 17.
+    house.tenantId = tenantA._id;
+    await house.save();
+
+    await Tenancy.updateOne(
+      { _id: tenancyB._id },
+      { $set: { endAt: moveIn, status: 'CLOSED', closeReason: 'TRANSFER' } }
+    );
+
+    const john = await Tenant.create({
+      clientId: client._id,
+      estateId: estate._id,
+      houseId: house._id,
+      name: 'John Due-Day Test',
+      phone: '+254711000003',
+    });
+    const johnTenancy = await Tenancy.create({
+      clientId: client._id,
+      estateId: estate._id,
+      houseId: house._id,
+      tenantId: john._id,
+      startAt: moveIn,
+      endAt: null,
+      status: 'ACTIVE',
+    });
+    house.tenantId = john._id;
+    await house.save();
+
+    const surplusCents = 20000; // KES 200 existing credit before John prepays December.
+    await TenantCreditMovement.create([{
+      clientId: client._id,
+      estateId: estate._id,
+      tenantId: john._id,
+      movementType: CREDIT_MOVEMENT_TYPE.RECEIPT_SURPLUS,
+      amountCents: surplusCents,
+      idempotencyKey: `g3-due-day-john:${john._id}`,
+      description: 'test: verified receipt surplus carried forward',
+    }]);
+
+    // No explicit period means scheduled billing: create the current cycle and
+    // the next cycle needed by a tenant who moved in after this month's due day.
+    const generated = await rentService.generateChargesForEstate(client._id, estate._id);
+
+    const johnCurrentCharge = await RentCharge.findOne({
+      tenancyId: johnTenancy._id, period: billingPeriod, chargeType: 'RENT',
+    });
+    expect(johnCurrentCharge).toBeNull();
+
+    const johnNextCharge = await RentCharge.findOne({
+      tenancyId: johnTenancy._id, period: nextPeriod, chargeType: 'RENT',
+    }).lean();
+    expect(johnNextCharge).toMatchObject({
+      amountDueCents: money.toCents(10000),
+      amountPaidCents: surplusCents,
+      balanceCents: money.toCents(10000) - surplusCents,
+      status: 'PARTIAL',
+    });
+    expect(generated.chargePeriods).toContain(nextPeriod);
+    expect(generated.creditAppliedCents).toBe(surplusCents);
+
+    // John pays the rest of December rent in November, before the December 17 due day.
+    // The receipt must settle the already-generated future-cycle obligations immediately.
+    const paymentDate = dateUtil.parseNairobiDateOnly(`${billingPeriod}-25`).start;
+    const paymentSession = await mongoose.startSession();
+    let prepayment;
+    try {
+      await paymentSession.withTransaction(async () => {
+        prepayment = await settleTenantAccount({
+          clientId: client._id,
+          estateId: estate._id,
+          tenantId: john._id,
+          receipt: {
+            source: 'MANUAL',
+            identityKey: `g3-john-prepay:${john._id}`,
+            amountCents: money.toCents(10700),
+            tenderMethod: 'CASH',
+          },
+          paymentDate,
+          session: paymentSession,
+        });
+      });
+    } finally {
+      await paymentSession.endSession();
+    }
+    expect(prepayment.plan.receiptAppliedCents).toBe(money.toCents(10600));
+    expect(prepayment.plan.newCreditCents).toBe(money.toCents(100));
+
+    const decemberChargesAfterPrepayment = await RentCharge.find({
+      tenancyId: johnTenancy._id, period: nextPeriod,
+    });
+    expect(decemberChargesAfterPrepayment.reduce((sum, charge) => sum + charge.balanceCents, 0)).toBe(0);
+
+    const remainingCreditAfterDecember = await TenantCreditMovement.aggregate([
+      { $match: { clientId: client._id, estateId: estate._id, tenantId: john._id } },
+      { $group: { _id: null, balance: { $sum: '$amountCents' } } },
+    ]);
+    expect(remainingCreditAfterDecember[0]?.balance || 0).toBe(money.toCents(100));
+
+    // At the January due cycle, the carried KES 100 reduces January rent too.
+    const januaryPeriod = dateUtil.startOfMonth(nextPeriod).add(1, 'month').format('YYYY-MM');
+    const januaryRun = await rentService.generateChargesForEstate(client._id, estate._id, januaryPeriod);
+    const johnJanuaryCharge = await RentCharge.findOne({
+      tenancyId: johnTenancy._id, period: januaryPeriod, chargeType: 'RENT',
+    }).lean();
+    expect(johnJanuaryCharge).toMatchObject({
+      amountDueCents: money.toCents(10000),
+      amountPaidCents: money.toCents(100),
+      balanceCents: money.toCents(10000) - money.toCents(100),
+      status: 'PARTIAL',
+    });
+    expect(januaryRun.creditAppliedCents).toBe(money.toCents(100));
+
+    const remainingCreditAfterJanuary = await TenantCreditMovement.aggregate([
+      { $match: { clientId: client._id, estateId: estate._id, tenantId: john._id } },
+      { $group: { _id: null, balance: { $sum: '$amountCents' } } },
+    ]);
+    expect(remainingCreditAfterJanuary[0]?.balance || 0).toBe(0);
+  });
+
+  test('a mid-cycle tenancy is excluded from the explicit period before its first due-day cycle', async () => {
     const midStart = new Date('2026-08-15T00:00:00+03:00');
     await Tenancy.updateOne(
       { _id: tenancyB._id, status: 'ACTIVE' },

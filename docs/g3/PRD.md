@@ -23,9 +23,11 @@ G3 is Tycoon Estates' financial system of record for landlord- and house-centric
 
 ### Rent, credits and HouseType plans
 
-- Monthly rent generation currently selects Tenancies covering the full billing month. Partial-period Tenancies are returned as excluded; no proration formula is implemented.
-- HouseType plan changes are versioned prospectively. For Houses with `billingSource === 'HOUSE_TYPE'`, charge generation resolves the plan version effective for the requested period. Existing Houses using that source can inherit a future version.
-- Tenant credit auto-application after billing already exists. It enumerates the Tenant's eligible Tenancies and open charges within the same Estate and applies credit oldest-first. Do not build a second wallet or duplicate this behavior.
+- Monthly rent is billed on a recurring cycle anchored to the effective `RENT` charge line's due day for each House. The line due day overrides `House.dueDay`, which falls back to the Estate default and then day 5; the due day is interpreted as a Nairobi calendar date and clamped to the month's last day.
+- A Tenancy is eligible for a billing period when its occupancy interval overlaps that period's rent due-day calendar date. The move-in date counts: a move-in on or before the due day belongs to that cycle. A move-in after the due day starts with the next cycle. Each eligible cycle creates the full configured monthly amount. There is no daily proration or partial-month amount.
+- The scheduled generator evaluates the current and next rent cycles. This lets a tenant who moves in after the current due day receive the next month's full RentCharge immediately, rather than waiting for the next monthly job. Explicit period generation remains limited to the requested period.
+- HouseType plan changes are versioned prospectively. For Houses with `billingSource === 'HOUSE_TYPE'`, charge generation resolves the plan version effective for the actual RentCharge period, including a next-cycle first charge.
+- Tenant credit auto-application after billing already exists. It enumerates the Tenant's eligible Tenancies and open charges within the same Estate and applies credit oldest-first. Any unused credit remains available for later cycles. Do not build a second wallet or duplicate this behavior.
 
 ### Manual payments
 
@@ -69,16 +71,21 @@ The authenticated client sends credentials and CSRF on mutations and may send `I
 
 Where M-PESA reporting aggregates are exposed, distinguish provider-observed receipts, verified/attributed receipts, unallocated or quarantined receipts, and G3 Payments actually posted. Never sum a receipt and its resulting Payment as two collections. Transaction history is not a substitute for aggregate reporting. Optional Banking/SMS report surfaces must respect product entitlement.
 
-### G3-07 — Partial-period billing remains blocked
+### G3-07 — Monthly rent uses the configured due-day cycle
 
-Do not add proration until the owner approves start/end inclusivity, timezone boundary, denominator, month-length handling, move-in/move-out behavior, charge types and historical snapshot policy. Preserve the current full-month-only behavior until then.
+- The effective `RENT` line due day anchors the House's monthly rent cycle. Due days use Africa/Nairobi and clamp to the last calendar day when a month is shorter (for example, day 31 in February).
+- Tenancy intervals are `[startAt, endAt)`. A Tenancy qualifies when it overlaps the full Nairobi calendar date of the cycle's rent due day. A start at any time on the due date qualifies; an end at the due-date midnight does not.
+- A Tenancy starting after the current cycle's due date first qualifies for the next cycle, provided it is active on that next cycle's due date. The scheduled generator creates that first upcoming RentCharge without waiting for the next monthly run.
+- Every eligible cycle creates the full configured monthly charge amount. No daily rate, proration or partial-month amount is calculated.
+- Repeated generation remains idempotent under the existing `{tenancyId, period, chargeType, description}` identity. Historical RentCharges and Ledger entries are not rewritten.
+- After charge generation, the existing Tenant/Estate credit settlement runs oldest-first. Surplus credit reduces the next eligible outstanding charge and any remainder carries forward.
 
 ## 5. Out of scope / do not rebuild
 
 - A replacement rent ledger, Payment model, allocation engine or reconciliation engine.
 - Duplicate Tenant-credit application logic.
 - A cross-Estate Tenant wallet.
-- Proration, deposit-to-rent transfers or automatic refund policies based on engineering assumptions.
+- Daily rent calculations or proration; rent remains the full configured monthly amount for every eligible due-day cycle. Deposit-to-rent transfers or automatic refund policies remain separate concerns.
 - Authentication redesign to work around CORS.
 - Production index migrations or provider activation as part of a UI/API correction.
 

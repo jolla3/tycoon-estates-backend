@@ -25,6 +25,16 @@ Property / Estate / HouseType / House
            Ledger     Ledger
 ```
 
+
+## 2.1 Monthly rent cycle and credit settlement
+
+- The `RENT` line's effective due day is the cycle anchor. It is resolved from the effective House billing plan for the target charge period: line-level `dueDay`, then `House.dueDay`, then `Estate.defaultDueDay`, then day 5.
+- Due-day dates are Africa/Nairobi calendar dates. Day values beyond the month's length are clamped to its final day. Tenancies use half-open occupancy intervals `[startAt, endAt)` and qualify when they overlap the full due-day date.
+- Move-in on the due day qualifies for that cycle, including move-in later in the day. Move-in after the due day begins with the next cycle. The first eligible cycle receives the full configured monthly amount; the system never calculates daily prorations.
+- The automatic scheduler checks the current and next due-day cycles. If a Tenancy starts after the current due day but overlaps the next cycle's due day, it creates the next cycle's first full RentCharge immediately. Explicit period generation does not silently move a request into another period.
+- HouseType/House billing plan versions are resolved against the actual `RentCharge.period`. A prospective plan change effective next month must not leak into the current charge.
+- After charges are created or found idempotently, the existing `tenantCredit.service.js` applies Tenant/Estate credit oldest-first across eligible obligations. Credit reduces the next eligible outstanding RentCharge; unused credit remains carried forward. Do not add a second wallet or rewrite historical movements.
+
 ## 2. Records and service ownership
 
 | Record | Responsibility | Required scope |
@@ -42,7 +52,7 @@ Property / Estate / HouseType / House
 ## 3. Existing service boundaries
 
 - `tenancy.service.js`: Tenancy lifecycle and manual-payment candidate resolution.
-- `rent.service.js`: rent generation, full-period eligibility, HouseType effective-plan resolution and credit application invocation.
+- `rent.service.js`: rent generation, rent due-day cycle eligibility, HouseType effective-plan resolution for the actual charge period and existing credit application invocation.
 - `tenantCredit.service.js`: serializes Tenant/Estate credit and applies it oldest-first across that Tenant's eligible Tenancies in the same Estate.
 - `deposit.service.js`: deposit requirement, movements, refund, transfer and settlement.
 - `houseType.service.js` / `houseTypePlanVersion.service.js`: versioned plan mutation and effective-period lookup.
