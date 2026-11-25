@@ -1,8 +1,8 @@
 # G5 Notifications — Product Requirements
 
-**Status:** Owner-approved implementation contract, 22 November 2026  
-**Repository:** `jolla3/tycoon-estates-backend`  
-**Working branch:** `fix/g5-public-payment-url`  
+**Status:** Owner-approved implementation contract, 22 November 2026
+**Repository:** `jolla3/tycoon-estates-backend`
+**Working branch:** `fix/g5-public-payment-url`
 **Baseline:** `92e399f19bb4e84eee440b61eff074b68c734020`
 **Implementation checkpoint:** application code reviewed at `8e8cad6343a6911e15f3565dbcbb26cc5917d6a1`; this documentation and API-contract follow-up is included in the same working branch.
 
@@ -24,8 +24,9 @@ Tycoon Estates sends accurate, timely messages to tenants, with the estate they 
 10. Rent reminders are due-date notices, not a polling/cooldown loop. Select open positive-balance charges whose saved `RentCharge.dueDate` is exactly five Nairobi calendar days ahead. Group by tenant, active tenancy, billing period and Nairobi due-date calendar day so all charge lines for that tenancy/day appear in one message without merging distinct tenancy schedules. Do not send settled charges. Run selection daily at 09:00 Africa/Nairobi and dispatch ordinary SMS independently every 60 seconds.
 11. Bank and M-PESA payment confirmations identify the estate attached to the canonical transaction/receipt ownership context. Do not use the tenant's current estate to rewrite historical payment ownership.
 12. Provider `sent` continues to mean Celcom accepted the request, not that a handset delivery receipt was observed.
-12a. The tenant-detail SMS history must show a sanitized preview of the actual protected onboarding/billing message, including its configured charge lines and Till context. Replace the bearer URL/token with `[private payment link]`; do not return the decrypted phone, raw bearer token, or encrypted envelope. The database continues to store protected payloads encrypted at rest.
-12b. Preserve a concise, sanitized Celcom rejection code/description on failed messages. Never persist or log the raw provider response, API key, destination number, full SMS body, URL or bearer token. A provider failure remains visible as failed; do not label a rejected message as sent.
+12a. Authorized tenant-detail and SMS-history reads must show the exact stored onboarding SMS, including its full payment URL and destination number. The payload remains encrypted at rest; decrypt only in the caller-scoped history read and never return the envelope or internal lease secrets.
+12b. An M-PESA payment link is included only when the client is entitled to M-PESA collection and an operational BUY_GOODS_TILL profile is actively mapped to the tenant's estate. Other tenants receive the ordinary registration/billing SMS without a payment link.
+12c. `G5_PROTECTED_SMS_ENABLED` controls delivery only. When disabled, still provision an eligible M-PESA link and save the exact message as `dispatchMode: SUPPRESSED` so operators can inspect it; suppressed messages must never be sent automatically if the flag is later enabled. An explicit resend after enabling delivery creates a new enabled attempt.
 13. A missing tenant phone must not block tenant/tenancy registration or a move; skip the SMS and record the operational reason.
 14. The connected BankAccount model is a statement-ingestion account, not proof of a rent-receiving destination. Do not put it in tenant messages. Until an authoritative verified payment-instruction source exists, direct tenants to the estate office for bank details.
 

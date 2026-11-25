@@ -1,7 +1,7 @@
 # G5 Notifications — Short Engineering Handoff
 
-**Branch:** `fix/g5-public-payment-url`  
-**Baseline:** `92e399f19bb4e84eee440b61eff074b68c734020`  
+**Branch:** `fix/g5-public-payment-url`
+**Baseline:** `92e399f19bb4e84eee440b61eff074b68c734020`
 **Scope:** Backend tenant registration SMS, estate identity, complete billing notices, D-5 reminders, stable M-PESA links and payment confirmations.
 **Implementation checkpoint:** application code reviewed at `8e8cad6343a6911e15f3565dbcbb26cc5917d6a1`; this documentation and API-contract follow-up is included in the same working branch.
 
@@ -13,8 +13,9 @@
 - Bank-only registration queues one standard welcome/billing SMS and never creates an M-PESA link.
 - M-PESA link eligibility requires client MPESA entitlement plus an operational BUY_GOODS_TILL profile with ACTIVE mapping to that tenant's estate. Missing profile does not block bank-only registration; the non-eligibility reason is recorded without logging secrets.
 - Registration creates Tenant, Tenancy and the appropriate SMS outbox row in the existing caller-owned transaction. No external Celcom call occurs in the transaction.
-- Tenant SMS history shows the actual protected billing/onboarding message as a sanitized preview; the bearer URL is replaced by `[private payment link]`. Never return plaintext phone, token or envelope.
-- Celcom failures retain only a redacted error code/description, not the raw response or request secrets. Kenyan local mobile numbers are converted to international `254…` format at the provider boundary; stored contact data is unchanged.
+- Authorized tenant detail and global SMS history show the exact protected message, full M-PESA payment URL and destination number; the encrypted payload envelope remains hidden.
+- Registration links require M-PESA entitlement and an estate-mapped Buy Goods Till; DRAFT/NOT_READY profiles can collect evidence, but matching/posting waits until ACTIVE. SUSPENDED/unmapped profiles and PAYBILL profiles do not receive the Till link.
+- Disabling protected SMS dispatch suppresses delivery but still saves the eligible link/message for inspection. Suppressed rows are never auto-sent later; explicit resend is required.
 - One tenant-level link per `{clientId, estateId, tenantId}` remains reusable while at least one ACTIVE Tenancy remains in that estate. Closing the final active tenancy revokes it regardless of arrears/credit. Same-estate moves preserve it; cross-estate transfers revoke the old estate link and evaluate a destination link. Resend reuses the original URL; explicit security rotation is separate. The API never returns the raw bearer token.
 - New raw tokens remain 256-bit. Store HMAC digest plus AES-GCM token envelope; derive a purpose-specific key from the existing dedicated `G5_ENVELOPE_KEYS` keyring with HKDF. Old digest-only links remain valid; recover their token only from matching authenticated historical outbox evidence and verify the digest. Never silently rotate an unrecoverable old link.
 - Billing notices queue once per tenant/estate/period after charges and successful credit application. Aggregate every line; missing/invalid data never renders KES 0 or KES NaN.
