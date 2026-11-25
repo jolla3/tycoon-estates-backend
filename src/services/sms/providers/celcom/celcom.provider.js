@@ -46,7 +46,12 @@ function safeProviderText(value, secrets = []) {
 }
 
 function providerFailureDetail(data, secrets) {
-  const row = Array.isArray(data?.responses) ? data.responses[0] : (data?.error || data || {});
+  let payload = data;
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); }
+    catch { payload = { description: payload }; }
+  }
+  const row = Array.isArray(payload?.responses) ? payload.responses[0] : (payload?.error || payload || {});
   const code = row?.['respose-code'] ?? row?.['response-code'] ?? row?.code ?? row?.error_code;
   let description = row?.['response-description'] ?? row?.['respose-description']
     ?? row?.description ?? row?.detail ?? row?.message ?? row?.error;

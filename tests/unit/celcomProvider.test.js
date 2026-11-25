@@ -46,6 +46,14 @@ describe('Celcom SMS provider boundary', () => {
     expect(result.errorMessage).not.toContain(token);
   });
 
+  test('sanitizes a plain-text 422 response without losing the provider explanation', async () => {
+    post.mockRejectedValueOnce({ response: { status: 422, data: 'Invalid shortcode configuration' } });
+    const result = await provider().send('0769563983', 'Rent due: KES 9,000');
+    expect(result.errorMessage).toContain('HTTP 422');
+    expect(result.errorMessage).toContain('Invalid shortcode configuration');
+    expect(result.errorMessage).not.toContain('secret-api-key');
+  });
+
   test('does not call the provider for malformed mobile input', async () => {
     const result = await provider().send('not-a-phone', 'message');
     expect(result).toMatchObject({ success: false, status: 'failed', errorMessage: 'Invalid mobile number format' });
