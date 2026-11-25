@@ -8,7 +8,7 @@ import { SmsMessage } from '../../models/SmsMessage.js';
 import { Tenant } from '../../models/Tenant.js';
 import { Tenancy } from '../../models/Tenancy.js';
 import { Estate } from '../../models/Estate.js';
-import { resolveTillMerchant } from './mpesaMerchantMapping.service.js';
+import { resolveTillMerchant, resolveRegistrationTillMerchant } from './mpesaMerchantMapping.service.js';
 import { checkEntitlement } from '../entitlement.service.js';
 import { audit } from '../audit.service.js';
 import {
@@ -76,14 +76,16 @@ function buildOnboardingBody({ estateName, tillCode, token, registrationText = n
 async function queueOnboarding({ clientId, estateId, tenant, link, token, merchant, estateName, registrationText = null, session = null, messageId = null, attempt = 'delivery' }) {
   const phone = tenant?.phone && String(tenant.phone).trim();
   const tillCode = merchant?.businessShortCode ? String(merchant.businessShortCode) : null;
-  if (env.G5_PROTECTED_SMS_ENABLED !== '1' || !phone || !tillCode || !env.G5_PUBLIC_PAYMENT_URL || !estateName) {
-    const reason = env.G5_PROTECTED_SMS_ENABLED !== '1' ? 'protected_sms_disabled'
-      : !phone ? 'tenant_phone_missing'
-        : !tillCode ? 'merchant_till_unavailable'
-          : !env.G5_PUBLIC_PAYMENT_URL ? 'public_payment_url_missing' : 'estate_name_missing';
-    logger.info({ reason, linkId: String(link._id) }, 'G5 onboarding SMS not queued');
+  if (!phone || !tillCode || !env.G5_PUBLIC_PAYMENT_URL || !estateName) {
+    const reason = !phone ? 'tenant_phone_missing'
+      : !tillCode ? 'merchant_till_unavailable'
+        : !env.G5_PUBLIC_PAYMENT_URL ? 'public_payment_url_missing' : 'estate_name_missing';
+    logger.info({ reason, linkId: String(link._id) }, 'G5 onboarding message not queued');
     return { queued: false, reason };
   }
+  // Keep an inspectable outbox record even while SMS sending is disabled.
+  // SUPPRESSED is durable: enabling dispatch later will not unexpectedly send an old test message.
+  const dispatchMode = env.G5_PROTECTED_SMS_ENABLED === '1' ? 'ENABLED' : 'SUPPRESSED';
   const stableMessageId = messageId || new mongoose.Types.ObjectId();
   const r = await queueProtectedSms({
     clientId, estateId, tenantId: tenant._id,
@@ -94,10 +96,14 @@ async function queueOnboarding({ clientId, estateId, tenant, link, token, mercha
     idempotencyKey: `onboard:${String(link._id)}:v${link.linkVersion}:${attempt}:${String(stableMessageId)}`,
     linkId: link._id,
     linkVersion: link.linkVersion,
+    dispatchMode,
     session,
     messageId: stableMessageId,
   });
-  return { queued: Boolean(r.id), created: r.created, reason: null, messageId: r.id };
+  return {
+    queued: Boolean(r.id), created: r.created, reason: null, messageId: r.id,
+    dispatchMode, dispatchSuppressed: dispatchMode === 'SUPPRESSED',
+  };
 }
 
 async function recoverLegacyToken(link, { session = null } = {}) {
@@ -324,12 +330,13 @@ export const mpesaSubmissionLinkService = {
     await assertActiveEstateTenancy(clientId, estateId, tenant._id, session);
     const eligibility = await checkEntitlement(clientId, 'MPESA', { session });
     if (!eligibility.entitled) return { eligible: false, reason: 'mpesa_not_entitled' };
-    if (env.G5_PROTECTED_SMS_ENABLED !== '1' || !tenant?.phone || !env.G5_PUBLIC_PAYMENT_URL || !estate?.name) {
+    // Eligibility/link creation is independent from SMS dispatch. With dispatch
+    // disabled, queueOnboarding stores the exact message as SUPPRESSED for review.
+    if (!tenant?.phone || !env.G5_PUBLIC_PAYMENT_URL || !estate?.name) {
       return {
         eligible: false,
-        reason: env.G5_PROTECTED_SMS_ENABLED !== '1' ? 'protected_sms_disabled'
-          : !tenant?.phone ? 'tenant_phone_missing'
-            : !env.G5_PUBLIC_PAYMENT_URL ? 'public_payment_url_missing' : 'estate_name_missing',
+        reason: !tenant?.phone ? 'tenant_phone_missing'
+          : !env.G5_PUBLIC_PAYMENT_URL ? 'public_payment_url_missing' : 'estate_name_missing',
       };
     }
     const existing = await MpesaSubmissionLink.findOne({ clientId, estateId, tenantId: tenant._id })
@@ -337,7 +344,7 @@ export const mpesaSubmissionLinkService = {
     // An active reusable link retains its original operational Till binding.
     // Never send a newly mapped Till with an old link token.
     const merchantProfileId = existing?.status === 'ACTIVE' ? existing.merchantProfileId : null;
-    const resolution = await resolveTillMerchant(clientId, estateId, { merchantProfileId, session });
+    const resolution = await resolveRegistrationTillMerchant(clientId, estateId, { merchantProfileId, session });
     if (!resolution.merchant || resolution.ambiguous) {
       return { eligible: false, reason: resolution.ambiguous ? 'estate_till_ambiguous' : 'estate_till_unavailable' };
     }
