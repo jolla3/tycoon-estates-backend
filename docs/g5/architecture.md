@@ -404,8 +404,10 @@ Do not store more payer personal information than required. Decide raw message r
 - Use deterministic parsers for known Safaricom confirmation templates. No LLM parsing.
 - Version the parser so old submissions can be re-evaluated without changing their source evidence.
 - Normalize receipt identifier, amount to integer cents, currency, transaction date/time and phone format.
-- Parse only known, unambiguous date/time formats. Preserve the original text interpretation and parser version for audit.
-- Reject or quarantine truncated, malformed, unsupported, ambiguous or contradictory messages.
+- Parse only known transaction-bearing cores and exact, versioned templates. `BUY_GOODS_PAID_V1` covers the core confirmation; `BUY_GOODS_PAID_V2` additionally permits only the observed daily transaction-limit sentence and/or the `https://saf.cx/<token>` balances link after transaction cost. The suffix is validated but its values are not returned or used for matching, and the URL is never fetched. Unknown extra payload remains unsupported.
+- Parse only known date/time formats and preserve parser version/semantics. The current DD/MM/YY + Nairobi interpretation and ten-minute comparison are provisional until B04 correlates an actual SMS with its Daraja record. Do not tune or loosen timestamp matching from a synthetic fixture.
+- When retention is approved, encrypt the exact submitted text, including original whitespace and newlines. Whitespace canonicalization is permitted only for duplicate digest calculation and parser input; it must not replace the original evidence envelope.
+- Reject or quarantine truncated, malformed, unsupported, ambiguous or contradictory transaction cores. Multiple confirmations are always ambiguous.
 - Enforce input length, control-character handling, safe HTML rendering and log-injection protection.
 - Never log raw message text or include it in ordinary API responses.
 - Do not use payer name similarity as an identity proof.
@@ -416,7 +418,11 @@ Payer name/phone are descriptive evidence only. A third-party payer may submit t
 
 ## 10. Daraja C2B callback and Pull Transactions
 
-### 10.1 Shared ingestion path
+### 10.1 Provider merchant identity and channels
+
+The merchant `ShortCode` is the actual Safaricom organization PayBill/Till identity. C2B is a push-notification channel: after C2B registration, Safaricom delivers confirmations to the registered callback URLs. Pull is a separate recovery/history query using the same `ShortCode` plus a date window and offset. Under the supplied Pull registration contract, `NominatedNumber` is the Safaricom MSISDN associated with the organization account and is sent only during one-time Pull registration; it is not the Till number, is not part of C2B callback payload identity, and is not sent on each Pull query. Do not infer that a profile is Pull-capable merely because this number is stored.
+
+### 10.2 Shared ingestion path
 
 ```text
 C2B callback ─┐

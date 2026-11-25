@@ -99,6 +99,8 @@ export async function submitSms({ token, text }) {
     .select('+tokenDigest');
   if (!probe) return { accepted: false };
 
+  // Normalize whitespace only for duplicate detection. When retention is approved, the encrypted
+  // evidence envelope preserves the exact submitted text (including original spacing and newlines).
   const normalized = canonicalText(text);
   const digest = evidenceDigest(normalized);
   // Fast path for already-accepted identical evidence (outside the write fence).
@@ -174,7 +176,7 @@ export async function submitSms({ token, text }) {
         });
       }
       if (retain) {
-        const env1 = sealEnvelope(normalized, `g5sub:${submissionId}:${fenced.clientId}`);
+        const env1 = sealEnvelope(text, `g5sub:${submissionId}:${fenced.clientId}`);
         Object.assign(doc, {
           evidenceEnvelope: env1,
           evidenceKeyId: envelopeKeyId(env1),

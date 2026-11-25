@@ -4,6 +4,13 @@
 
 **Current position:** M-PESA has implemented profile creation, shared callback configuration, C2B/Pull registration attempts, durable ingress, canonical receipt records and gated posting code. The end-to-end C2B collection-to-G3 path is NOT yet proven operational. Do not describe M-PESA as production-ready.
 
+### SMS parser and merchant-identity correction — 25 November 2026
+
+- Parser V2 accepts the established payment core plus only the observed daily-limit sentence and/or Safaricom balances short-link suffix. Unknown trailing text remains rejected. Informational amounts and URLs are not persisted as transaction fields, and URLs are never fetched.
+- When retention is approved, the evidence envelope stores the exact submitted SMS text. Whitespace normalization is for duplicate digest calculation only.
+- B04 remains open: the current DD/MM/YY interpretation and ten-minute timestamp tolerance must be correlated against the same real Daraja receipt before they can authorize automatic matching. The owner-supplied sample date and existing C2B test timestamp are not assumed to correspond.
+- `ShortCode` is the actual Till/PayBill organization identity used for C2B registration/notifications and Pull queries. `NominatedNumber` is the organization-linked Safaricom MSISDN required only for one-time Pull registration; it is not another Till number. Pull is optional recovery, not the C2B notification channel.
+
 ### Locked direction
 
 - C2B is the primary collection path. Pull is optional recovery/reconciliation and must not block C2B activation.
