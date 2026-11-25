@@ -22,9 +22,26 @@ describeWithMongo('G5 protected SMS', () => {
     const { id } = await queueProtectedSms({ clientId, estateId, phone: '+254700000009', body: 'SECRET BODY', idempotencyKey: 'k1', linkId, linkVersion: 1 });
     const raw = await SmsMessage.collection.findOne({ _id: id });
     expect(JSON.stringify(raw)).not.toMatch(/254700000009|SECRET BODY/);
+    const history = await smsService.history(clientId, null, { limit: 10 });
+    const visible = history.find((item) => String(item._id) === String(id));
+    expect(visible).toMatchObject({ phoneNumber: '+254700000009', message: 'SECRET BODY', deliveryMode: 'G5_PROTECTED' });
+    expect(visible).not.toHaveProperty('payloadEnvelope');
     expect(await smsService._claimNextBatch(5)).toHaveLength(0);
     expect(await cancelQueuedForLink(linkId, { clientId })).toBe(1);
     expect((await SmsMessage.findById(id)).status).toBe('cancelled');
+  });
+
+  test('suppressed protected messages remain inspectable but are never claimable for sending', async () => {
+    const { clientId, estateId } = ids();
+    const { id } = await queueProtectedSms({
+      clientId, estateId, phone: '+254711000008', body: 'Preview only: https://pay.example.com/pay#t=token',
+      idempotencyKey: 'suppressed-preview', dispatchMode: 'SUPPRESSED',
+    });
+    const row = await SmsMessage.findById(id).select('+payloadEnvelope').lean();
+    expect(row.dispatchMode).toBe('SUPPRESSED');
+    expect((await smsService.history(clientId, null, { limit: 10 })).find((item) => String(item._id) === String(id)))
+      .toMatchObject({ phoneNumber: '+254711000008', message: 'Preview only: https://pay.example.com/pay#t=token' });
+    expect(await smsService._claimNextBatch(5)).toHaveLength(0);
   });
 
   test('duplicate idempotency key collapses', async () => {
