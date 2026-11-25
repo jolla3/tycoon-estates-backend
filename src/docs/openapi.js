@@ -324,6 +324,20 @@ export const openApiSpec = {
         responses: { 200: { description: 'OK' } },
       },
     },
+    '/mpesa-collection/submissions/{id}/evidence': {
+      get: {
+        tags: ['G5 M-PESA Collection'],
+        summary: 'View retained original SMS evidence for an authorized review',
+        description: 'Requires authenticated CLIENT_OWNER, CLIENT_ADMIN or SUPER_ADMIN with explicit client scope and MPESA entitlement. Decrypts the original SMS only for this request, records a required audit event, and returns Cache-Control: no-store. The plaintext is omitted from list responses and audit metadata. If raw evidence was not retained, available=false.',
+        security: [{ cookieAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', pattern: '^[a-fA-F0-9]{24}$' } }],
+        responses: {
+          200: { description: 'Evidence detail or an explicit unavailable state' },
+          404: { description: 'Submission not found in the caller scope' },
+          503: { description: 'Evidence cannot be decrypted or the audit write failed' },
+        },
+      },
+    },
     '/mpesa-collection/submissions/{id}/resolve': {
       post: {
         tags: ['G5 M-PESA Collection'],

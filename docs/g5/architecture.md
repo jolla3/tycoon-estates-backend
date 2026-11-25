@@ -1247,3 +1247,17 @@ All simulator tests must use a dedicated sandbox deployment, disposable replica-
 ### 30.9 No implementation authorization implied
 
 This architecture amendment records the agreed technical direction and source defects. It does not itself authorize production callback exposure, Pull registration, provider calls, migrations, operational-state mutation, feature-flag changes or G3 posting. The implementation remains phased behind review and controlled sandbox evidence.
+
+ 
+## Owner decision — authorized viewing of retained M-PESA SMS evidence (25 November 2026)
+
+The product owner approves on-demand viewing of the original submitted SMS by authorized reviewers. This resolves the **authorized-visibility** part of G5-B05; it does not resolve the separate retention-period, dispute-hold, or deletion-schedule decisions.
+
+- Authorized roles are `CLIENT_OWNER` and `CLIENT_ADMIN` within the authenticated client and estate scope. `SUPER_ADMIN` may read only after selecting one explicit client through the existing `clientContext` boundary. Existing server authorization and `estateFilter` remain authoritative.
+- The original SMS remains encrypted in `MpesaSmsSubmission.evidenceEnvelope`. A dedicated authenticated detail read decrypts it in memory for that request only. Do not add plaintext to the submission list DTO, general history, tenant DTOs, or audit metadata.
+- Every successful evidence read is audited as `G5_SUBMISSION_EVIDENCE_VIEWED` with the submission ID, client, estate and actor. The audit record must never contain the message or envelope. If the required audit write fails, do not return plaintext.
+- The endpoint is read-only, returns `Cache-Control: no-store`, and returns no envelope, key ID, digest or encryption material. A missing retained envelope is reported as unavailable; a digest cannot reconstruct the original message.
+- The frontend may hold the returned text only while the reviewer has the evidence view open. It must not persist it to IndexedDB, local/session storage, offline snapshots, analytics, logs or error telemetry.
+- Viewing evidence grants no approval, force-match, association override, or posting capability. Existing two-evidence and G3 posting gates remain unchanged.
+
+G5-B05 remains partially open until the owner separately approves the retention duration, dispute hold and deletion policy. This decision authorizes visibility only for evidence that is already retained under the configured policy.

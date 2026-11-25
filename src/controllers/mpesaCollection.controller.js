@@ -75,6 +75,20 @@ export const mpesaCollectionController = {
   account: wrap(async (req, res) => apiResponse.success(res, await tenantAccountService.view({ clientId: req.clientId, estateFilter: req.estateFilter, tenantId: req.params.tenantId }))),
   payments: wrap(async (req, res) => apiResponse.success(res, { payments: await tenantAccountService.payments({ clientId: req.clientId, estateFilter: req.estateFilter, tenantId: req.params.tenantId, limit: req.query.limit }) })),
   listSubmissions: wrap(async (req, res) => apiResponse.success(res, { submissions: await mpesaSubmissionReviewService.list({ clientId: req.clientId, estateFilter: req.estateFilter, state: req.query.state, limit: req.query.limit }) })),
+  submissionEvidence: wrap(async (req, res) => {
+    res.set({
+      'Cache-Control': 'no-store, private, max-age=0',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
+    const evidence = await mpesaSubmissionReviewService.evidence({
+      clientId: req.clientId,
+      estateFilter: req.estateFilter,
+      id: req.params.id,
+      actor: actorOf(req),
+    });
+    return apiResponse.success(res, evidence);
+  }),
   resolveSubmission: wrap(async (req, res) => apiResponse.success(res, await mpesaSubmissionReviewService.resolve({
     clientId: req.clientId, estateFilter: req.estateFilter, id: req.params.id,
     action: req.body?.action, reasonCode: req.body?.reasonCode, actor: actorOf(req),
