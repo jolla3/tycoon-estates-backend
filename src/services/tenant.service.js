@@ -19,6 +19,7 @@ import { tenancyService } from './tenancy.service.js';
 import { smsService } from './sms.service.js';
 import { formatRegistrationPlanText, formatSmsDisplayLabel } from './smsTemplates.js';
 import { mpesaSubmissionLinkService } from './mpesa/mpesaSubmissionLink.service.js';
+import { protectedSmsHistoryPreview } from './g5ProtectedSms.service.js';
 import { resolveRegistrationBillingPlan } from './rent.service.js';
 import { logger } from '../config/logger.js';
 import { generateBearerToken } from '../utils/g5Token.js';
@@ -246,7 +247,7 @@ export const tenantService = {
       })
         .sort({ period: -1 })
         .lean(),
-      SmsMessage.find({ clientId, tenantId: tenant._id }).sort({ createdAt: -1 }).limit(20).lean(),
+      SmsMessage.find({ clientId, tenantId: tenant._id }).select('+payloadEnvelope').sort({ createdAt: -1 }).limit(20).lean(),
       AuditLog.find({
         clientId,
         resource: 'Tenant',
@@ -365,9 +366,10 @@ export const tenantService = {
         _id: m._id,
         phoneNumber: m.phoneNumber,
         message: m.deliveryMode === 'G5_PROTECTED'
-          ? 'M-PESA onboarding notification (private payment link hidden for security).'
+          ? protectedSmsHistoryPreview(m)
           : m.message,
         status: m.status,
+        failureReason: m.failureReason || null,
         type: m.type,
         deliveryMode: m.deliveryMode || 'STANDARD',
         createdAt: m.createdAt,

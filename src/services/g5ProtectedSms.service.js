@@ -74,6 +74,33 @@ export function buildProtectedSmsAad({
   return parts.join(':');
 }
 
+/** Return a readable history preview without disclosing the protected link or token. */
+export function protectedSmsHistoryPreview(row) {
+  if (!row?.payloadEnvelope) return 'Protected message content unavailable.';
+  try {
+    const aad = buildProtectedSmsAad({
+      messageId: row._id,
+      clientId: row.clientId,
+      estateId: row.estateId,
+      tenantId: row.tenantId,
+      linkId: row.g5LinkId,
+      linkVersion: row.g5LinkVersion,
+      type: row.type,
+      notificationVersion: row.notificationVersion,
+      idempotencyKey: row.idempotencyKey,
+    });
+    const payload = JSON.parse(openEnvelope(row.payloadEnvelope, aad));
+    if (typeof payload.body !== 'string' || !payload.body.trim()) {
+      return 'Protected message content unavailable.';
+    }
+    return payload.body
+      .replace(/https?:\/\/[^\s]+?#t=[A-Za-z0-9_-]{43}/gi, '[private payment link]')
+      .replace(/#t=[A-Za-z0-9_-]{43}/gi, '#t=[redacted]');
+  } catch {
+    return 'Protected message content unavailable.';
+  }
+}
+
 /**
  * Insert a protected outbox row. Accepts an optional caller-owned session.
  * Generates a fresh AEAD nonce on every call (including transaction retries).
