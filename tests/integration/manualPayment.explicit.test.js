@@ -21,6 +21,7 @@ import { Ledger } from '../../src/models/Ledger.js';
 import { paymentService } from '../../src/services/payment.service.js';
 import { tenantService } from '../../src/services/tenant.service.js';
 import { tenantAccountSnapshot } from '../../src/services/tenantCredit.service.js';
+import { dateUtil } from '../../src/utils/date.js';
 
 describeWithMongo('explicit manual receipts', () => {
   let client, otherClient, estate, otherEstate, house, house2, otherEstateHouse;
@@ -69,7 +70,7 @@ describeWithMongo('explicit manual receipts', () => {
     tenA = await Tenancy.create({ clientId: client._id, estateId: estate._id, houseId: house._id, tenantId: alice._id,
       startAt: new Date('2026-01-01T00:00:00+03:00'), endAt: new Date('2026-07-01T00:00:00+03:00'), status: 'CLOSED' });
     tenB = await Tenancy.create({ clientId: client._id, estateId: estate._id, houseId: house._id, tenantId: bob._id,
-      startAt: new Date('2026-07-01T00:00:00+03:00'), endAt: null, status: 'ACTIVE' });
+      startAt: new Date('2026-07-01T00:00:00+03:00'), endAt: new Date('2026-10-01T00:00:00+03:00'), status: 'CLOSED' });
     tenC2 = await Tenancy.create({ clientId: client._id, estateId: estate._id, houseId: house2._id, tenantId: carol._id,
       startAt: new Date('2026-01-01T00:00:00+03:00'), endAt: null, status: 'ACTIVE' });
     house.tenantId = bob._id; await house.save();
@@ -129,6 +130,42 @@ describeWithMongo('explicit manual receipts', () => {
     expect(t.paymentHistory).toHaveLength(1);
     expect(t.paymentHistory[0]).toMatchObject({ kind: 'manual_receipt', grossCents: 1000300, appliedToRentCents: 0, newCreditCents: 1000300 });
     expect(t.account).toMatchObject({ receivedCents: 1000300, appliedToRentCents: 0, creditCents: 1000300, outstandingCents: 0, billedCents: 0 });
+  });
+
+  test('new tenancy manual receipt immediately creates and pays its first full due-day cycle', async () => {
+    jest.spyOn(dateUtil, 'currentPeriod').mockReturnValue('2026-11');
+    const liveHouse = await House.create({
+      clientId: client._id, estateId: estate._id, houseNumber: 'NEW-1', monthlyRent: 9000,
+      billingSource: 'MONTHLY_RENT', status: 'occupied', isActive: true, dueDay: 17,
+    });
+    const newTenant = await Tenant.create({
+      clientId: client._id, estateId: estate._id, houseId: liveHouse._id,
+      name: 'New Tenant', phone: '+254711000009',
+    });
+    liveHouse.tenantId = newTenant._id; await liveHouse.save();
+    const newTenancy = await Tenancy.create({
+      clientId: client._id, estateId: estate._id, houseId: liveHouse._id, tenantId: newTenant._id,
+      startAt: new Date('2026-11-21T00:00:00+03:00'), endAt: null, status: 'ACTIVE',
+    });
+
+    const result = await rec({
+      ...ids(newTenant, newTenancy), houseId: String(liveHouse._id),
+      amountCents: 900000, paymentDate: '2026-11-25',
+    });
+
+    expect(result.receipt).toMatchObject({ receiptAppliedCents: 900000, newCreditCents: 0 });
+    const charge = await RentCharge.findOne({ tenancyId: newTenancy._id, period: '2026-12', chargeType: 'RENT' });
+    expect(charge).toMatchObject({ amountDueCents: 900000, amountPaidCents: 900000, balanceCents: 0, status: 'PAID' });
+    const tenantView = await tenantService.get(client._id, newTenant._id);
+    expect(tenantView.account).toMatchObject({
+      receivedCents: 900000, billedCents: 900000, appliedToRentCents: 900000,
+      creditCents: 0, outstandingCents: 0,
+    });
+    expect(tenantView.paymentHistory[0]).toMatchObject({ kind: 'manual_receipt', grossCents: 900000, appliedToRentCents: 900000, newCreditCents: 0 });
+    expect(tenantView.payments).toHaveLength(1);
+    expect(tenantView.billingHistory).toHaveLength(1);
+    expect(tenantView.billingHistory[0]).toMatchObject({ period: '2026-12', amountDueCents: 900000, amountPaidCents: 900000, balanceCents: 0 });
+    expect(await RentCharge.countDocuments({ tenancyId: newTenancy._id, period: '2027-01' })).toBe(0);
   });
 
   test('known case: receipts 10,003 + 80,000 with no charges => received 90,003, credit 90,003, applied 0, outstanding 0', async () => {
