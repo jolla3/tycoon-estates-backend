@@ -156,6 +156,36 @@ function manualBranch(f) {
     { $unwind: '$sourceTenancy' },
     {
       $set: {
+        _paymentDayStart: {
+          $dateFromString: {
+            dateString: '$paymentDateLocal',
+            timezone: 'Africa/Nairobi',
+            onError: null,
+            onNull: null,
+          },
+        },
+      },
+    },
+    {
+      $set: {
+        _paymentNextDayStart: {
+          $cond: [
+            { $ne: ['$_paymentDayStart', null] },
+            {
+              $dateAdd: {
+                startDate: '$_paymentDayStart',
+                unit: 'day',
+                amount: 1,
+                timezone: 'Africa/Nairobi',
+              },
+            },
+            null,
+          ],
+        },
+      },
+    },
+    {
+      $set: {
         sourceTenancyValid: {
           $and: [
             { $eq: ['$sourceTenancy.clientId', '$clientId'] },
@@ -163,10 +193,12 @@ function manualBranch(f) {
             { $eq: ['$sourceTenancy.tenantId', '$tenantId'] },
             { $eq: ['$sourceTenancy.houseId', '$houseId'] },
             { $in: ['$sourceTenancy.status', CURRENT_TENANCY_STATES] },
-            { $lte: ['$sourceTenancy.startAt', '$paymentDate'] },
+            { $ne: ['$_paymentDayStart', null] },
+            { $ne: ['$_paymentNextDayStart', null] },
+            { $lt: ['$sourceTenancy.startAt', '$_paymentNextDayStart'] },
             { $or: [
               { $eq: [{ $ifNull: ['$sourceTenancy.endAt', null] }, null] },
-              { $gt: ['$sourceTenancy.endAt', '$paymentDate'] },
+              { $gt: ['$sourceTenancy.endAt', '$_paymentDayStart'] },
             ] },
           ],
         },
@@ -193,6 +225,7 @@ function manualBranch(f) {
         amountCents: '$amountCents',
         grossReceivedCents: '$amountCents',
         paymentDate: '$paymentDate',
+        paymentDateLocal: 1,
         receivedAt: '$paymentDate',
         paymentReference: { $ifNull: ['$paymentReference', null] },
         period: 1,
@@ -465,7 +498,9 @@ function legacyManualBranch(f) {
 
 async function aggregatePage(f) {
   const stages = manualBranch(f);
-  if (f.origin !== 'MANUAL') {
+  // No origin filter means all source envelopes, including MANUAL receipts.
+  // Suppress this branch only when the caller explicitly requested another source.
+  if (f.origin && f.origin !== 'MANUAL') {
     stages[0] = { $match: { _id: { $exists: false } } };
   }
   if (!f.origin || f.origin === 'MPESA') {
@@ -569,11 +604,25 @@ function verifySourceTenancy(row, tenancy) {
     || !sameId(tenancy.tenantId, row.tenantId)
     || !CURRENT_TENANCY_STATES.includes(tenancy.status)) return false;
   if (row.sourceHouseId && !sameId(tenancy.houseId, row.sourceHouseId)) return false;
-  const eventAt = new Date(row.paymentDate || row.receivedAt).getTime();
   const startAt = new Date(tenancy.startAt).getTime();
   const endAt = tenancy.endAt == null ? null : new Date(tenancy.endAt).getTime();
+  if (!Number.isFinite(startAt)) return false;
+
+  // ManualReceipt.paymentDate is a noon-Nairobi representative timestamp.
+  // Its immutable paymentDateLocal is the authoritative calendar-day identity.
+  if (row.origin === 'MANUAL' && typeof row.paymentDateLocal === 'string') {
+    const paymentDay = dateUtil.parseNairobiDateOnly(row.paymentDateLocal);
+    if (!paymentDay) return false;
+    const dayStart = paymentDay.start.getTime();
+    const dayEnd = paymentDay.end.getTime();
+    return Number.isFinite(dayStart)
+      && Number.isFinite(dayEnd)
+      && startAt <= dayEnd
+      && (endAt == null || (Number.isFinite(endAt) && endAt > dayStart));
+  }
+
+  const eventAt = new Date(row.paymentDate || row.receivedAt).getTime();
   return Number.isFinite(eventAt)
-    && Number.isFinite(startAt)
     && eventAt >= startAt
     && (endAt == null || (Number.isFinite(endAt) && eventAt < endAt));
 }

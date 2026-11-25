@@ -351,6 +351,60 @@ describeWithMongo('G5 canonical Payments receipt-envelope read model', () => {
     expect(allRows.some((row) => [unallocated, failed, endBoundary].some((source) => String(row._id) === String(source._id)))).toBe(false);
   });
 
+  test('includes a manual receipt when its Tenancy begins later on the same Nairobi calendar day', async () => {
+    // ManualReceipt.paymentDate is a stable noon-Nairobi representative of
+    // paymentDateLocal, not the provider/operator's exact transaction time.
+    await Tenancy.updateOne(
+      { _id: tenancyB._id },
+      { $set: { startAt: date('2026-09-01T20:00:00.000Z') } }
+    );
+
+    const receipt = await ManualReceipt.create({
+      clientId: client._id,
+      estateId: estate._id,
+      houseId: houseB._id,
+      tenantId: tenant._id,
+      occupancyTenancyId: tenancyB._id,
+      paymentDateLocal: '2026-09-01',
+      paymentDate: date('2026-09-01T09:00:00.000Z'), // 12:00 Africa/Nairobi
+      period: '2026-09',
+      tenderMethod: 'MPESA',
+      amountCents: 100,
+      idempotencyKey: 'g5-ws5-manual-same-day-after-noon',
+      status: 'CONFIRMED',
+      receiptAppliedCents: 0,
+      creditAppliedCents: 0,
+      newCreditCents: 100,
+      creditBeforeCents: 800,
+      creditRemainingCents: 800,
+      creditAfterCents: 900,
+      settlementVersion: 1,
+      paymentIds: [],
+      creditPaymentIds: [],
+      creditMovementIds: [],
+    });
+    const movement = await makeMovement({
+      movementType: 'RECEIPT_SURPLUS',
+      amountCents: 100,
+      idempotencyKey: 'g5-ws5-manual-same-day-after-noon-credit',
+      source: { manualReceiptId: receipt._id },
+      tenancyId: tenancyB._id,
+    });
+    await ManualReceipt.updateOne(
+      { _id: receipt._id },
+      { $set: { creditMovementIds: [movement._id] } }
+    );
+
+    const manualOnly = await paymentService.list(client._id, null, {
+      page: 1,
+      limit: 20,
+      origin: 'MANUAL',
+    });
+    const visibleReceipt = manualOnly.items.find((row) => String(row._id) === String(receipt._id));
+    expect(visibleReceipt).toBeDefined();
+    expect(visibleReceipt.sourceTenancyStatus).toBe('VERIFIED');
+  });
+
   test('uses immutable source House filters and excludes CREDIT rows, unallocated M-PESA, Bank debits and reviews', async () => {
     const bankOnly = await paymentService.list(client._id, [estate._id], { page: 1, limit: 20, origin: 'BANK' });
     expect(bankOnly.items).toHaveLength(1);
