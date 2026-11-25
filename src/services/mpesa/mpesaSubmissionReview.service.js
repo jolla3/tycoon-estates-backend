@@ -4,7 +4,8 @@
 // "force match/approve" action.
 import { MpesaSmsSubmission, SUBMISSION_STATE } from '../../models/MpesaSmsSubmission.js';
 import { estateFilterClause } from '../../utils/estateFilter.js';
-import { audit } from '../audit.service.js';
+import { audit, auditRequired } from '../audit.service.js';
+import { openEnvelope } from '../../utils/g5Envelope.js';
 import { matchSubmission } from './mpesaSubmission.service.js';
 import { Errors } from '../../utils/errors.js';
 
@@ -16,6 +17,67 @@ export const mpesaSubmissionReviewService = {
     clientId, ...estateFilterClause(estateFilter), ...(state ? { state } : { state: { $in: REVIEWABLE } }),
   }).sort({ createdAt: -1 }).limit(Math.min(Number(limit) || 50, 200))
     .select('tenantId estateId state stateReason amountCents receiptNumber createdAt mpesaTransactionId'),
+
+  async evidence({ clientId, estateFilter, id, actor }) {
+    const scope = { _id: id, clientId, ...estateFilterClause(estateFilter) };
+    const row = await MpesaSmsSubmission.findOne(scope)
+      .select('_id clientId estateId state stateReason parserVersion template parseErrors createdAt retentionState +evidenceEnvelope')
+      .lean();
+    if (!row) throw Errors.NotFound('Submission not found');
+
+    let message = null;
+    if (typeof row.evidenceEnvelope === 'string' && row.evidenceEnvelope.length > 0) {
+      try {
+        message = openEnvelope(
+          row.evidenceEnvelope,
+          `g5sub:${row._id}:${row.clientId}`
+        );
+      } catch {
+        // Never expose envelope/key details or fall back to a digest.
+        throw Errors.ServiceUnavailable('Original submitted SMS is temporarily unavailable');
+      }
+    }
+
+    const available = message !== null;
+    const unavailableReason = available
+      ? null
+      : row.retentionState === 'NOT_RETAINED_POLICY_PENDING'
+        ? 'NOT_RETAINED'
+        : 'UNAVAILABLE';
+
+    // Required audit: do not return plaintext if the evidence-view event cannot be recorded.
+    // Raw message, digest, and encrypted envelope are deliberately excluded.
+    await auditRequired({
+      clientId: row.clientId,
+      estateId: row.estateId,
+      userId: actor?.userId,
+      action: 'G5_SUBMISSION_EVIDENCE_VIEWED',
+      resource: 'MpesaSmsSubmission',
+      resourceId: String(row._id),
+      metadata: {
+        available,
+        unavailableReason,
+        state: row.state,
+        parserVersion: row.parserVersion || null,
+        retentionState: row.retentionState || null,
+      },
+      ipAddress: actor?.ip,
+      userAgent: actor?.userAgent,
+    });
+
+    return {
+      id: String(row._id),
+      available,
+      unavailableReason,
+      message,
+      state: row.state,
+      stateReason: row.stateReason || null,
+      parserVersion: row.parserVersion || null,
+      template: row.template || null,
+      parseErrors: Array.isArray(row.parseErrors) ? row.parseErrors : [],
+      createdAt: row.createdAt,
+    };
+  },
 
   async resolve({ clientId, estateFilter, id, action, reasonCode, actor }) {
     if (!REASON_CODES.includes(reasonCode)) throw Errors.InvalidRequest('Invalid reason code');
