@@ -26,6 +26,6 @@ router.post('/tenants/:tenantId/link/rotate', ...base, admin, validate(z.object(
 router.post('/tenants/:tenantId/link/revoke', ...base, admin, c.revokeLink);
 router.get('/submissions', ...base, admin, c.listSubmissions);
 router.get('/submissions/:id/evidence', ...base, admin, validate(z.object({ id: objectId }).strict(), 'params'), c.submissionEvidence);
-router.post('/submissions/:id/resolve', ...base, admin, validate(z.object({ id: objectId }).strict(), 'params'), c.resolveSubmission);
+router.post('/submissions/:id/resolve', ...base, admin, c.resolveSubmission);
 
 export default router;
