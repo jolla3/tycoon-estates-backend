@@ -1,6 +1,6 @@
 # G3 — Short architecture handoff
 
-**Backend:** `0dbf7ef75ed6c1a39e24775aec9a86e08f7d0617`  
+**Backend:** `1ff9c85932a3d8c3de77f017c33fb988171146ba`  
 **Frontend:** `a27f20dd3244cdc7370cffa16b70c6cd32a45576`  
 **Date:** 25 November 2026
 
@@ -21,6 +21,7 @@ G3 is the financial source of truth for Tenancy, RentCharge, Payment, PaymentAll
 - Historical charges remain unchanged; plan updates are prospective.
 - Monthly rent uses the effective RENT-line due day in Africa/Nairobi; move-ins after that date start the next full monthly cycle without proration.
 - Automatic billing checks the current and next cycle, then existing Tenant/Estate credit applies oldest-first to the next eligible RentCharge.
+- A new manual receipt ensures only its exact Tenancy's eligible current/next cycle charges inside the receipt transaction before the existing credit-first settlement runs; backdated payment dates still determine tenancy ownership, not future billing period.
 - Authenticated API requests retain cookie sessions and CSRF.
 
 ## Current corrective work
@@ -33,6 +34,7 @@ G3 is the financial source of truth for Tenancy, RentCharge, Payment, PaymentAll
 6. Add HouseType editor to workspace and explain prospective impact on existing `HOUSE_TYPE` houses.
 7. Use due-day-cycle billing: move-ins on/before the due date join that cycle; later move-ins start next cycle at the full monthly amount. No proration. Auto-apply existing tenant credit oldest-first.
 8. Keep receipt evidence separate from posted Payments in aggregate reporting.
+9. Close the first-cycle timing gap: manual receipts must atomically ensure due-day-eligible current/next charges for the exact Tenancy before settlement, without calling the estate-wide generator or duplicating the credit allocator.
 
 ## Do not rebuild
 

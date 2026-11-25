@@ -17,6 +17,7 @@ import { tenancyService } from './tenancy.service.js';
 import { settleTenantAccount, tenantAccountSnapshot } from './tenantCredit.service.js';
 import { assertManualReceiptIndexesAligned } from '../utils/manualReceiptIndexReadiness.js';
 import { paymentReceiptReadModelService } from './paymentReceiptReadModel.service.js';
+import { rentService } from './rent.service.js';
 
 function normalizeReference(value) {
   const s = value == null ? '' : String(value).trim();
@@ -134,9 +135,9 @@ export const paymentService = {
   /**
    * Ordinary manual payment: house + amount + Nairobi payment date + tender method
    * + client-supplied idempotencyKey.
-   * Backend resolves occupancy tenant from the payment date, persists a ManualReceipt
-   * envelope, then settles the tenant account (existing credit first, then receipt).
-   * Does not generate RentCharges.
+   * Backend resolves occupancy from the payment date, ensures the exact Tenancy's
+   * eligible current/next due-day charges in the same transaction, persists a ManualReceipt,
+   * then settles the tenant account (existing credit first, then receipt).
    */
   async recordManual(clientId, body, estateFilter = null, actor = null, reqMeta = {}) {
     const {
@@ -280,6 +281,13 @@ export const paymentService = {
         if (!tenantDoc) {
           throw Errors.InvalidRequest('Resolved tenant does not belong to this client and estate');
         }
+
+        // Generate only this exact Tenancy's currently eligible current/next cycle(s).
+        // The payment date selected ownership above; billing uses the current Nairobi
+        // cycle so a backdated receipt cannot manufacture historic obligations.
+        await rentService.ensureDueDayChargesForTenancy(
+          clientId, covering, houseInTx, dateUtil.currentPeriod(), { session }
+        );
 
         balanceBefore = await tenantAccountSnapshot({
           clientId,

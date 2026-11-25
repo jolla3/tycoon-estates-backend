@@ -39,3 +39,27 @@ export async function resolveTillMerchant(clientId, estateId, { merchantProfileI
   if (candidates.length === 1) return { merchant: candidates[0], ambiguous: false };
   return { merchant: null, ambiguous: candidates.length > 1 };
 }
+
+/**
+ * Registration-link eligibility is wider than receipt-posting eligibility.
+ * A mapped Buy Goods Till in DRAFT/NOT_READY can receive an evidence-submission
+ * link so a tenant can inspect/submit a receipt; matchSubmission keeps it UNMATCHED
+ * until the profile becomes ACTIVE. SUSPENDED profiles never get new links.
+ */
+export async function resolveRegistrationTillMerchant(clientId, estateId, { merchantProfileId = null, session = null } = {}) {
+  const maps = await MpesaMerchantProfileEstate.find({ clientId, estateId, status: 'ACTIVE' })
+    .session(session).select('merchantProfileId').lean();
+  if (!maps.length) return { merchant: null, ambiguous: false };
+  const candidates = await MpesaMerchantProfile.find({
+    _id: { $in: maps.map((mapping) => mapping.merchantProfileId) },
+    clientId,
+    merchantType: MERCHANT_TYPE.BUY_GOODS_TILL,
+    operationalState: { $in: ['DRAFT', 'NOT_READY', 'ACTIVE'] },
+  }).session(session);
+  if (merchantProfileId) {
+    const hit = candidates.find((profile) => String(profile._id) === String(merchantProfileId));
+    return { merchant: hit || null, ambiguous: false };
+  }
+  if (candidates.length === 1) return { merchant: candidates[0], ambiguous: false };
+  return { merchant: null, ambiguous: candidates.length > 1 };
+}

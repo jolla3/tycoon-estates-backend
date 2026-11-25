@@ -8,6 +8,7 @@ const tenantId = 'tenant-1', tenancyId = 'tenancy-1';
 const house = { _id: houseId, estateId, houseNumber: '78' };
 const tenant = { _id: tenantId, estateId, name: 'Alice', phone: '+254700000001' };
 let receiptStore = null, settlementFailure = null, session;
+const ensureDueDayChargesForTenancy = jest.fn(async (...args) => { calls.push(['charges:ensure', args[4]?.session]); return { periods: [], charges: [] }; });
 const query = (value) => {
   const q = { session: jest.fn(() => q), lean: jest.fn(() => q), select: jest.fn(() => q),
     then: (resolve, reject) => Promise.resolve(value).then(resolve, reject) };
@@ -56,6 +57,7 @@ jest.unstable_mockModule('../../src/models/ManualReceipt.js', () => ({ ManualRec
 jest.unstable_mockModule('../../src/models/TenantCreditMovement.js', () => ({ TenantCreditMovement }));
 jest.unstable_mockModule('../../src/services/audit.service.js', () => ({ audit, auditRequired: jest.fn(), listAuditLogs: jest.fn() }));
 jest.unstable_mockModule('../../src/services/tenancy.service.js', () => ({ tenancyService: { resolveExplicitForManualPayment } }));
+jest.unstable_mockModule('../../src/services/rent.service.js', () => ({ rentService: { ensureDueDayChargesForTenancy } }));
 jest.unstable_mockModule('../../src/services/tenantCredit.service.js', () => ({ settleTenantAccount, tenantAccountSnapshot, creditBalanceCents: jest.fn() }));
 jest.unstable_mockModule('../../src/utils/manualReceiptIndexReadiness.js', () => ({ assertManualReceiptIndexesAligned }));
 jest.unstable_mockModule('../../src/config/database.js', () => ({
@@ -73,7 +75,7 @@ beforeEach(() => {
   Payment.find.mockImplementation(() => query([]));
   PaymentAllocation.find.mockImplementation(() => query([]));
   TenantCreditMovement.find.mockImplementation(() => query([]));
-  audit.mockClear(); resolveExplicitForManualPayment.mockClear(); settleTenantAccount.mockClear();
+  audit.mockClear(); resolveExplicitForManualPayment.mockClear(); settleTenantAccount.mockClear(); ensureDueDayChargesForTenancy.mockClear();
   tenantAccountSnapshot.mockClear(); assertManualReceiptIndexesAligned.mockClear();
   mockTransaction.mockClear(); mockEndSession.mockClear();
   session = { withTransaction: mockTransaction, endSession: mockEndSession };
@@ -88,7 +90,10 @@ describe('paymentService.recordManual orchestration', () => {
     const result = await paymentService.recordManual(clientId, body());
     expect(result.receipt).toMatchObject({ _id: 'receipt-1', tenantId, occupancyTenancyId: tenancyId });
     expect(resolveExplicitForManualPayment).toHaveBeenCalledWith(clientId, house, { tenantId, tenancyId }, expect.objectContaining({ dateStr: '2026-08-10' }), { session });
+    expect(ensureDueDayChargesForTenancy).toHaveBeenCalledWith(clientId, expect.objectContaining({ _id: tenancyId, tenantId }), house, expect.any(String), { session });
     expect(settleTenantAccount).toHaveBeenCalledWith(expect.objectContaining({ clientId, estateId, tenantId, session }));
+    expect(calls.findIndex(([name]) => name === 'charges:ensure')).toBeLessThan(calls.findIndex(([name]) => name === 'receipt:create'));
+    expect(calls.findIndex(([name]) => name === 'receipt:create')).toBeLessThan(calls.findIndex(([name]) => name === 'settle'));
     expect(ManualReceipt.create).toHaveBeenCalledWith([expect.objectContaining({ clientId, estateId, tenantId, houseId, occupancyTenancyId: tenancyId })], { session });
     expect(calls).toContainEqual(['receipt:save', session]);
     expect(mockTransaction).toHaveBeenCalledTimes(1);
@@ -98,11 +103,13 @@ describe('paymentService.recordManual orchestration', () => {
     const first = await paymentService.recordManual(clientId, body());
     const createCount = ManualReceipt.create.mock.calls.length;
     const settlementCount = settleTenantAccount.mock.calls.length;
+    const ensureCount = ensureDueDayChargesForTenancy.mock.calls.length;
     const second = await paymentService.recordManual(clientId, body());
     expect(second.reused).toBe(true);
     expect(second.receipt._id).toBe(first.receipt._id);
     expect(ManualReceipt.create).toHaveBeenCalledTimes(createCount);
     expect(settleTenantAccount).toHaveBeenCalledTimes(settlementCount);
+    expect(ensureDueDayChargesForTenancy).toHaveBeenCalledTimes(ensureCount);
   });
   test('audit logging occurs only after transaction commit and session completion', async () => {
     await paymentService.recordManual(clientId, body());

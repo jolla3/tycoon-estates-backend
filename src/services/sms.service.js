@@ -22,6 +22,7 @@ import { Errors } from '../utils/errors.js';
 import { logger } from '../config/logger.js';
 import { estateFilterClause } from '../utils/estateFilter.js';
 import { audit } from './audit.service.js';
+import { protectedSmsHistoryDetails } from './g5ProtectedSms.service.js';
 
 import {
   TEMPLATES,
@@ -819,10 +820,19 @@ export const smsService = {
     return { estateId: String(estateId), period, queued, skipped };
   },
 
-  history: (clientId, estateFilter, { limit = 100 } = {}) =>
-    SmsMessage.find({ clientId, ...estateFilterClause(estateFilter) })
+  async history(clientId, estateFilter, { limit = 100 } = {}) {
+    const rows = await SmsMessage.find({ clientId, ...estateFilterClause(estateFilter) })
+      .select('+payloadEnvelope')
       .sort({ createdAt: -1 })
-      .limit(limit),
+      .limit(limit)
+      .lean();
+
+    return rows.map((row) => {
+      if (row.deliveryMode !== 'G5_PROTECTED') return row;
+      const { payloadEnvelope, payloadKeyId, ...safeRow } = row;
+      return { ...safeRow, ...protectedSmsHistoryDetails(row) };
+    });
+  },
 
   /**
    * Claim the next ORDINARY (standard) SMS batch. Positive allowlist only: explicit null,

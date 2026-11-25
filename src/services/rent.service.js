@@ -445,6 +445,78 @@ export const rentService = {
     }
   },
 
+  /**
+   * Ensure the selected Tenancy's currently billable cycle(s) inside a caller-owned
+   * transaction. This is used by manual receipt posting to avoid the hourly-job race.
+   * It intentionally mirrors scheduled current+next cycle selection without scanning
+   * or mutating any other Tenancy in the Estate.
+   */
+  async ensureDueDayChargesForTenancy(clientId, tenancy, house, period = dateUtil.currentPeriod(), { session } = {}) {
+    if (!session) {
+      throw Errors.ServiceUnavailable('First-cycle charge ensure requires the manual receipt transaction');
+    }
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(period || ''))) {
+      throw Errors.InvalidRequest('A valid Nairobi billing period is required');
+    }
+    if (!tenancy?._id || !house?._id) {
+      throw Errors.InvalidRequest('Exact Tenancy and House are required for first-cycle billing');
+    }
+
+    const scopedHouse = await House.findOne({
+      _id: house._id,
+      clientId,
+      estateId: tenancy.estateId,
+    }).session(session).lean();
+    if (!scopedHouse) throw Errors.HouseNotFound();
+
+    const scopedTenancy = await Tenancy.findOne({
+      _id: tenancy._id,
+      clientId,
+      estateId: scopedHouse.estateId,
+      houseId: scopedHouse._id,
+      tenantId: tenancy.tenantId,
+      status: { $in: ['ACTIVE', 'CLOSED'] },
+    }).session(session).lean();
+    if (!scopedTenancy) {
+      throw Errors.Conflict('Selected Tenancy no longer belongs to the supplied House and Estate');
+    }
+    assertTenancyHouseScope({ clientId, estateId: scopedHouse.estateId, house: scopedHouse, tenancy: scopedTenancy });
+
+    // Unknown legacy billing sources must not block receipt capture. Without an
+    // authoritative plan there is no safe obligation to create, so settlement
+    // retains the receipt as tenant credit under the existing policy.
+    if (!scopedHouse.billingSource || scopedHouse.billingSource === 'LEGACY_UNCLASSIFIED') {
+      return { periods: [], charges: [] };
+    }
+
+    const nextPeriod = dateUtil.startOfMonth(period).add(1, 'month').format('YYYY-MM');
+    const currentPlan = await planLinesForHouse(scopedHouse, period, { session });
+    const currentRentLine = currentPlan.lines.find((line) => line.chargeType === 'RENT');
+    const currentDueDay = resolveDueDay(scopedHouse, currentPlan.estate, currentRentLine?.dueDay);
+
+    let selectedPeriod = period;
+    if (!isTenancyEligibleForPeriod(scopedTenancy, period, currentDueDay)) {
+      if (!tenancyStartsAfterDueDay(scopedTenancy, period, currentDueDay)) {
+        return { periods: [], charges: [] };
+      }
+
+      // A late joiner's first full cycle is next month. Do not pre-bill the
+      // following month as well merely because the tenancy already spans it.
+      const nextPlan = await planLinesForHouse(scopedHouse, nextPeriod, { session });
+      const nextRentLine = nextPlan.lines.find((line) => line.chargeType === 'RENT');
+      const nextDueDay = resolveDueDay(scopedHouse, nextPlan.estate, nextRentLine?.dueDay);
+      if (!isTenancyEligibleForPeriod(scopedTenancy, nextPeriod, nextDueDay)) {
+        return { periods: [], charges: [] };
+      }
+      selectedPeriod = nextPeriod;
+    }
+
+    const charges = await this.ensureChargesForTenancy(
+      clientId, scopedTenancy, scopedHouse, selectedPeriod, { session }
+    );
+    return { periods: charges.length ? [selectedPeriod] : [], charges };
+  },
+
   async ensureChargesForHouse(clientId, house, tenant, period, { session, tenancyId = null } = {}) {
     await assertBillingIndexesAligned();
     let tenancy = null;

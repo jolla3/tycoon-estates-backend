@@ -1,6 +1,6 @@
 # G3 — Tenancy and financial architecture
 
-**Backend baseline:** `main` `0dbf7ef75ed6c1a39e24775aec9a86e08f7d0617` (21 November 2026)  
+**Backend baseline:** `main` `1ff9c85932a3d8c3de77f017c33fb988171146ba` (25 November 2026)  
 **Frontend baseline:** `main` `a27f20dd3244cdc7370cffa16b70c6cd32a45576`  
 **Scope:** G3 financial ownership. G5 receipt evidence remains governed by `docs/g5/*`; G4 bank-provider integration remains governed by `docs/provider-contracts/*` and the backend G4 documents.
 
@@ -34,6 +34,18 @@ Property / Estate / HouseType / House
 - The automatic scheduler checks the current and next due-day cycles. If a Tenancy starts after the current due day but overlaps the next cycle's due day, it creates the next cycle's first full RentCharge immediately. Explicit period generation does not silently move a request into another period.
 - HouseType/House billing plan versions are resolved against the actual `RentCharge.period`. A prospective plan change effective next month must not leak into the current charge.
 - After charges are created or found idempotently, the existing `tenantCredit.service.js` applies Tenant/Estate credit oldest-first across eligible obligations. Credit reduces the next eligible outstanding RentCharge; unused credit remains carried forward. Do not add a second wallet or rewrite historical movements.
+
+## 2.2 Manual receipt and first-cycle orchestration
+
+`payment.service.js` owns the manual receipt transaction. It must not call the estate-wide scheduled generator: that path scans every Tenancy in an Estate, holds its own transaction boundaries, and applies credit in separate per-tenant transactions. Calling it from a receipt would be broader than the operator's selected payment and risks nested transactions.
+
+Instead, `rent.service.js` exposes one session-required exact-Tenancy operation. Using the current Nairobi billing period, it checks that Tenancy against the effective RENT due day for that period and the following period. It calls the existing `ensureChargesForTenancy()` for each eligible period, which resolves the actual period's plan version and writes the RentCharge plus charge Ledger entry under the caller's session. No other tenancy is enumerated or billed.
+
+The `recordManual()` transaction then invokes the existing `settleTenantAccount()` with the ManualReceipt. Its established order remains tenant credit first, new receipt second, remainder to credit. The resulting RentCharge, Ledger, ManualReceipt, Payment, PaymentAllocation and credit movements either all commit or all roll back. The idempotency lookup exits before orchestration, so retrying a recorded receipt does not create another obligation or settlement.
+
+A receipt date continues to select the historical Tenancy that owned the occupancy. It must not be used as the generator's billing-period anchor; otherwise a backdated receipt could create historic/future obligations for the wrong operational cycle. If neither current nor next due-day date is covered by the selected Tenancy, the receipt remains genuine tenant credit. This is safer than manufacturing a rent obligation to consume every receipt.
+
+**Rejected alternatives / review:** Do not call `generateChargesForEstate()` from `recordManual()` (scope explosion, nested transaction/side-effect mismatch); do not duplicate `planReceiptWithCredit()` or `settleTenantAccount()` in payment code; do not bypass due-day eligibility to force a charge; do not make a new receipt's existence depend on SMS or provider availability.
 
 ## 2. Records and service ownership
 

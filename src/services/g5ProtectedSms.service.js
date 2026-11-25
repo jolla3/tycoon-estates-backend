@@ -75,6 +75,39 @@ export function buildProtectedSmsAad({
 }
 
 /**
+ * Decrypt the actual SMS only for a caller-scoped history read.
+ * The envelope remains encrypted at rest; history must show the exact message
+ * (including the payment URL) so an operator can verify what the tenant receives.
+ */
+export function protectedSmsHistoryDetails(row) {
+  const unavailable = { phoneNumber: '[protected]', message: 'Protected message content unavailable.' };
+  if (!row?.payloadEnvelope) return unavailable;
+  try {
+    const aad = buildProtectedSmsAad({
+      messageId: row._id,
+      clientId: row.clientId,
+      estateId: row.estateId,
+      tenantId: row.tenantId,
+      linkId: row.g5LinkId,
+      linkVersion: row.g5LinkVersion,
+      type: row.type,
+      notificationVersion: row.notificationVersion,
+      idempotencyKey: row.idempotencyKey,
+    });
+    const payload = JSON.parse(openEnvelope(row.payloadEnvelope, aad));
+    if (typeof payload.body !== 'string' || !payload.body.trim()
+      || typeof payload.phone !== 'string' || !payload.phone.trim()) return unavailable;
+    return { phoneNumber: payload.phone, message: payload.body };
+  } catch {
+    return unavailable;
+  }
+}
+
+export function protectedSmsHistoryPreview(row) {
+  return protectedSmsHistoryDetails(row).message;
+}
+
+/**
  * Insert a protected outbox row. Accepts an optional caller-owned session.
  * Generates a fresh AEAD nonce on every call (including transaction retries).
  */
