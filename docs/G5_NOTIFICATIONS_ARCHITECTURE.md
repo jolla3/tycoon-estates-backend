@@ -25,6 +25,14 @@ The existing `tenantService.create()` owns one MongoDB transaction and `tenancyS
 - Never call Celcom during the transaction. Dispatch only after commit. If a secure REQUIRED M-PESA link/outbox write fails, abort the registration transaction; if the estate is not M-PESA eligible, ordinary registration proceeds without that dependency.
 - Use stable Tenant/link/message IDs across transaction callback retries; create a fresh AES-GCM nonce each callback attempt.
 
+## Protected SMS history and provider diagnostics
+
+`SmsMessage.payloadEnvelope` remains encrypted and excluded by default from database projections. The tenant-detail read model may explicitly select the envelope, reconstruct the same authenticated AAD as the dispatcher, decrypt the message in memory, and return only a safe preview. Redact the entire `/pay#t=` bearer URL to `[private payment link]`; never return the token, raw envelope or decrypted recipient number. If authenticated decryption fails, return a fixed unavailable-content label rather than falling back to `[protected]` or exposing ciphertext.
+
+Celcom HTTP failures may include a useful response description. The adapter retains only an allow-listed error code and short description after redacting the exact API key, recipient, message body, URLs and token/phone patterns. Do not persist `error.response.data` or request config wholesale. This makes a 4xx operationally diagnosable without turning failure history into a second copy of private message contents.
+
+The SMS provider adapter normalizes Kenyan local mobile values (`07…` / `01…`) to Celcom's international `254…` form and removes a leading `+` from already international `+254…` values. It does not guess a malformed or unsupported number. Tenant contact data remains unchanged in MongoDB; normalization happens only at the provider boundary.
+
 ## Bank instructions and missing phone
 
 The current `BankAccount` model represents a connected statement-ingestion account; it does not establish that the account is the estate's rent-receiving destination. Do not decrypt or publish it in tenant SMS. Until a dedicated authoritative/verified payment-instruction source is available, the ordinary registration and estate-transfer message tells the tenant to contact the estate office for verified bank details. Tenant phone is optional at API and persistence boundaries. Missing phone does not abort tenant/tenancy registration or a transfer; the SMS is skipped and an audit event records the reason.
