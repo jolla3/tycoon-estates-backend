@@ -319,3 +319,50 @@ throughout:
     written, syntax-checked, gated behind MONGODB_URI, and require a
     replica set for the transactional tests specifically
 ```
+
+## Reports V1 — cross-domain reporting contract
+
+Reports V1 is a read-only reporting capability that consumes existing
+financial and operational records. It is documented separately from the
+G4 Banking product scope: reporting may read G3, G4 and G5 records, but
+this does not make G5 part of G4 and does not introduce a second ledger,
+payment model or provider workflow.
+
+The approved Reports V1 areas are:
+
+1. **Overview** — portfolio, occupancy, billing and collection indicators.
+2. **Revenue & Collections** — separate gross source receipts, charge
+   allocations, obligations settled and tenant-credit applications.
+3. **Arrears** — stable paginated charge details with tenancy identity,
+   saved due dates and overdue classification; do not claim unverified
+   historical coverage as a complete ledger balance.
+4. **Occupancy** — current house occupancy by estate and house type.
+5. **M-PESA Collections** — canonical provider receipt states and a
+   separate count-only summary of SMS evidence submission states.
+
+### Backend reporting invariants
+
+- Reuse the canonical M-PESA receipt summary; do not duplicate its reducer
+  or count child G3 Payment rows as additional receipts.
+- SMS-submission summaries expose counts only. They must not expose retained
+  evidence envelopes, raw SMS, digests, secrets or claimed SMS amounts as
+  received money.
+- Keep gross receipts, PaymentAllocation, CREDIT-origin applications,
+  Tenant credit movements and RentCharge projections as distinct measures.
+- Enforce the same client, estate, entitlement and date boundaries for
+  report summaries and their drilldowns.
+- Use bounded, deterministic arrears pagination. Do not return an unbounded
+  arrears array inside the management summary.
+- Do not create a new financial model, posting path, ledger or provider
+  operation for reporting.
+
+### Reports V1 specifications
+
+- [Backend Reports V1 product requirements](docs/REPORTS_V1_PRD.md)
+- [Backend Reports V1 architecture and API contract](docs/REPORTS_V1_ARCHITECTURE.md)
+- [Backend architecture summary](architecture-summary.md#cross-domain-reports-v1-handoff)
+
+**Status:** documentation and architecture contract only. This section
+does not claim the Reports V1 endpoints or frontend integration have been
+implemented or tested.
+
