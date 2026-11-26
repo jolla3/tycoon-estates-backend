@@ -1,5 +1,19 @@
 # G4 Architecture Summary: Agent Context and Execution Rules
 
+## Cross-domain Reports V1 handoff — 26 November 2026
+
+This reporting contract is separate from the G4 Banking PRD/architecture scope; it reads existing G3/G4/G5 records and does not make G5 part of G4.
+
+- **Backend reporting requirements:** docs/REPORTS_V1_PRD.md
+- **Aggregation and API design:** docs/REPORTS_V1_ARCHITECTURE.md
+- **Existing management route:** GET /reports/management; refine charge/occupancy DTOs and stop embedding unbounded arrears rows.
+- **Arrears:** GET /reports/arrears becomes a stable server-paginated charge list with tenancyId and saved dueDate.
+- **M-PESA receipts:** reuse GET /mpesa-transactions/summary and src/services/mpesaReceiptSummary.js unchanged.
+- **M-PESA SMS evidence:** add GET /mpesa-collection/submissions/summary; count SUBMISSION_STATE values only. Submitted amountCents is not received money.
+- **Financial boundary:** gross source receipts, PaymentAllocation, CREDIT applications and RentCharge balances are separate measures. Payment child rows must never be counted as a second gross receipt.
+- **Credit boundary:** Tenant credit is keyed by clientId + estateId + tenantId and is never netted across estates or duplicated per tenancy. Historical coverage currently remains UNVERIFIED.
+- **No new ledger/model/provider flow.** This is a read-only report contract. Code and tests are not changed by this documentation branch.
+
 **Status:** Architecture locked for implementation. Documentation is the implementation contract.  
 **Repository:** `jolla3/tycoon-estates-backend`  
 **Verified GitHub `main` HEAD (rechecked):** `e0b49c2f122be7ae3ed14eaba9eecfeacee7ce13` (`v2.0.3`, 2026-11-10 20:14:31 +0300)  
